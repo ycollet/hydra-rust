@@ -1,0 +1,22 @@
+# Rust
+target/
+**/*.rs.bk
+
+# AI tools
+CLAUDE.md
+.claude/
+.cursor/
+.copilot/
+.continue/
+.aider/
+.aider*
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store

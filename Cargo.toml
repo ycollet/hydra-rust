@@ -1,0 +1,23 @@
+[package]
+name = "hydra-rust"
+version = "0.1.0"
+edition = "2024"
+description = "Hydra visual synthesizer — Rhai scripting to GLSL, rendered via OpenGL"
+license = "AGPL-3.0-or-later"
+
+[dependencies]
+rhai = { version = "1", features = ["no_module", "no_time"] }
+glow = "0.16"
+ab_glyph = "0.2"
+nokhwa = { version = "0.10", features = ["input-native"] }
+log = "0.4"
+eframe = "0.33.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+env_logger = "0.11"
+regex = "1"
+rfd = "0.15"
+
+[[bin]]
+name = "hydra"
+path = "src/bin/hydra/main.rs"
