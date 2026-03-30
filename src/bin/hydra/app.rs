@@ -4,8 +4,10 @@ use std::time::Instant;
 
 use eframe::egui;
 use egui::{Color32, FontId, TextBuffer};
+#[cfg(feature = "webcam")]
 use hydra_rust::eval::SourceRequest;
 use hydra_rust::renderer::{self, RenderUniforms, ShaderRenderer};
+#[cfg(feature = "webcam")]
 use hydra_rust::source::{CameraStatus, SourceManager, NUM_SOURCES};
 use serde::{Deserialize, Serialize};
 
@@ -67,6 +69,7 @@ pub struct HydraApp {
     editor_opacity: f32,
     sidebar_open: bool,
     current_file: Option<PathBuf>,
+    #[cfg(feature = "webcam")]
     source_manager: SourceManager,
 }
 
@@ -88,6 +91,7 @@ impl HydraApp {
             editor_opacity: 1.0,
             sidebar_open: false,
             current_file: session.current_file,
+            #[cfg(feature = "webcam")]
             source_manager: SourceManager::new(),
         };
         if !app.code.is_empty() {
@@ -124,6 +128,7 @@ impl HydraApp {
                     renderer.upload_text(td);
                 }
                 renderer.compile_buffers(&result.shaders, result.render_mode);
+                #[cfg(feature = "webcam")]
                 for req in &result.source_requests {
                     match req {
                         SourceRequest::InitCam { slot, camera_index } => {
@@ -188,6 +193,7 @@ impl HydraApp {
 
         renderer.ensure_resolution(res_w, res_h);
 
+        #[cfg(feature = "webcam")]
         for slot in 0..NUM_SOURCES {
             if let Some(frame) = self.source_manager.poll(slot) {
                 renderer.upload_source(slot, &frame);
@@ -241,36 +247,39 @@ impl HydraApp {
                 ui.separator();
                 ui.add_space(4.0);
 
-                ui.horizontal(|ui| {
-                    ui.label("Cameras");
-                    if ui.small_button("Refresh").clicked() {
-                        self.source_manager.refresh_cameras();
+                #[cfg(feature = "webcam")]
+                {
+                    ui.horizontal(|ui| {
+                        ui.label("Cameras");
+                        if ui.small_button("Refresh").clicked() {
+                            self.source_manager.refresh_cameras();
+                        }
+                    });
+                    let cameras = self.source_manager.cameras();
+                    if cameras.is_empty() {
+                        ui.small("No cameras found");
+                    } else {
+                        for cam in cameras {
+                            ui.small(format!("[{}] {}", cam.index, cam.name));
+                        }
                     }
-                });
-                let cameras = self.source_manager.cameras();
-                if cameras.is_empty() {
-                    ui.small("No cameras found");
-                } else {
-                    for cam in cameras {
-                        ui.small(format!("[{}] {}", cam.index, cam.name));
-                    }
-                }
 
-                ui.add_space(4.0);
-                for slot in 0..NUM_SOURCES {
-                    match self.source_manager.status(slot) {
-                        CameraStatus::Idle => {}
-                        CameraStatus::Opening { camera_index } => {
-                            ui.small(format!("s{slot}: opening cam {camera_index}..."));
-                        }
-                        CameraStatus::Active { camera_name, width, height, .. } => {
-                            ui.small(format!("s{slot}: {camera_name} ({width}x{height})"));
-                        }
-                        CameraStatus::Error { message, .. } => {
-                            ui.colored_label(
-                                Color32::from_rgb(255, 80, 80),
-                                format!("s{slot}: {message}"),
-                            );
+                    ui.add_space(4.0);
+                    for slot in 0..NUM_SOURCES {
+                        match self.source_manager.status(slot) {
+                            CameraStatus::Idle => {}
+                            CameraStatus::Opening { camera_index } => {
+                                ui.small(format!("s{slot}: opening cam {camera_index}..."));
+                            }
+                            CameraStatus::Active { camera_name, width, height, .. } => {
+                                ui.small(format!("s{slot}: {camera_name} ({width}x{height})"));
+                            }
+                            CameraStatus::Error { message, .. } => {
+                                ui.colored_label(
+                                    Color32::from_rgb(255, 80, 80),
+                                    format!("s{slot}: {message}"),
+                                );
+                            }
                         }
                     }
                 }
@@ -404,6 +413,7 @@ impl eframe::App for HydraApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&glow::Context>) {
+        #[cfg(feature = "webcam")]
         self.source_manager.stop_all();
         self.session().save();
     }

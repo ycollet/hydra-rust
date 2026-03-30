@@ -12,6 +12,7 @@ pub enum RenderMode {
     All,
 }
 
+#[cfg(feature = "webcam")]
 #[derive(Debug, Clone)]
 pub enum SourceRequest {
     InitCam { slot: usize, camera_index: u32 },
@@ -21,6 +22,7 @@ pub struct EvalResult {
     pub shaders: [Option<String>; 4],
     pub render_mode: RenderMode,
     pub text_data: Option<TextData>,
+    #[cfg(feature = "webcam")]
     pub source_requests: Vec<SourceRequest>,
 }
 
@@ -422,6 +424,7 @@ struct PatchState {
     buffers: [Option<Node>; 4],
     render_mode: RenderMode,
     text_data: Option<TextData>,
+    #[cfg(feature = "webcam")]
     source_requests: Vec<SourceRequest>,
 }
 
@@ -526,6 +529,7 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
         buffers: [None, None, None, None],
         render_mode: RenderMode::default(),
         text_data: None,
+        #[cfg(feature = "webcam")]
         source_requests: Vec::new(),
     }));
 
@@ -589,31 +593,34 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
         });
     }
 
-    // initCam(slot) — default camera (index 0)
+    #[cfg(feature = "webcam")]
     {
-        let s = state.clone();
-        engine.register_fn("initCam", move |slot: i64| {
-            if slot >= 100 {
-                let idx = (slot - 100) as usize;
-                s.lock().unwrap().source_requests.push(SourceRequest::InitCam {
-                    slot: idx,
-                    camera_index: 0,
-                });
-            }
-        });
-    }
-    // initCam(slot, camera_index)
-    {
-        let s = state.clone();
-        engine.register_fn("initCam", move |slot: i64, cam: i64| {
-            if slot >= 100 {
-                let idx = (slot - 100) as usize;
-                s.lock().unwrap().source_requests.push(SourceRequest::InitCam {
-                    slot: idx,
-                    camera_index: cam as u32,
-                });
-            }
-        });
+        // initCam(slot) — default camera (index 0)
+        {
+            let s = state.clone();
+            engine.register_fn("initCam", move |slot: i64| {
+                if slot >= 100 {
+                    let idx = (slot - 100) as usize;
+                    s.lock().unwrap().source_requests.push(SourceRequest::InitCam {
+                        slot: idx,
+                        camera_index: 0,
+                    });
+                }
+            });
+        }
+        // initCam(slot, camera_index)
+        {
+            let s = state.clone();
+            engine.register_fn("initCam", move |slot: i64, cam: i64| {
+                if slot >= 100 {
+                    let idx = (slot - 100) as usize;
+                    s.lock().unwrap().source_requests.push(SourceRequest::InitCam {
+                        slot: idx,
+                        camera_index: cam as u32,
+                    });
+                }
+            });
+        }
     }
 
     let mut scope = Scope::new();
@@ -653,6 +660,7 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
         shaders,
         render_mode: patch.render_mode,
         text_data: patch.text_data.take(),
+        #[cfg(feature = "webcam")]
         source_requests: std::mem::take(&mut patch.source_requests),
     })
 }
