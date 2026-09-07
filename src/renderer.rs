@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use glow::{HasContext, PixelUnpackData};
 
+use crate::audio::NUM_FFT_BINS;
 use crate::eval::RenderMode;
 use crate::shader;
 use crate::source::{SourceFrame, NUM_SOURCES};
@@ -16,6 +17,7 @@ pub struct RenderUniforms {
     pub beat: f32,
     pub tempo: f32,
     pub phase: f32,
+    pub fft: [f32; NUM_FFT_BINS],
 }
 
 const NUM_BUFFERS: usize = 4;
@@ -29,6 +31,7 @@ struct ProgramState {
     loc_beat: Option<glow::UniformLocation>,
     loc_tempo: Option<glow::UniformLocation>,
     loc_phase: Option<glow::UniformLocation>,
+    loc_fft: Option<glow::UniformLocation>,
     loc_buffers: [Option<glow::UniformLocation>; NUM_BUFFERS],
     loc_text0: Option<glow::UniformLocation>,
     loc_sources: [Option<glow::UniformLocation>; NUM_SOURCES],
@@ -249,6 +252,7 @@ fn resolve_program_state(gl: &glow::Context, program: glow::Program) -> ProgramS
             loc_beat: gl.get_uniform_location(program, "iBeat"),
             loc_tempo: gl.get_uniform_location(program, "iTempo"),
             loc_phase: gl.get_uniform_location(program, "iPhase"),
+            loc_fft: gl.get_uniform_location(program, "iFft"),
             loc_buffers: [
                 gl.get_uniform_location(program, "iBuffer0"),
                 gl.get_uniform_location(program, "iBuffer1"),
@@ -349,6 +353,9 @@ pub fn render_multipass(
             }
             if let Some(ref loc) = p.loc_phase {
                 gl.uniform_1_f32(Some(loc), u.phase);
+            }
+            if let Some(ref loc) = p.loc_fft {
+                gl.uniform_1_f32_slice(Some(loc), &u.fft);
             }
             if let Some(ref loc) = p.loc_resolution {
                 gl.uniform_2_f32(Some(loc), u.resolution[0], u.resolution[1]);

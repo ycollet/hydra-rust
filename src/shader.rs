@@ -18,6 +18,7 @@ uniform vec2 iMouse;
 uniform float iBeat;
 uniform float iTempo;
 uniform float iPhase;
+uniform float iFft[8]; // must match audio::NUM_FFT_BINS
 uniform sampler2D iBuffer0;
 uniform sampler2D iBuffer1;
 uniform sampler2D iBuffer2;

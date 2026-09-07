@@ -6,9 +6,13 @@ use eframe::egui;
 use egui::{Color32, FontId, TextBuffer};
 #[cfg(feature = "webcam")]
 use hydra_rust::eval::SourceRequest;
+#[cfg(feature = "audio")]
+use hydra_rust::eval::AudioRequest;
 use hydra_rust::renderer::{self, RenderUniforms, ShaderRenderer};
 #[cfg(feature = "webcam")]
 use hydra_rust::source::{CameraStatus, SourceManager, NUM_SOURCES};
+#[cfg(feature = "audio")]
+use hydra_rust::audio::AudioManager;
 use serde::{Deserialize, Serialize};
 
 use crate::highlight::HydraHighlighter;
@@ -71,6 +75,8 @@ pub struct HydraApp {
     current_file: Option<PathBuf>,
     #[cfg(feature = "webcam")]
     source_manager: SourceManager,
+    #[cfg(feature = "audio")]
+    audio_manager: AudioManager,
 }
 
 impl HydraApp {
@@ -93,6 +99,8 @@ impl HydraApp {
             current_file: session.current_file,
             #[cfg(feature = "webcam")]
             source_manager: SourceManager::new(),
+            #[cfg(feature = "audio")]
+            audio_manager: AudioManager::new(),
         };
         if !app.code.is_empty() {
             app.evaluate();
@@ -134,6 +142,15 @@ impl HydraApp {
                         SourceRequest::InitCam { slot, camera_index } => {
                             self.source_manager.init_cam(*slot, *camera_index);
                         }
+                    }
+                }
+                #[cfg(feature = "audio")]
+                for req in &result.audio_requests {
+                    match req {
+                        AudioRequest::SetBins(n) => self.audio_manager.set_bins(*n),
+                        AudioRequest::SetCutoff(c) => self.audio_manager.set_cutoff(*c),
+                        AudioRequest::SetScale(s) => self.audio_manager.set_scale(*s),
+                        AudioRequest::SetSmooth(s) => self.audio_manager.set_smooth(*s),
                     }
                 }
                 self.error = None;
@@ -200,6 +217,11 @@ impl HydraApp {
             }
         }
 
+        #[cfg(feature = "audio")]
+        let fft = self.audio_manager.poll();
+        #[cfg(not(feature = "audio"))]
+        let fft = [0.0; hydra_rust::audio::NUM_FFT_BINS];
+
         let snap = renderer.snapshot();
         let ping = renderer.ping().clone();
         let uniforms = RenderUniforms {
@@ -209,6 +231,7 @@ impl HydraApp {
             beat: time * (self.tempo / 60.0),
             tempo: self.tempo,
             phase: 0.0,
+            fft,
         };
 
         let cb = eframe::egui_glow::CallbackFn::new(move |_info, painter| {

@@ -3,6 +3,8 @@ use std::sync::{Arc, Mutex};
 use rhai::{Array, CustomType, Dynamic, Engine, ImmutableString, Scope, TypeBuilder};
 
 use crate::text::{self, TextData};
+#[cfg(feature = "audio")]
+use crate::audio::NUM_FFT_BINS;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub enum RenderMode {
@@ -18,13 +20,34 @@ pub enum SourceRequest {
     InitCam { slot: usize, camera_index: u32 },
 }
 
+#[cfg(feature = "audio")]
+#[derive(Debug, Clone, Copy)]
+pub enum AudioRequest {
+    SetBins(usize),
+    SetCutoff(f32),
+    SetScale(f32),
+    SetSmooth(f32),
+}
+
 pub struct EvalResult {
     pub shaders: [Option<String>; 4],
     pub render_mode: RenderMode,
     pub text_data: Option<TextData>,
     #[cfg(feature = "webcam")]
     pub source_requests: Vec<SourceRequest>,
+    #[cfg(feature = "audio")]
+    pub audio_requests: Vec<AudioRequest>,
 }
+
+/// The `a` audio object (`a.fft[i]`, `a.setBins(...)`, ...).
+#[cfg(feature = "audio")]
+#[derive(Debug, Clone, Copy)]
+struct Audio;
+
+/// Returned by `a.fft`; indexing it yields a `GlslExpr` reading `iFft[i]`.
+#[cfg(feature = "audio")]
+#[derive(Debug, Clone, Copy)]
+struct AudioFft;
 
 #[derive(Debug, Clone)]
 enum Arg {
@@ -255,6 +278,11 @@ fn as_arg(d: Dynamic) -> Arg {
     }
 }
 
+#[cfg(feature = "audio")]
+fn dyn_to_f64(d: Dynamic) -> f64 {
+    d.as_float().unwrap_or_else(|_| d.as_int().map(|i| i as f64).unwrap_or(0.0))
+}
+
 fn fmt_f(v: f64) -> String {
     if v.fract() == 0.0 { format!("{v:.1}") } else { format!("{v}") }
 }
@@ -426,6 +454,8 @@ struct PatchState {
     text_data: Option<TextData>,
     #[cfg(feature = "webcam")]
     source_requests: Vec<SourceRequest>,
+    #[cfg(feature = "audio")]
+    audio_requests: Vec<AudioRequest>,
 }
 
 fn register_functions(engine: &mut Engine) {
@@ -531,6 +561,8 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
         text_data: None,
         #[cfg(feature = "webcam")]
         source_requests: Vec::new(),
+        #[cfg(feature = "audio")]
+        audio_requests: Vec::new(),
     }));
 
     let mut engine = Engine::new();
@@ -623,6 +655,44 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
         }
     }
 
+    #[cfg(feature = "audio")]
+    {
+        engine.register_get("fft", |_a: &mut Audio| -> AudioFft { AudioFft });
+
+        engine.register_indexer_get(|_f: &mut AudioFft, i: i64| -> GlslExpr {
+            GlslExpr(format!("iFft[{}]", (i.max(0) as usize).min(NUM_FFT_BINS - 1)))
+        });
+        engine.register_indexer_get(|_f: &mut AudioFft, e: GlslExpr| -> GlslExpr {
+            GlslExpr(format!("iFft[int(mod({}, {}.0))]", e.0, NUM_FFT_BINS))
+        });
+
+        {
+            let s = state.clone();
+            engine.register_fn("setBins", move |_a: Audio, n: Dynamic| {
+                let n = dyn_to_f64(n).max(1.0) as usize;
+                s.lock().unwrap().audio_requests.push(AudioRequest::SetBins(n));
+            });
+        }
+        {
+            let s = state.clone();
+            engine.register_fn("setCutoff", move |_a: Audio, c: Dynamic| {
+                s.lock().unwrap().audio_requests.push(AudioRequest::SetCutoff(dyn_to_f64(c) as f32));
+            });
+        }
+        {
+            let s = state.clone();
+            engine.register_fn("setScale", move |_a: Audio, sc: Dynamic| {
+                s.lock().unwrap().audio_requests.push(AudioRequest::SetScale(dyn_to_f64(sc) as f32));
+            });
+        }
+        {
+            let s = state.clone();
+            engine.register_fn("setSmooth", move |_a: Audio, sm: Dynamic| {
+                s.lock().unwrap().audio_requests.push(AudioRequest::SetSmooth(dyn_to_f64(sm) as f32));
+            });
+        }
+    }
+
     let mut scope = Scope::new();
     scope.push_constant("o0", 0_i64);
     scope.push_constant("o1", 1_i64);
@@ -638,6 +708,11 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
     scope.push_constant("phase", GlslExpr("iPhase".to_string()));
     scope.push_constant("mouseX", GlslExpr("iMouse.x".to_string()));
     scope.push_constant("mouseY", GlslExpr("iMouse.y".to_string()));
+    // Pushed as a regular (non-constant) variable, unlike the GlslExpr constants above:
+    // Rhai forbids mutable-receiver method calls on constants, and `a.setBins(...)`
+    // dispatches as one even though the registered fns take `Audio` by value.
+    #[cfg(feature = "audio")]
+    scope.push("a", Audio);
 
     let result = engine
         .eval_with_scope::<Dynamic>(&mut scope, code)
@@ -662,6 +737,8 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
         text_data: patch.text_data.take(),
         #[cfg(feature = "webcam")]
         source_requests: std::mem::take(&mut patch.source_requests),
+        #[cfg(feature = "audio")]
+        audio_requests: std::mem::take(&mut patch.audio_requests),
     })
 }
 
