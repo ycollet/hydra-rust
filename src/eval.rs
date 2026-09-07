@@ -224,7 +224,7 @@ const FUNCTIONS: &[FnMeta] = &[
     FnMeta { name: "modulateKaleid", kind: OpKind::Modulate, defaults: &[4.0] },
     FnMeta { name: "modulateScrollX", kind: OpKind::Modulate, defaults: &[0.5, 0.0] },
     FnMeta { name: "modulateScrollY", kind: OpKind::Modulate, defaults: &[0.5, 0.0] },
-    FnMeta { name: "modulatePixelate", kind: OpKind::Modulate, defaults: &[10.0, 13.0] },
+    FnMeta { name: "modulatePixelate", kind: OpKind::Modulate, defaults: &[10.0, 3.0] },
     FnMeta { name: "modulateHue", kind: OpKind::Modulate, defaults: &[1.0] },
 ];
 

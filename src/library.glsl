@@ -342,20 +342,20 @@ vec4 sub(vec4 _c0, vec4 _c1, float amount) {
 
 vec2 modulateRepeat(vec2 _st, vec4 _c0, float repeatX, float repeatY, float offsetX, float offsetY) {
   vec2 st = _st * vec2(repeatX, repeatY);
-  st.x += _c0.r * offsetX;
-  st.y += _c0.g * offsetY;
+  st.x += step(1.0, mod(st.y, 2.0)) + _c0.r * offsetX;
+  st.y += step(1.0, mod(st.x, 2.0)) + _c0.g * offsetY;
   return fract(st);
 }
 
 vec2 modulateRepeatX(vec2 _st, vec4 _c0, float reps, float offset) {
   vec2 st = _st * vec2(reps, 1.0);
-  st.y += _c0.r * offset;
+  st.y += step(1.0, mod(st.x, 2.0)) + _c0.r * offset;
   return fract(st);
 }
 
 vec2 modulateRepeatY(vec2 _st, vec4 _c0, float reps, float offset) {
   vec2 st = _st * vec2(1.0, reps);
-  st.x += _c0.r * offset;
+  st.x += step(1.0, mod(st.y, 2.0)) + _c0.r * offset;
   return fract(st);
 }
 
@@ -364,10 +364,9 @@ vec2 modulateKaleid(vec2 _st, vec4 _c0, float nSides) {
   float r = length(st);
   float a = atan(st.y, st.x);
   float pi = 2.0 * 3.1416;
-  float sides = nSides + _c0.r * nSides;
-  a = mod(a, pi / sides);
-  a = abs(a - pi / sides / 2.0);
-  return r * vec2(cos(a), sin(a));
+  a = mod(a, pi / nSides);
+  a = abs(a - pi / nSides / 2.0);
+  return (_c0.r + r) * vec2(cos(a), sin(a));
 }
 
 vec2 modulateScrollX(vec2 _st, vec4 _c0, float scrollX, float speed) {
@@ -386,5 +385,5 @@ vec2 modulatePixelate(vec2 _st, vec4 _c0, float multiple, float offset) {
 }
 
 vec2 modulateHue(vec2 _st, vec4 _c0, float amount) {
-  return _st + (_c0.gb - 0.5) * amount;
+  return _st + (vec2(_c0.g - _c0.r, _c0.b - _c0.g) * amount * (1.0 / iResolution));
 }
