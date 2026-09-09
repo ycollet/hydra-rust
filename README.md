@@ -120,6 +120,34 @@ for e in data:
 
 </details>
 
+### Known-broken sketches: p5.js dependency
+
+hydra-rust has no JavaScript engine and doesn't load, execute, or manage
+any external JS libraries. Some sketches instantiate
+[p5.js](https://p5js.org/) directly (`p1 = new P5()` and similar) to draw
+extra overlay graphics alongside the hydra visuals — this is a whole
+separate creative-coding framework with no Rust equivalent here, so these
+sketches can't work regardless of any hydra-rust conformance fixes.
+Regenerate this list from a fresh `check_corpus_failures.json` (see above)
+yourself:
+
+```bash
+python3 -c "
+import json
+data = json.load(open('check_corpus_failures.json'))
+for e in data:
+    if 'P5' in e['error'] or \"'p5'\" in e['error']:
+        print(e['file'], '-', e['error'])
+"
+```
+
+<details>
+<summary>11 affected sketches (snapshot from this session)</summary>
+
+`C5VZw1nFAp9CHIJp`, `Tgcly25jfyE8j63N`, `W7uusYNDDH2eHGzB`, `WGu8wEalERTIjqyz`, `YmrdxMAsWx7rNw8O`, `lDGDJnvXdpq57VBZ`, `q5Lye9Lf1oJHnXIy`, `qYAgIWCEtjZ47ZuR`, `uqWfXFRF9cBAfZCY`, `wnJi3Zs4i6Ym7Y3e`, `5GT1XJqVnxbPhaJj`
+
+</details>
+
 ## Example
 
 ```
