@@ -128,7 +128,15 @@ Pipeline order (each step's output feeds the next):
    leading digit (`.1`); Rhai's number grammar requires `0.1`. Inserts a `0`
    before any `.` immediately followed by a digit, unless the character
    immediately before it is itself a digit (so `1.5` is untouched).
-3. **`autolet::insert_missing_let`** — JS creates a variable implicitly on
+3. **`jskeywords::rewrite_keywords`** — `var`/`null`/`new`/`await`/`async`/
+   `import` are all Rhai-*reserved* keywords with no meaning registered to
+   them; any bare appearance is already an unconditional hard syntax error,
+   so substituting them can only help or be neutral. `var` → `let` (same
+   declaration semantics here); `null` → `()` (Rhai's unit value); `new`,
+   `await`, `async`, `import` are dropped entirely (`new Foo()` becomes a
+   plain `Foo()` call — still fails gracefully with "Function not found" if
+   `Foo` isn't registered, rather than a hard parse stop).
+4. **`autolet::insert_missing_let`** — JS creates a variable implicitly on
    first assignment (`speed = 0.8`); Rhai requires `let`. Inserts `let `
    before the first bare assignment to any name not already known (built-in
    globals from §3, or a name this same pass already declared earlier in the
