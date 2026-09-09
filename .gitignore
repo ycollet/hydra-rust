@@ -20,3 +20,8 @@ CLAUDE.md
 
 # OS
 .DS_Store
+
+# Third-party sketch corpus (CC BY-NC-SA, not project code)
+/sketches/
+check_corpus_failures.json
+sketches_failures*.json

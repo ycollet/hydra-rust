@@ -2,6 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use rhai::{Array, CustomType, Dynamic, Engine, ImmutableString, Scope, TypeBuilder};
 
+use crate::arrow;
 use crate::asi;
 use crate::numlit;
 use crate::text::{self, TextData};
@@ -560,6 +561,7 @@ fn register_patterns(engine: &mut Engine) {
 
 pub fn eval(code: &str) -> Result<EvalResult, String> {
     let code = &numlit::insert_leading_zero(code);
+    let code = &arrow::strip_zero_arg_arrows(code);
     let code = &asi::insert_missing_semicolons(code);
     let state = Arc::new(Mutex::new(PatchState {
         buffers: [None, None, None, None],

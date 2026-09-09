@@ -3,9 +3,11 @@ pub mod eval;
 pub mod renderer;
 pub mod shader;
 pub mod source;
+mod arrow;
 mod asi;
 mod glsl;
 mod numlit;
+mod srcscan;
 mod text;
 
 pub use eval::{eval, EvalResult, RenderMode};
