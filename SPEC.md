@@ -136,7 +136,17 @@ Pipeline order (each step's output feeds the next):
    `await`, `async`, `import` are dropped entirely (`new Foo()` becomes a
    plain `Foo()` call — still fails gracefully with "Function not found" if
    `Foo` isn't registered, rather than a hard parse stop).
-4. **`autolet::insert_missing_let`** — JS creates a variable implicitly on
+4. **`iife::unwrap_iife`** — real sketches sometimes wrap their entire body
+   in an immediately-invoked function expression to load an extension
+   library first: `(() => { BODY })()` (`async`/`await` already stripped
+   by step 3), optionally followed by a promise `.then(...)`/`.catch(...)`/
+   `.finally(...)` handler chain. Rhai has no `=>` closure syntax at all, so
+   this was a hard parse failure. Matches only the *zero-parameter* form
+   (`(hydra) => {...}` is left alone, since unwrapping would leave `hydra`
+   unbound in the body) and reduces the whole construct — handler chain
+   included — to a bare Rhai block `{ BODY }`, evaluated as a normal
+   statement sequence.
+5. **`autolet::insert_missing_let`** — JS creates a variable implicitly on
    first assignment (`speed = 0.8`); Rhai requires `let`. Inserts `let `
    before the first bare assignment to any name not already known (built-in
    globals from §3, or a name this same pass already declared earlier in the
