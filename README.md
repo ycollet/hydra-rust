@@ -78,6 +78,48 @@ This prints an ok/failed count and the top failure buckets, and writes
 `check_corpus_failures.json` (path, error message per failing file) for
 deeper digging.
 
+### Known-broken sketches: buffers beyond `o0`-`o3`
+
+hydra-rust only implements 4 output buffers (`o0`-`o3`), matching real
+hydra.js's own limit. Some sketches in the public corpus reference a higher
+buffer index (`o4` up through a clearly-typo'd `o10987654`) — these are
+errors in the original sketch itself, not a hydra-rust conformance gap;
+real hydra.js would reject them too. Regenerate this list from a fresh
+`check_corpus_failures.json` (see above) yourself:
+
+```bash
+python3 -c "
+import json, re
+data = json.load(open('check_corpus_failures.json'))
+for e in data:
+    if re.match(r'Variable not found: o\d+ \(', e['error']):
+        print(e['file'], '-', e['error'])
+"
+```
+
+<details>
+<summary>73 affected sketches (snapshot from this session)</summary>
+
+- `o4` (21): `43ehBRbYLii1rgGr`, `5Y6r4TLGs4XKYwhx`, `6zFiWCIoFUL7n9zu`, `ASb5VAew6t067Uio`, `AjFg5nRpovNBAj9D`, `E4G3DklYF1VpyfMT`, `FxkxjQsCeFFrWsdg`, `LNfi2yCRY09SxR64`, `QslDk59HczJhaGWU`, `V2fAjkgS8zhheRvV`, `VFUf3eU67CTCUfYU`, `Y7Sqy1P4KF3CLxUU`, `YugaBL74Pw7UAvlb`, `aodWvyME0xI3jB7m`, `fEIXp0g0ZwQEy9Rc`, `gtwk9SGqsA4GODJd`, `jQX9cpluGcoqpQQA`, `jRZpwk5wxZzLT1J5`, `lJ6hhdXr33ilhfBF`, `lQVEtvWCB3EqXWp3`, `utYYjFUXRO9Z5Aut`
+- `o5` (15): `1wZaiXko9Q8rZ1xq`, `Ad4xNLD6ulqEmE49`, `Kx101mGtz5DURR5S`, `MdFbiECQ8QehBQqM`, `NXkmjf7HlaBHRudY`, `OpJyLigtwsL4cvWf`, `QsWyj8GGPOTvQGhO`, `WJiPmKwkFxJzR9r7`, `cvV5LkExVeKRWE6U`, `eT1yrdX0o8AuZeUz`, `grROnRapw2HQmIZG`, `lb8bQm84w1odpl0O`, `mV8VYA3ocxtMZhPA`, `meKGY0Moy4fEVWSG`, `woXLgY6LNG1guPuk`
+- `o6` (1): `bQYkAZjS9nqonZZG`
+- `o7` (4): `UhzTt8jwuXe5SoIm`, `mZTRwQ6OMVqNedC8`, `n2XHJwUdnVbJWlHQ`, `sKtOcGCST9KO4xRG`
+- `o8` (1): `ZbUc4DqjLaNZqbO9`
+- `o9` (13): `6G6CLqvkidogMUdd`, `8itoqbZZAUjcAeIW`, `E12OtehM9mjervDh`, `GfMCIDzf3w4hoh1o`, `GkITmLwMSDjeTwN6`, `MJYf0b50mx4wXtdl`, `Nn8PFsdthS2IKAUi`, `X4F3usrzrUug9dw6`, `cT3MMWRcVaXIkMhu`, `dZXW1u8WtF9rCcGX`, `gHgaqS49pXTGPKUA`, `gklcdmy2g6XHihCT`, `hg9GlnmsDsO1tPX9`
+- `o01` (1): `nRRv1dSvh9H2Smdd`
+- `o10` (6): `3QaV3GPfXuVTXVdl`, `Z00AluW5X9YIH7MO`, `Z4yRrk1zPnLmlYzD`, `gS2SkOwfTkWWcCYX`, `gUGuVXXtTKPXIOVH`, `zQstjilmm0sIguBf`
+- `o15` (2): `LSNsUz1ZztltknzU`, `xocvis4HiEP5IbtC`
+- `o23` (1): `PtNdKcbmywLb9dXQ`
+- `o33` (1): `KiLRvow6fWplbsV8`
+- `o50` (1): `ZOhOb9d4CM8GIkD0`
+- `o80` (1): `cwkEVTIJ8xudVoXM`
+- `o90` (1): `BGqMcfJ3zcEh77lH`
+- `o000` (2): `izVQdfNptnfPO2UD`, `octWoCHdMUIiHrHh`
+- `o100` (1): `rT0hWBYtmopYe4AL`
+- `o10987654` (1): `EGrgeAl4On3Rxv2D`
+
+</details>
+
 ## Example
 
 ```
