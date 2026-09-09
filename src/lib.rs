@@ -3,6 +3,7 @@ pub mod eval;
 pub mod renderer;
 pub mod shader;
 pub mod source;
+mod argtrunc;
 mod arrow;
 mod asi;
 mod glsl;
