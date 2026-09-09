@@ -49,6 +49,35 @@ cargo test           # tests
 cargo clippy         # lint
 ```
 
+## Testing against a real-world sketch corpus
+
+`examples/check_corpus.rs` is a fast conformance-testing harness: it walks a
+directory of `.hydra` files and evaluates each one directly through
+`hydra_rust::eval()` — no window, no GL context — so tens of thousands of
+sketches check in seconds. It buckets failures by cause (missing function,
+syntax error, etc.) and writes the full per-file failure list to JSON.
+
+The sketches themselves are **not** part of this repository (they're
+third-party, user-submitted, CC BY-NC-SA-licensed content — see
+`sketches/` in `.gitignore`). Fetch a fresh copy of the public
+[hydra-synth](https://hydra.ojack.xyz/) sketch database instead:
+
+```bash
+python3 scripts/fetch_corpus.py          # downloads into ./sketches
+```
+
+Then run the harness against it (built with `--release` and every feature,
+so `a.fft[...]`/`initCam(...)`-style sketches don't fail just because those
+functions aren't registered):
+
+```bash
+cargo run --release --features webcam,audio --example check_corpus -- sketches
+```
+
+This prints an ok/failed count and the top failure buckets, and writes
+`check_corpus_failures.json` (path, error message per failing file) for
+deeper digging.
+
 ## Example
 
 ```
