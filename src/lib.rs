@@ -11,6 +11,7 @@ mod glsl;
 mod mathjs;
 mod numlit;
 mod patcall;
+mod quotes;
 mod srcscan;
 mod text;
 

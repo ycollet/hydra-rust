@@ -9,6 +9,7 @@ use crate::autolet;
 use crate::mathjs;
 use crate::numlit;
 use crate::patcall;
+use crate::quotes;
 use crate::text::{self, TextData};
 #[cfg(feature = "audio")]
 use crate::audio::NUM_FFT_BINS;
@@ -666,6 +667,7 @@ fn register_patterns(engine: &mut Engine) {
 }
 
 pub fn eval(code: &str) -> Result<EvalResult, String> {
+    let code = &quotes::rewrite_single_quoted_strings(code);
     let code = &numlit::insert_leading_zero(code);
     let code = &autolet::insert_missing_let(code);
     let code = &mathjs::rewrite_math(code);
