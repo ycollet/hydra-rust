@@ -135,8 +135,19 @@ Pipeline order (each step's output feeds the next):
    declaration semantics here); `null` → `()` (Rhai's unit value); `new`,
    `await`, `async`, `import` are dropped entirely (`new Foo()` becomes a
    plain `Foo()` call — still fails gracefully with "Function not found" if
-   `Foo` isn't registered, rather than a hard parse stop).
-4. **`iife::unwrap_iife`** — real sketches sometimes wrap their entire body
+   `Foo` isn't registered, rather than a hard parse stop). Also rewrites JS
+   strict (in)equality `===`/`!==` ("not a valid operator... Should it be
+   '=='?") to `==`/`!=` — Rhai's equality already compares by value and
+   type here.
+4. **`jsfunctions::rewrite_function_decls`** — rewrites JS *named* function
+   declarations (`function name(a, b=1) { ... }`) into Rhai's own,
+   similarly-shaped function syntax (`fn name(a, b) { ... }` — spelled
+   `fn`, and without default parameter values). Real sketches sometimes
+   define small helpers this way (easing curves, custom math). Anonymous
+   `function(...) { ... }` expressions are left alone, since they're often
+   used as closures capturing outer-scope variables, which Rhai's
+   `fn`-defined functions can't do.
+5. **`iife::unwrap_iife`** — real sketches sometimes wrap their entire body
    in an immediately-invoked function expression to load an extension
    library first: `(() => { BODY })()` (`async`/`await` already stripped
    by step 3), optionally followed by a promise `.then(...)`/`.catch(...)`/
