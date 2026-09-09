@@ -30,6 +30,12 @@ mod imp {
         smooth: f32,
     }
 
+    impl Default for AudioManager {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
     impl AudioManager {
         pub fn new() -> Self {
             let samples: Arc<Mutex<VecDeque<f32>>> =
