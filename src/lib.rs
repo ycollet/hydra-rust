@@ -5,6 +5,7 @@ pub mod shader;
 pub mod source;
 mod asi;
 mod glsl;
+mod numlit;
 mod text;
 
 pub use eval::{eval, EvalResult, RenderMode};
