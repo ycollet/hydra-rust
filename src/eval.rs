@@ -6,6 +6,7 @@ use crate::argtrunc;
 use crate::arrow;
 use crate::asi;
 use crate::autolet;
+use crate::jskeywords;
 use crate::mathjs;
 use crate::numlit;
 use crate::patcall;
@@ -729,6 +730,7 @@ fn register_patterns(engine: &mut Engine) {
 pub fn eval(code: &str) -> Result<EvalResult, String> {
     let code = &quotes::rewrite_single_quoted_strings(code);
     let code = &numlit::insert_leading_zero(code);
+    let code = &jskeywords::rewrite_keywords(code);
     let code = &autolet::insert_missing_let(code);
     let code = &mathjs::rewrite_math(code);
     let code = &argtrunc::truncate_extra_args(code);
@@ -896,6 +898,14 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
     });
     engine.register_fn("screencap", || {
         log::warn!("screencap() ignored: saving a screenshot is not supported");
+    });
+    // Real hydra.js sketches use loadScript(url) to fetch and run an
+    // extension library at runtime (custom functions, effects, etc.).
+    // There's no dynamic module-loading/execution here, so this is a
+    // no-op: the sketch's *other* effects still get a chance to evaluate,
+    // even though whatever the extension would have defined won't exist.
+    engine.register_fn("loadScript", |url: ImmutableString| {
+        log::warn!("loadScript(\"{url}\") ignored: dynamic script loading is not supported");
     });
 
     engine.register_get("x", |_m: &mut Mouse| -> GlslExpr { GlslExpr("iMouse.x".to_string()) });
