@@ -586,7 +586,36 @@ fn register_glsl_ops(engine: &mut Engine) {
     glsl_fn!("exp");
     glsl_fn!("log");
 
+    // Plain-number overloads (no GlslExpr involved) for the same unary
+    // functions - e.g. `sin(4)` with a static literal, not a reactive value.
+    engine.register_fn("sin", |x: f64| -> f64 { x.sin() });
+    engine.register_fn("sin", |x: i64| -> f64 { (x as f64).sin() });
+    engine.register_fn("cos", |x: f64| -> f64 { x.cos() });
+    engine.register_fn("cos", |x: i64| -> f64 { (x as f64).cos() });
+    engine.register_fn("tan", |x: f64| -> f64 { x.tan() });
+    engine.register_fn("tan", |x: i64| -> f64 { (x as f64).tan() });
+    engine.register_fn("asin", |x: f64| -> f64 { x.asin() });
+    engine.register_fn("asin", |x: i64| -> f64 { (x as f64).asin() });
+    engine.register_fn("acos", |x: f64| -> f64 { x.acos() });
+    engine.register_fn("acos", |x: i64| -> f64 { (x as f64).acos() });
+    engine.register_fn("atan", |x: f64| -> f64 { x.atan() });
+    engine.register_fn("atan", |x: i64| -> f64 { (x as f64).atan() });
+    engine.register_fn("abs", |x: f64| -> f64 { x.abs() });
+    engine.register_fn("abs", |x: i64| -> i64 { x.abs() });
     engine.register_fn("fract", |x: f64| -> f64 { x.fract() });
+    engine.register_fn("fract", |x: i64| -> f64 { (x as f64).fract() });
+    engine.register_fn("floor", |x: f64| -> f64 { x.floor() });
+    engine.register_fn("floor", |x: i64| -> i64 { x });
+    engine.register_fn("ceil", |x: f64| -> f64 { x.ceil() });
+    engine.register_fn("ceil", |x: i64| -> i64 { x });
+    engine.register_fn("sqrt", |x: f64| -> f64 { x.sqrt() });
+    engine.register_fn("sqrt", |x: i64| -> f64 { (x as f64).sqrt() });
+    engine.register_fn("sign", |x: f64| -> f64 { x.signum() });
+    engine.register_fn("sign", |x: i64| -> i64 { x.signum() });
+    engine.register_fn("exp", |x: f64| -> f64 { x.exp() });
+    engine.register_fn("exp", |x: i64| -> f64 { (x as f64).exp() });
+    engine.register_fn("log", |x: f64| -> f64 { x.ln() });
+    engine.register_fn("log", |x: i64| -> f64 { (x as f64).ln() });
 
     macro_rules! glsl_fn2 {
         ($name:literal) => {
