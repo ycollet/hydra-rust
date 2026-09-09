@@ -6,6 +6,7 @@ use crate::argtrunc;
 use crate::arrow;
 use crate::asi;
 use crate::autolet;
+use crate::iife;
 use crate::jskeywords;
 use crate::mathjs;
 use crate::numlit;
@@ -731,6 +732,7 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
     let code = &quotes::rewrite_single_quoted_strings(code);
     let code = &numlit::insert_leading_zero(code);
     let code = &jskeywords::rewrite_keywords(code);
+    let code = &iife::unwrap_iife(code);
     let code = &autolet::insert_missing_let(code);
     let code = &mathjs::rewrite_math(code);
     let code = &argtrunc::truncate_extra_args(code);

@@ -8,6 +8,7 @@ mod arrow;
 mod asi;
 mod autolet;
 mod glsl;
+mod iife;
 mod jskeywords;
 mod mathjs;
 mod numlit;
