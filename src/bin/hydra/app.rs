@@ -80,7 +80,7 @@ pub struct HydraApp {
 }
 
 impl HydraApp {
-    pub fn new(cc: &eframe::CreationContext) -> Self {
+    pub fn new(cc: &eframe::CreationContext, file_arg: Option<PathBuf>) -> Self {
         cc.egui_ctx.set_theme(egui::ThemePreference::Dark);
 
         let session = Session::load();
@@ -102,6 +102,17 @@ impl HydraApp {
             #[cfg(feature = "audio")]
             audio_manager: AudioManager::new(),
         };
+
+        if let Some(path) = file_arg {
+            match std::fs::read_to_string(&path) {
+                Ok(contents) => {
+                    app.code = contents;
+                    app.current_file = Some(path);
+                }
+                Err(e) => log::warn!("failed to read {}: {e}", path.display()),
+            }
+        }
+
         if !app.code.is_empty() {
             app.evaluate();
         }
