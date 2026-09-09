@@ -2,6 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use rhai::{Array, CustomType, Dynamic, Engine, ImmutableString, Scope, TypeBuilder};
 
+use crate::asi;
 use crate::text::{self, TextData};
 #[cfg(feature = "audio")]
 use crate::audio::NUM_FFT_BINS;
@@ -557,6 +558,7 @@ fn register_patterns(engine: &mut Engine) {
 }
 
 pub fn eval(code: &str) -> Result<EvalResult, String> {
+    let code = &asi::insert_missing_semicolons(code);
     let state = Arc::new(Mutex::new(PatchState {
         buffers: [None, None, None, None],
         render_mode: RenderMode::default(),

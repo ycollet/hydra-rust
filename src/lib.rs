@@ -3,6 +3,7 @@ pub mod eval;
 pub mod renderer;
 pub mod shader;
 pub mod source;
+mod asi;
 mod glsl;
 mod text;
 
