@@ -61,6 +61,13 @@ struct AudioFft;
 #[derive(Debug, Clone, Copy)]
 struct Mouse;
 
+/// The `window` object (`window.innerWidth`, `window.innerHeight`), a
+/// browser-DOM stand-in some sketches reference for canvas size instead of
+/// (or alongside) the bare `width`/`height` globals - both map to the same
+/// `iResolution` uniform here.
+#[derive(Debug, Clone, Copy)]
+struct Window;
+
 #[derive(Debug, Clone)]
 enum Arg {
     Lit(f64),
@@ -836,6 +843,12 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
 
     engine.register_get("x", |_m: &mut Mouse| -> GlslExpr { GlslExpr("iMouse.x".to_string()) });
     engine.register_get("y", |_m: &mut Mouse| -> GlslExpr { GlslExpr("iMouse.y".to_string()) });
+    engine.register_get("innerWidth", |_w: &mut Window| -> GlslExpr {
+        GlslExpr("iResolution.x".to_string())
+    });
+    engine.register_get("innerHeight", |_w: &mut Window| -> GlslExpr {
+        GlslExpr("iResolution.y".to_string())
+    });
 
     let mut scope = Scope::new();
     scope.push_constant("o0", 0_i64);
@@ -852,9 +865,12 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
     scope.push_constant("phase", GlslExpr("iPhase".to_string()));
     scope.push_constant("mouseX", GlslExpr("iMouse.x".to_string()));
     scope.push_constant("mouseY", GlslExpr("iMouse.y".to_string()));
+    scope.push_constant("width", GlslExpr("iResolution.x".to_string()));
+    scope.push_constant("height", GlslExpr("iResolution.y".to_string()));
     // Pushed as a regular (non-constant) variable, same reasoning as `a` below:
-    // property-getter dispatch on a constant `Mouse` isn't worth risking.
+    // property-getter dispatch on a constant `Mouse`/`Window` isn't worth risking.
     scope.push("mouse", Mouse);
+    scope.push("window", Window);
     // Pushed as a regular (non-constant) variable, unlike the GlslExpr constants above:
     // Rhai forbids mutable-receiver method calls on constants, and `a.setBins(...)`
     // dispatches as one even though the registered fns take `Audio` by value.
