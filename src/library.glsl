@@ -336,6 +336,16 @@ vec4 b(vec4 _c0, float scale, float offset) {
   return vec4(_c0.r, _c0.g, _c0.b * scale + offset, _c0.a);
 }
 
+vec4 a(vec4 _c0, float scale, float offset) {
+  return vec4(_c0.a * scale + offset);
+}
+
+vec4 sum(vec4 _c0, float scaleR, float scaleG, float scaleB, float scaleA) {
+  vec4 v = _c0 * vec4(scaleR, scaleG, scaleB, scaleA);
+  float s = v.r + v.g + v.b + v.a;
+  return vec4(vec3(s), _c0.a);
+}
+
 vec4 sub(vec4 _c0, vec4 _c1, float amount) {
   return (_c0 - _c1) * amount + _c0 * (1.0 - amount);
 }

@@ -208,6 +208,8 @@ const FUNCTIONS: &[FnMeta] = &[
     FnMeta { name: "r", kind: OpKind::Color, defaults: &[1.0, 0.0] },
     FnMeta { name: "g", kind: OpKind::Color, defaults: &[1.0, 0.0] },
     FnMeta { name: "b", kind: OpKind::Color, defaults: &[1.0, 0.0] },
+    FnMeta { name: "a", kind: OpKind::Color, defaults: &[1.0, 0.0] },
+    FnMeta { name: "sum", kind: OpKind::Color, defaults: &[1.0, 1.0, 1.0, 1.0] },
     FnMeta { name: "add", kind: OpKind::Blend, defaults: &[1.0] },
     FnMeta { name: "mult", kind: OpKind::Blend, defaults: &[1.0] },
     FnMeta { name: "blend", kind: OpKind::Blend, defaults: &[0.5] },
