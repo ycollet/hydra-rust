@@ -6,6 +6,7 @@ pub mod source;
 mod arrow;
 mod asi;
 mod glsl;
+mod mathjs;
 mod numlit;
 mod srcscan;
 mod text;

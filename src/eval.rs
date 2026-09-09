@@ -4,6 +4,7 @@ use rhai::{Array, CustomType, Dynamic, Engine, ImmutableString, Scope, TypeBuild
 
 use crate::arrow;
 use crate::asi;
+use crate::mathjs;
 use crate::numlit;
 use crate::text::{self, TextData};
 #[cfg(feature = "audio")]
@@ -51,6 +52,10 @@ struct Audio;
 #[cfg(feature = "audio")]
 #[derive(Debug, Clone, Copy)]
 struct AudioFft;
+
+/// The `mouse` object (`mouse.x`, `mouse.y`), matching real hydra.js.
+#[derive(Debug, Clone, Copy)]
+struct Mouse;
 
 #[derive(Debug, Clone)]
 enum Arg {
@@ -280,6 +285,30 @@ fn as_arg(d: Dynamic) -> Arg {
         Arg::Expr(Pattern::from_array(d.into_array().unwrap()).to_glsl())
     } else {
         Arg::Lit(0.0)
+    }
+}
+
+// s0-s3 constants are 100-103; indices below 100 are internal buffers.
+fn idx_to_source(idx: i64) -> Node {
+    if idx >= 100 {
+        Node::source("ext_src", vec![Arg::Lit((idx - 100) as f64)])
+    } else {
+        Node::source("src", vec![Arg::Lit(idx as f64)])
+    }
+}
+
+/// Converts the "other" operand of a blend/modulate call into a `Node`.
+/// Real hydra.js lets you write e.g. `.modulate(s0, 0.5)`, treating `s0`/`o1`
+/// as first-class chainable source objects; here they're bare `i64`
+/// constants, so this accepts that raw index directly (equivalent to
+/// `src(s0)`) as well as an already-built `Node` chain.
+fn as_node(d: Dynamic) -> Result<Node, Box<rhai::EvalAltResult>> {
+    if d.is::<Node>() {
+        Ok(d.cast::<Node>())
+    } else if let Ok(idx) = d.as_int() {
+        Ok(idx_to_source(idx))
+    } else {
+        Err(format!("expected a source or a chain, found {}", d.type_name()).into())
     }
 }
 
@@ -515,10 +544,54 @@ fn register_glsl_ops(engine: &mut Engine) {
 
     glsl_fn!("sin");
     glsl_fn!("cos");
+    glsl_fn!("tan");
+    glsl_fn!("asin");
+    glsl_fn!("acos");
+    glsl_fn!("atan");
     glsl_fn!("abs");
     glsl_fn!("fract");
+    glsl_fn!("floor");
+    glsl_fn!("ceil");
+    glsl_fn!("sqrt");
+    glsl_fn!("sign");
+    glsl_fn!("exp");
+    glsl_fn!("log");
 
     engine.register_fn("fract", |x: f64| -> f64 { x.fract() });
+
+    macro_rules! glsl_fn2 {
+        ($name:literal) => {
+            engine.register_fn($name, |a: GlslExpr, b: GlslExpr| -> GlslExpr {
+                GlslExpr(format!(concat!($name, "({}, {})"), a.0, b.0))
+            });
+            engine.register_fn($name, |a: GlslExpr, b: f64| -> GlslExpr {
+                GlslExpr(format!(concat!($name, "({}, {})"), a.0, fmt_f(b)))
+            });
+            engine.register_fn($name, |a: f64, b: GlslExpr| -> GlslExpr {
+                GlslExpr(format!(concat!($name, "({}, {})"), fmt_f(a), b.0))
+            });
+            engine.register_fn($name, |a: GlslExpr, b: i64| -> GlslExpr {
+                GlslExpr(format!(concat!($name, "({}, {})"), a.0, fmt_f(b as f64)))
+            });
+            engine.register_fn($name, |a: i64, b: GlslExpr| -> GlslExpr {
+                GlslExpr(format!(concat!($name, "({}, {})"), fmt_f(a as f64), b.0))
+            });
+        };
+    }
+
+    // Two-argument passthroughs. `atan` is registered again here for GLSL's
+    // two-argument `atan(y, x)` overload (JS's `Math.atan2`), alongside the
+    // one-argument form above.
+    glsl_fn2!("pow");
+    glsl_fn2!("min");
+    glsl_fn2!("max");
+    glsl_fn2!("atan");
+
+    // Plain-number overloads (no GlslExpr involved) for the same four names.
+    engine.register_fn("pow", |a: f64, b: f64| -> f64 { a.powf(b) });
+    engine.register_fn("min", |a: f64, b: f64| -> f64 { a.min(b) });
+    engine.register_fn("max", |a: f64, b: f64| -> f64 { a.max(b) });
+    engine.register_fn("atan", |a: f64, b: f64| -> f64 { a.atan2(b) });
 }
 
 fn register_patterns(engine: &mut Engine) {
@@ -561,6 +634,7 @@ fn register_patterns(engine: &mut Engine) {
 
 pub fn eval(code: &str) -> Result<EvalResult, String> {
     let code = &numlit::insert_leading_zero(code);
+    let code = &mathjs::rewrite_math(code);
     let code = &arrow::strip_zero_arg_arrows(code);
     let code = &asi::insert_missing_semicolons(code);
     let state = Arc::new(Mutex::new(PatchState {
@@ -595,13 +669,7 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
         });
     }
     // s0-s3 constants are 100-103; indices below 100 are internal buffers
-    engine.register_fn("src", |idx: i64| -> Node {
-        if idx >= 100 {
-            Node::source("ext_src", vec![Arg::Lit((idx - 100) as f64)])
-        } else {
-            Node::source("src", vec![Arg::Lit(idx as f64)])
-        }
-    });
+    engine.register_fn("src", idx_to_source);
     {
         let s = state.clone();
         engine.register_fn("text", move |txt: ImmutableString| -> Node {
@@ -701,6 +769,9 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
         }
     }
 
+    engine.register_get("x", |_m: &mut Mouse| -> GlslExpr { GlslExpr("iMouse.x".to_string()) });
+    engine.register_get("y", |_m: &mut Mouse| -> GlslExpr { GlslExpr("iMouse.y".to_string()) });
+
     let mut scope = Scope::new();
     scope.push_constant("o0", 0_i64);
     scope.push_constant("o1", 1_i64);
@@ -716,6 +787,9 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
     scope.push_constant("phase", GlslExpr("iPhase".to_string()));
     scope.push_constant("mouseX", GlslExpr("iMouse.x".to_string()));
     scope.push_constant("mouseY", GlslExpr("iMouse.y".to_string()));
+    // Pushed as a regular (non-constant) variable, same reasoning as `a` below:
+    // property-getter dispatch on a constant `Mouse` isn't worth risking.
+    scope.push("mouse", Mouse);
     // Pushed as a regular (non-constant) variable, unlike the GlslExpr constants above:
     // Rhai forbids mutable-receiver method calls on constants, and `a.setBins(...)`
     // dispatches as one even though the registered fns take `Audio` by value.
@@ -859,13 +933,16 @@ fn register_blend(engine: &mut Engine, meta: &FnMeta) {
     let defaults = meta.defaults;
     let n = defaults.len();
 
-    engine.register_fn(name, move |node: Node, other: Node| {
-        node.push_blend(name, other, fill_args(&[], defaults))
+    engine.register_fn(name, move |node: Node, other: Dynamic| -> Result<Node, Box<rhai::EvalAltResult>> {
+        Ok(node.push_blend(name, as_node(other)?, fill_args(&[], defaults)))
     });
     if n >= 1 {
-        engine.register_fn(name, move |node: Node, other: Node, a: Dynamic| {
-            node.push_blend(name, other, fill_args(&[as_arg(a)], defaults))
-        });
+        engine.register_fn(
+            name,
+            move |node: Node, other: Dynamic, a: Dynamic| -> Result<Node, Box<rhai::EvalAltResult>> {
+                Ok(node.push_blend(name, as_node(other)?, fill_args(&[as_arg(a)], defaults)))
+            },
+        );
     }
 }
 
@@ -874,40 +951,50 @@ fn register_modulate(engine: &mut Engine, meta: &FnMeta) {
     let defaults = meta.defaults;
     let n = defaults.len();
 
-    engine.register_fn(name, move |node: Node, other: Node| {
-        node.push_modulate(name, other, fill_args(&[], defaults))
+    engine.register_fn(name, move |node: Node, other: Dynamic| -> Result<Node, Box<rhai::EvalAltResult>> {
+        Ok(node.push_modulate(name, as_node(other)?, fill_args(&[], defaults)))
     });
     if n >= 1 {
-        engine.register_fn(name, move |node: Node, other: Node, a: Dynamic| {
-            node.push_modulate(name, other, fill_args(&[as_arg(a)], defaults))
-        });
+        engine.register_fn(
+            name,
+            move |node: Node, other: Dynamic, a: Dynamic| -> Result<Node, Box<rhai::EvalAltResult>> {
+                Ok(node.push_modulate(name, as_node(other)?, fill_args(&[as_arg(a)], defaults)))
+            },
+        );
     }
     if n >= 2 {
-        engine.register_fn(name, move |node: Node, other: Node, a: Dynamic, b: Dynamic| {
-            node.push_modulate(name, other, fill_args(&[as_arg(a), as_arg(b)], defaults))
-        });
+        engine.register_fn(
+            name,
+            move |node: Node, other: Dynamic, a: Dynamic, b: Dynamic| -> Result<Node, Box<rhai::EvalAltResult>> {
+                Ok(node.push_modulate(
+                    name,
+                    as_node(other)?,
+                    fill_args(&[as_arg(a), as_arg(b)], defaults),
+                ))
+            },
+        );
     }
     if n >= 3 {
         engine.register_fn(
             name,
-            move |node: Node, other: Node, a: Dynamic, b: Dynamic, c: Dynamic| {
-                node.push_modulate(
+            move |node: Node, other: Dynamic, a: Dynamic, b: Dynamic, c: Dynamic| -> Result<Node, Box<rhai::EvalAltResult>> {
+                Ok(node.push_modulate(
                     name,
-                    other,
+                    as_node(other)?,
                     fill_args(&[as_arg(a), as_arg(b), as_arg(c)], defaults),
-                )
+                ))
             },
         );
     }
     if n >= 4 {
         engine.register_fn(
             name,
-            move |node: Node, other: Node, a: Dynamic, b: Dynamic, c: Dynamic, d: Dynamic| {
-                node.push_modulate(
+            move |node: Node, other: Dynamic, a: Dynamic, b: Dynamic, c: Dynamic, d: Dynamic| -> Result<Node, Box<rhai::EvalAltResult>> {
+                Ok(node.push_modulate(
                     name,
-                    other,
+                    as_node(other)?,
                     fill_args(&[as_arg(a), as_arg(b), as_arg(c), as_arg(d)], defaults),
-                )
+                ))
             },
         );
     }
