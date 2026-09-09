@@ -671,6 +671,32 @@ fn register_patterns(engine: &mut Engine) {
         p.offset = o as f64;
         p
     });
+    // ease(name)/fit(lo, hi) are real hydra.js pattern utilities (easing
+    // curves, value-range remapping); no interpolation-curve or remapping
+    // machinery exists here, so these pass the pattern through unchanged
+    // rather than hard-erroring.
+    engine.register_fn("ease", |arr: Array| -> Pattern { Pattern::from_array(arr) });
+    engine.register_fn("ease", |p: Pattern| -> Pattern { p });
+    engine.register_fn("ease", |arr: Array, _name: Dynamic| -> Pattern {
+        Pattern::from_array(arr)
+    });
+    engine.register_fn("ease", |p: Pattern, _name: Dynamic| -> Pattern { p });
+    engine.register_fn("fit", |arr: Array| -> Pattern { Pattern::from_array(arr) });
+    engine.register_fn("fit", |p: Pattern| -> Pattern { p });
+    engine.register_fn("fit", |arr: Array, _lo: Dynamic| -> Pattern { Pattern::from_array(arr) });
+    engine.register_fn("fit", |p: Pattern, _lo: Dynamic| -> Pattern { p });
+    engine.register_fn("fit", |arr: Array, _lo: Dynamic, _hi: Dynamic| -> Pattern {
+        Pattern::from_array(arr)
+    });
+    engine.register_fn("fit", |p: Pattern, _lo: Dynamic, _hi: Dynamic| -> Pattern { p });
+
+    // Rhai's built-in Array::reverse() mutates in place and returns unit
+    // (Rust convention); JS's Array.prototype.reverse() returns the array
+    // itself for chaining (`[0,1].reverse().smooth()`). Override to match.
+    engine.register_fn("reverse", |mut arr: Array| -> Array {
+        arr.reverse();
+        arr
+    });
 }
 
 pub fn eval(code: &str) -> Result<EvalResult, String> {
@@ -840,6 +866,9 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
     engine.register_fn("setResolution", |w: i64, h: i64| {
         log::warn!("setResolution({w}, {h}) ignored: script-driven resize is not supported");
     });
+    engine.register_fn("screencap", || {
+        log::warn!("screencap() ignored: saving a screenshot is not supported");
+    });
 
     engine.register_get("x", |_m: &mut Mouse| -> GlslExpr { GlslExpr("iMouse.x".to_string()) });
     engine.register_get("y", |_m: &mut Mouse| -> GlslExpr { GlslExpr("iMouse.y".to_string()) });
@@ -859,7 +888,12 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
     scope.push_constant("s1", 101_i64);
     scope.push_constant("s2", 102_i64);
     scope.push_constant("s3", 103_i64);
-    scope.push_constant("time", GlslExpr("iTime".to_string()));
+    // Pushed as a regular (non-constant) variable: real hydra.js lets
+    // scripts reassign `time` (e.g. `time = 0` to reset/loop). Reassigning
+    // it only rebinds the local script variable for the rest of this
+    // evaluation - it doesn't reset the live iTime uniform - but that's a
+    // reasonable approximation, and it's strictly better than a hard error.
+    scope.push("time", GlslExpr("iTime".to_string()));
     scope.push_constant("beat", GlslExpr("iBeat".to_string()));
     scope.push_constant("tempo", GlslExpr("iTempo".to_string()));
     scope.push_constant("phase", GlslExpr("iPhase".to_string()));
