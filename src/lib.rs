@@ -6,9 +6,11 @@ pub mod source;
 mod argtrunc;
 mod arrow;
 mod asi;
+mod autolet;
 mod glsl;
 mod mathjs;
 mod numlit;
+mod patcall;
 mod srcscan;
 mod text;
 

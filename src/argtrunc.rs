@@ -14,6 +14,9 @@ use crate::srcscan::mask_strings_and_comments;
 /// from a pure text-truncation point of view it's just another
 /// comma-separated argument.
 const MAX_ARGS: &[(&str, usize)] = &[
+    // top-level
+    ("src", 1),
+    ("out", 1),
     // sources
     ("osc", 3),
     ("noise", 2),

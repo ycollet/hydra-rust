@@ -5,8 +5,10 @@ use rhai::{Array, CustomType, Dynamic, Engine, ImmutableString, Scope, TypeBuild
 use crate::argtrunc;
 use crate::arrow;
 use crate::asi;
+use crate::autolet;
 use crate::mathjs;
 use crate::numlit;
+use crate::patcall;
 use crate::text::{self, TextData};
 #[cfg(feature = "audio")]
 use crate::audio::NUM_FFT_BINS;
@@ -531,6 +533,24 @@ fn register_glsl_ops(engine: &mut Engine) {
     binop!("*");
     binop!("/");
 
+    // `%` maps to GLSL's `mod()` builtin, not the `%` operator (which in
+    // GLSL only applies to integers) - GLSL is float-typed throughout here.
+    engine.register_fn("%", |a: GlslExpr, b: GlslExpr| -> GlslExpr {
+        GlslExpr(format!("mod({}, {})", a.0, b.0))
+    });
+    engine.register_fn("%", |a: GlslExpr, b: f64| -> GlslExpr {
+        GlslExpr(format!("mod({}, {})", a.0, fmt_f(b)))
+    });
+    engine.register_fn("%", |a: f64, b: GlslExpr| -> GlslExpr {
+        GlslExpr(format!("mod({}, {})", fmt_f(a), b.0))
+    });
+    engine.register_fn("%", |a: GlslExpr, b: i64| -> GlslExpr {
+        GlslExpr(format!("mod({}, {})", a.0, fmt_f(b as f64)))
+    });
+    engine.register_fn("%", |a: i64, b: GlslExpr| -> GlslExpr {
+        GlslExpr(format!("mod({}, {})", fmt_f(a as f64), b.0))
+    });
+
     engine.register_fn("-", |a: GlslExpr| -> GlslExpr {
         GlslExpr(format!("(-{})", a.0))
     });
@@ -611,6 +631,14 @@ fn register_patterns(engine: &mut Engine) {
         p.smooth = true;
         p
     });
+    // Real hydra.js's smooth(amount) takes an interpolation-amount argument;
+    // hydra-rust's Pattern only supports smoothing fully on or off, so any
+    // amount just enables it (an approximation, not a faithful 1:1 port).
+    engine.register_fn("smooth", |arr: Array, _amount: Dynamic| -> Pattern {
+        let mut p = Pattern::from_array(arr);
+        p.smooth = true;
+        p
+    });
     engine.register_fn("fast", |mut p: Pattern, speed: f64| -> Pattern {
         p.speed = speed;
         p
@@ -620,6 +648,10 @@ fn register_patterns(engine: &mut Engine) {
         p
     });
     engine.register_fn("smooth", |mut p: Pattern| -> Pattern {
+        p.smooth = true;
+        p
+    });
+    engine.register_fn("smooth", |mut p: Pattern, _amount: Dynamic| -> Pattern {
         p.smooth = true;
         p
     });
@@ -635,8 +667,10 @@ fn register_patterns(engine: &mut Engine) {
 
 pub fn eval(code: &str) -> Result<EvalResult, String> {
     let code = &numlit::insert_leading_zero(code);
+    let code = &autolet::insert_missing_let(code);
     let code = &mathjs::rewrite_math(code);
     let code = &argtrunc::truncate_extra_args(code);
+    let code = &patcall::rewrite_pattern_calls(code);
     let code = &arrow::strip_zero_arg_arrows(code);
     let code = &asi::insert_missing_semicolons(code);
     let state = Arc::new(Mutex::new(PatchState {
@@ -769,7 +803,34 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
                 s.lock().unwrap().audio_requests.push(AudioRequest::SetSmooth(dyn_to_f64(sm) as f32));
             });
         }
+        // Real hydra.js's a.show()/a.hide() toggle an on-screen debug graph
+        // of the FFT bins; hydra-rust has no such overlay, so these are
+        // no-ops kept only so sketches calling them still evaluate.
+        engine.register_fn("show", |_a: Audio| {});
+        engine.register_fn("hide", |_a: Audio| {});
     }
+
+    // initImage/initVideo/initScreen (external image/video/display capture)
+    // and setResolution have no implementation here (no image decoding,
+    // video, or screen-capture pipeline, and no script-driven canvas
+    // resize) - these are no-ops, logged once per call, purely so sketches
+    // that call them still evaluate their other effects instead of hard
+    // erroring at this line.
+    engine.register_fn("initImage", |idx: i64, url: ImmutableString| {
+        log::warn!("initImage({idx}, \"{url}\") ignored: image sources are not supported");
+    });
+    engine.register_fn("initVideo", |idx: i64, url: ImmutableString| {
+        log::warn!("initVideo({idx}, \"{url}\") ignored: video sources are not supported");
+    });
+    engine.register_fn("initScreen", |idx: i64| {
+        log::warn!("initScreen({idx}) ignored: screen capture is not supported");
+    });
+    engine.register_fn("initScreen", |idx: i64, screen: i64| {
+        log::warn!("initScreen({idx}, {screen}) ignored: screen capture is not supported");
+    });
+    engine.register_fn("setResolution", |w: i64, h: i64| {
+        log::warn!("setResolution({w}, {h}) ignored: script-driven resize is not supported");
+    });
 
     engine.register_get("x", |_m: &mut Mouse| -> GlslExpr { GlslExpr("iMouse.x".to_string()) });
     engine.register_get("y", |_m: &mut Mouse| -> GlslExpr { GlslExpr("iMouse.y".to_string()) });
