@@ -1,0 +1,230 @@
+//! Rewrites JS ternary expressions (`cond ? a : b`) into Rhai's `if`/`else`
+//! expression form (`if cond { a } else { b }`). Rhai has no `?:` operator
+//! at all ("Unknown operator: '?'"); `if`/`else` blocks are valid Rhai
+//! expressions (they evaluate to their last statement's value), so this is
+//! a direct, mechanical translation.
+//!
+//! Boundaries are found structurally rather than by parsing full expression
+//! grammar: a top-level `,`, `;`, or bare `=` marks where a condition/branch
+//! starts or ends, and brackets are recursed into so nested calls
+//! (`osc(cond?a:b)`) and chained ternaries (`a?b:c?d:e`, right-associative)
+//! are each handled independently.
+
+use crate::srcscan::mask_strings_and_comments;
+
+pub fn rewrite_ternaries(src: &str) -> String {
+    let chars: Vec<char> = src.chars().collect();
+    let mask = mask_strings_and_comments(&chars);
+    transform(&chars, &mask, 0, chars.len())
+}
+
+fn is_bare_equals(chars: &[char], i: usize) -> bool {
+    if chars[i] != '=' {
+        return false;
+    }
+    if chars.get(i + 1) == Some(&'=') {
+        return false; // ==
+    }
+    if i > 0 && matches!(chars[i - 1], '=' | '!' | '<' | '>' | '+' | '-' | '*' | '/' | '%') {
+        return false; // !=, <=, >=, +=, -=, *=, /=, %=
+    }
+    true
+}
+
+fn matching_close(chars: &[char], mask: &[bool], open_idx: usize) -> usize {
+    let open = chars[open_idx];
+    let close = match open {
+        '(' => ')',
+        '[' => ']',
+        '{' => '}',
+        _ => unreachable!(),
+    };
+    let mut depth = 0i32;
+    let mut i = open_idx;
+    while i < chars.len() {
+        if !mask[i] {
+            if chars[i] == open {
+                depth += 1;
+            } else if chars[i] == close {
+                depth -= 1;
+                if depth == 0 {
+                    return i;
+                }
+            }
+        }
+        i += 1;
+    }
+    chars.len()
+}
+
+/// Copies a bracketed group verbatim into `out`, recursively transforming
+/// its contents. Returns the index just past the closing bracket.
+fn copy_bracket(chars: &[char], mask: &[bool], i: usize, end: usize, out: &mut String) -> usize {
+    let close = matching_close(chars, mask, i).min(end);
+    out.push(chars[i]);
+    out.push_str(&transform(chars, mask, i + 1, close));
+    if close < end && close < chars.len() {
+        out.push(chars[close]);
+        close + 1
+    } else {
+        close
+    }
+}
+
+fn transform(chars: &[char], mask: &[bool], start: usize, end: usize) -> String {
+    let mut out = String::new();
+    let mut seg = String::new();
+    let mut i = start;
+
+    while i < end {
+        if mask[i] {
+            seg.push(chars[i]);
+            i += 1;
+            continue;
+        }
+        match chars[i] {
+            '(' | '[' | '{' => {
+                i = copy_bracket(chars, mask, i, end, &mut seg);
+            }
+            ',' | ';' => {
+                out.push_str(&seg);
+                out.push(chars[i]);
+                seg.clear();
+                i += 1;
+            }
+            '=' if is_bare_equals(chars, i) => {
+                out.push_str(&seg);
+                out.push('=');
+                seg.clear();
+                i += 1;
+            }
+            '?' if chars.get(i + 1) != Some(&'?') && (i == 0 || chars[i - 1] != '?') => {
+                let cond = std::mem::take(&mut seg);
+                i += 1;
+                let (then_text, next) = scan_branch(chars, mask, i, end, true);
+                i = next;
+                let (else_text, next) = scan_branch(chars, mask, i, end, false);
+                i = next;
+                // Re-run on each extracted branch: catches chained ternaries
+                // in the else branch (`a?b:c?d:e`) and any left unconverted
+                // because they weren't inside a bracket `scan_branch` recursed into.
+                let cond = rewrite_ternaries(cond.trim());
+                let then_text = rewrite_ternaries(then_text.trim());
+                let else_text = rewrite_ternaries(else_text.trim());
+                out.push_str(&format!("if {cond} {{ {then_text} }} else {{ {else_text} }}"));
+            }
+            _ => {
+                seg.push(chars[i]);
+                i += 1;
+            }
+        }
+    }
+    out.push_str(&seg);
+    out
+}
+
+/// Scans a ternary branch: the "then" branch ends at a top-level `:`; the
+/// "else" branch ends at a top-level `,`/`;`/bare `=`/end-of-range. Brackets
+/// are recursed into (via `copy_bracket`) so nested ternaries inside them
+/// are transformed independently. Returns the branch text and the index
+/// just past its terminator (for "then", past the `:`; for "else", at the
+/// terminator itself, unconsumed).
+fn scan_branch(chars: &[char], mask: &[bool], start: usize, end: usize, stop_at_colon: bool) -> (String, usize) {
+    let mut buf = String::new();
+    let mut i = start;
+    while i < end {
+        if mask[i] {
+            buf.push(chars[i]);
+            i += 1;
+            continue;
+        }
+        match chars[i] {
+            '(' | '[' | '{' => {
+                i = copy_bracket(chars, mask, i, end, &mut buf);
+            }
+            ':' if stop_at_colon => {
+                return (buf, i + 1);
+            }
+            ',' | ';' if !stop_at_colon => {
+                return (buf, i);
+            }
+            '=' if !stop_at_colon && is_bare_equals(chars, i) => {
+                return (buf, i);
+            }
+            _ => {
+                buf.push(chars[i]);
+                i += 1;
+            }
+        }
+    }
+    (buf, i)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rewrite_ternaries;
+
+    #[test]
+    fn rewrites_simple_ternary() {
+        assert_eq!(rewrite_ternaries("time>1?0.1:0.2"), "if time>1 { 0.1 } else { 0.2 }");
+    }
+
+    #[test]
+    fn rewrites_ternary_as_function_argument() {
+        assert_eq!(
+            rewrite_ternaries("osc(60,time>1?0.1:0.2,0)"),
+            "osc(60,if time>1 { 0.1 } else { 0.2 },0)"
+        );
+    }
+
+    #[test]
+    fn rewrites_ternary_in_assignment() {
+        // no space is inserted between `=` and `if` (the original spacing
+        // is discarded along with the trimmed condition text), but this is
+        // still valid Rhai - the tokenizer doesn't need whitespace there.
+        assert_eq!(rewrite_ternaries("x = cond ? a : b"), "x =if cond { a } else { b }");
+    }
+
+    #[test]
+    fn leaves_non_ternary_code_alone() {
+        let src = "osc(60,0.1,0).out()";
+        assert_eq!(rewrite_ternaries(src), src);
+    }
+
+    #[test]
+    fn handles_nested_call_in_branches() {
+        assert_eq!(
+            rewrite_ternaries("cond?osc(60):noise(4)"),
+            "if cond { osc(60) } else { noise(4) }"
+        );
+    }
+
+    #[test]
+    fn handles_ternary_nested_in_call_inside_branch() {
+        assert_eq!(
+            rewrite_ternaries("cond?foo(inner?1:2):3"),
+            "if cond { foo(if inner { 1 } else { 2 }) } else { 3 }"
+        );
+    }
+
+    #[test]
+    fn handles_chained_ternary_in_else() {
+        assert_eq!(
+            rewrite_ternaries("a?1:b?2:3"),
+            "if a { 1 } else { if b { 2 } else { 3 } }"
+        );
+    }
+
+    #[test]
+    fn ignores_double_question_mark() {
+        // not a real Rhai operator, but make sure we don't misfire on it
+        let src = "x??y";
+        assert_eq!(rewrite_ternaries(src), src);
+    }
+
+    #[test]
+    fn ignores_inside_strings_and_comments() {
+        let src = "text(\"a?b:c\") // a?b:c";
+        assert_eq!(rewrite_ternaries(src), src);
+    }
+}

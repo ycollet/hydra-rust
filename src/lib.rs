@@ -13,6 +13,7 @@ mod numlit;
 mod patcall;
 mod quotes;
 mod srcscan;
+mod ternary;
 mod text;
 
 pub use eval::{eval, EvalResult, RenderMode};

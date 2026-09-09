@@ -10,6 +10,7 @@ use crate::mathjs;
 use crate::numlit;
 use crate::patcall;
 use crate::quotes;
+use crate::ternary;
 use crate::text::{self, TextData};
 #[cfg(feature = "audio")]
 use crate::audio::NUM_FFT_BINS;
@@ -323,7 +324,6 @@ fn as_node(d: Dynamic) -> Result<Node, Box<rhai::EvalAltResult>> {
     }
 }
 
-#[cfg(feature = "audio")]
 fn dyn_to_f64(d: Dynamic) -> f64 {
     d.as_float().unwrap_or_else(|_| d.as_int().map(|i| i as f64).unwrap_or(0.0))
 }
@@ -653,14 +653,12 @@ fn register_glsl_ops(engine: &mut Engine) {
 }
 
 fn register_patterns(engine: &mut Engine) {
-    engine.register_fn("fast", |arr: Array, speed: f64| -> Pattern {
+    // fast()/offset() take defaults in real hydra.js (speed=1, offset=0),
+    // matching Pattern::from_array's own defaults - a 0-arg call is a no-op.
+    engine.register_fn("fast", |arr: Array| -> Pattern { Pattern::from_array(arr) });
+    engine.register_fn("fast", |arr: Array, speed: Dynamic| -> Pattern {
         let mut p = Pattern::from_array(arr);
-        p.speed = speed;
-        p
-    });
-    engine.register_fn("fast", |arr: Array, speed: i64| -> Pattern {
-        let mut p = Pattern::from_array(arr);
-        p.speed = speed as f64;
+        p.speed = dyn_to_f64(speed);
         p
     });
     engine.register_fn("smooth", |arr: Array| -> Pattern {
@@ -676,12 +674,9 @@ fn register_patterns(engine: &mut Engine) {
         p.smooth = true;
         p
     });
-    engine.register_fn("fast", |mut p: Pattern, speed: f64| -> Pattern {
-        p.speed = speed;
-        p
-    });
-    engine.register_fn("fast", |mut p: Pattern, speed: i64| -> Pattern {
-        p.speed = speed as f64;
+    engine.register_fn("fast", |p: Pattern| -> Pattern { p });
+    engine.register_fn("fast", |mut p: Pattern, speed: Dynamic| -> Pattern {
+        p.speed = dyn_to_f64(speed);
         p
     });
     engine.register_fn("smooth", |mut p: Pattern| -> Pattern {
@@ -692,12 +687,15 @@ fn register_patterns(engine: &mut Engine) {
         p.smooth = true;
         p
     });
-    engine.register_fn("offset", |mut p: Pattern, o: f64| -> Pattern {
-        p.offset = o;
+    engine.register_fn("offset", |p: Pattern| -> Pattern { p });
+    engine.register_fn("offset", |arr: Array| -> Pattern { Pattern::from_array(arr) });
+    engine.register_fn("offset", |mut p: Pattern, o: Dynamic| -> Pattern {
+        p.offset = dyn_to_f64(o);
         p
     });
-    engine.register_fn("offset", |mut p: Pattern, o: i64| -> Pattern {
-        p.offset = o as f64;
+    engine.register_fn("offset", |arr: Array, o: Dynamic| -> Pattern {
+        let mut p = Pattern::from_array(arr);
+        p.offset = dyn_to_f64(o);
         p
     });
     // ease(name)/fit(lo, hi) are real hydra.js pattern utilities (easing
@@ -736,6 +734,7 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
     let code = &argtrunc::truncate_extra_args(code);
     let code = &patcall::rewrite_pattern_calls(code);
     let code = &arrow::strip_zero_arg_arrows(code);
+    let code = &ternary::rewrite_ternaries(code);
     let code = &asi::insert_missing_semicolons(code);
     let state = Arc::new(Mutex::new(PatchState {
         buffers: [None, None, None, None],
