@@ -29,9 +29,14 @@ pub fn mask_strings_and_comments(chars: &[char]) -> Vec<bool> {
         let c = chars[i];
 
         if in_line_comment {
-            mask[i] = true;
             if c == '\n' {
+                // The terminating newline is the comment's boundary, not
+                // its content - leave it unmasked so passes that care
+                // about line breaks (e.g. asi's semicolon insertion) still
+                // see it as a real one.
                 in_line_comment = false;
+            } else {
+                mask[i] = true;
             }
             i += 1;
             continue;

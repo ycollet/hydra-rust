@@ -98,6 +98,13 @@ pub fn insert_missing_semicolons(src: &str) -> String {
 
     let mut depth: i32 = 0;
     let mut last_significant: Option<char> = None;
+    // Byte offset in `out` right after the last significant char - where a
+    // semicolon needs to be spliced in, since a trailing same-line comment
+    // (masked, but its terminating newline isn't - see srcscan.rs) may
+    // already be sitting between that char and the newline we're reacting
+    // to. Inserting at the newline itself would land the `;` inside the
+    // comment, where Rhai's lexer just discards it as more comment text.
+    let mut last_significant_end: usize = 0;
 
     let mut i = 0;
     while i < n {
@@ -120,7 +127,7 @@ pub fn insert_missing_semicolons(src: &str) -> String {
             }
             '\n' => {
                 if depth == 0 && should_insert_semicolon(last_significant, &chars, &mask, i + 1) {
-                    out.push(';');
+                    out.insert(last_significant_end, ';');
                     last_significant = Some(';');
                 }
                 out.push(c);
@@ -132,6 +139,9 @@ pub fn insert_missing_semicolons(src: &str) -> String {
         }
 
         out.push(c);
+        if !c.is_whitespace() {
+            last_significant_end = out.len();
+        }
         i += 1;
     }
 
@@ -189,5 +199,14 @@ mod tests {
     fn blank_lines_dont_double_insert() {
         let out = insert_missing_semicolons("osc(10).out(o0)\n\nosc(20).out(o1)");
         assert_eq!(out, "osc(10).out(o0);\n\nosc(20).out(o1)");
+    }
+
+    #[test]
+    fn inserts_semicolon_before_trailing_line_comment() {
+        // regression test: srcscan used to mark a line comment's
+        // terminating newline as masked, which made asi's `'\n' => ...`
+        // match arm unreachable for any line ending in `// comment`.
+        let out = insert_missing_semicolons("a.setScale(4) // comment one\na.setCutoff(7) // comment two");
+        assert_eq!(out, "a.setScale(4); // comment one\na.setCutoff(7) // comment two");
     }
 }
