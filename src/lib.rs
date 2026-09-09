@@ -9,6 +9,7 @@ mod asi;
 mod autolet;
 mod glsl;
 mod iife;
+mod jsfunctions;
 mod jskeywords;
 mod mathjs;
 mod numlit;

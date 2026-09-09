@@ -17,6 +17,11 @@
 //!   this alone doesn't add real async/module-loading support (`await
 //!   loadScript(url)` still fails once `loadScript` is reached), but lets
 //!   any *other* effects in the same script still evaluate.
+//!
+//! Also rewrites JS strict (in)equality (`===`/`!==`, "not a valid
+//! operator" in Rhai) to `==`/`!=` - Rhai's equality already compares by
+//! value and type for these dynamically-typed scripts, so dropping the
+//! extra `=` is a direct, safe translation.
 
 use crate::srcscan::mask_strings_and_comments;
 
@@ -31,6 +36,20 @@ pub fn rewrite_keywords(src: &str) -> String {
 
     let mut i = 0;
     while i < n {
+        // JS strict (in)equality has no Rhai equivalent ("'===' is not a
+        // valid operator... Should it be '=='?"); Rhai's `==`/`!=` already
+        // compare by value+type for these dynamically-typed scripts, so
+        // dropping the extra `=` is a safe, direct translation.
+        if !mask[i] && chars[i] == '=' && chars.get(i + 1) == Some(&'=') && chars.get(i + 2) == Some(&'=') {
+            out.push_str("==");
+            i += 3;
+            continue;
+        }
+        if !mask[i] && chars[i] == '!' && chars.get(i + 1) == Some(&'=') && chars.get(i + 2) == Some(&'=') {
+            out.push_str("!=");
+            i += 3;
+            continue;
+        }
         if !mask[i] && is_ident_start(chars[i]) && !preceded_by_ident(&chars, i) {
             let end = ident_end(&chars, i);
             let word: String = chars[i..end].iter().collect();
@@ -89,6 +108,16 @@ mod tests {
     #[test]
     fn replaces_var_with_let() {
         assert_eq!(rewrite_keywords("var x = 5"), "let x = 5");
+    }
+
+    #[test]
+    fn replaces_strict_equality() {
+        assert_eq!(rewrite_keywords("if x===1 {}"), "if x==1 {}");
+    }
+
+    #[test]
+    fn replaces_strict_inequality() {
+        assert_eq!(rewrite_keywords("if x!==1 {}"), "if x!=1 {}");
     }
 
     #[test]
