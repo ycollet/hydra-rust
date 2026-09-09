@@ -166,7 +166,10 @@ impl HydraApp {
                 }
                 self.error = None;
             }
-            Err(e) => self.error = Some((e, Instant::now())),
+            Err(e) => {
+                log::error!("patch eval error: {e}");
+                self.error = Some((e, Instant::now()));
+            }
         }
     }
 
