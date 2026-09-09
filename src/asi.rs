@@ -11,7 +11,7 @@
 //! looks like a genuine statement boundary, while leaving multi-line method
 //! chains (`osc(10)\n  .out(o0)`) and multi-line argument lists alone.
 
-use crate::srcscan::mask_strings_and_comments;
+use crate::srcscan::{self, Region};
 
 /// Characters that, when they're the last significant character on a line,
 /// mean the expression clearly continues onto the next line.
@@ -69,19 +69,19 @@ fn continues_next_line(c: char) -> bool {
 /// Looks ahead from `from` (skipping whitespace, strings and comments) for
 /// the first significant character of the next logical line. `None` if
 /// there isn't one (rest of the file is blank/comments).
-fn peek_next_significant(chars: &[char], mask: &[bool], mut j: usize) -> Option<char> {
-    while j < chars.len() && (chars[j].is_whitespace() || mask[j]) {
+fn peek_next_significant(chars: &[char], region: &[Region], mut j: usize) -> Option<char> {
+    while j < chars.len() && (chars[j].is_whitespace() || region[j] != Region::Code) {
         j += 1;
     }
     chars.get(j).copied()
 }
 
-fn should_insert_semicolon(last: Option<char>, chars: &[char], mask: &[bool], next_pos: usize) -> bool {
+fn should_insert_semicolon(last: Option<char>, chars: &[char], region: &[Region], next_pos: usize) -> bool {
     let Some(last) = last else { return false };
     if continues_line(last) {
         return false;
     }
-    match peek_next_significant(chars, mask, next_pos) {
+    match peek_next_significant(chars, region, next_pos) {
         None => false,
         Some(c) => !continues_next_line(c),
     }
@@ -92,7 +92,7 @@ fn should_insert_semicolon(last: Option<char>, chars: &[char], mask: &[bool], ne
 /// existing `;`).
 pub fn insert_missing_semicolons(src: &str) -> String {
     let chars: Vec<char> = src.chars().collect();
-    let mask = mask_strings_and_comments(&chars);
+    let region = srcscan::classify(&chars);
     let n = chars.len();
     let mut out = String::with_capacity(src.len() + 16);
 
@@ -105,15 +105,27 @@ pub fn insert_missing_semicolons(src: &str) -> String {
     // to. Inserting at the newline itself would land the `;` inside the
     // comment, where Rhai's lexer just discards it as more comment text.
     let mut last_significant_end: usize = 0;
+    // Was the immediately preceding (masked) character part of a string
+    // literal? If so, the *string* just produced a complete value - even
+    // though the last real *code* character seen might be e.g. `=` (as in
+    // `x="value"`), which alone would look like "still expects more".
+    let mut prev_was_string = false;
 
     let mut i = 0;
     while i < n {
         let c = chars[i];
 
-        if mask[i] {
+        if region[i] != Region::Code {
             out.push(c);
+            prev_was_string = region[i] == Region::StringLit;
             i += 1;
             continue;
+        }
+
+        if prev_was_string {
+            last_significant = Some('"');
+            last_significant_end = out.len();
+            prev_was_string = false;
         }
 
         match c {
@@ -126,7 +138,7 @@ pub fn insert_missing_semicolons(src: &str) -> String {
                 last_significant = Some(c);
             }
             '\n' => {
-                if depth == 0 && should_insert_semicolon(last_significant, &chars, &mask, i + 1) {
+                if depth == 0 && should_insert_semicolon(last_significant, &chars, &region, i + 1) {
                     out.insert(last_significant_end, ';');
                     last_significant = Some(';');
                 }
@@ -208,5 +220,15 @@ mod tests {
         // match arm unreachable for any line ending in `// comment`.
         let out = insert_missing_semicolons("a.setScale(4) // comment one\na.setCutoff(7) // comment two");
         assert_eq!(out, "a.setScale(4); // comment one\na.setCutoff(7) // comment two");
+    }
+
+    #[test]
+    fn inserts_semicolon_after_statement_ending_in_string() {
+        // regression test: `last_significant` was tracked from the last
+        // unmasked *code* character, so a line ending in `x="value"` looked
+        // like it ended in `=` (a "continues" character) instead of a
+        // complete string value, since the string itself is masked.
+        let out = insert_missing_semicolons("x=\"georgia\"\ny=\"10%\"");
+        assert_eq!(out, "x=\"georgia\";\ny=\"10%\"");
     }
 }

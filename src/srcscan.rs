@@ -1,5 +1,5 @@
 //! Shared groundwork for the hydra.js-compatibility preprocessing passes
-//! (`asi`, `numlit`, `arrow`): classifies which characters of a source
+//! (`asi`, `numlit`, `arrow`, ...): classifies which characters of a source
 //! string lie inside a string literal or a comment, so each pass only has
 //! to worry about its own token pattern rather than re-implementing
 //! string/comment skipping.
@@ -14,11 +14,22 @@ enum StrKind {
     Raw,
 }
 
-/// Returns a mask the same length as `chars`: `true` at every index that is
-/// part of a string literal (delimiters included) or a `//`/`/* */` comment.
-pub fn mask_strings_and_comments(chars: &[char]) -> Vec<bool> {
+/// What a given character is part of.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Region {
+    Code,
+    StringLit,
+    Comment,
+}
+
+/// Classifies every character in `chars` as code, string-literal content
+/// (delimiters included), or comment content (delimiters included; for a
+/// line comment, its terminating newline is classified as `Code` - it's
+/// the comment's boundary, not its content, so passes that care about line
+/// breaks, e.g. `asi`'s semicolon insertion, still see it as a real one).
+pub fn classify(chars: &[char]) -> Vec<Region> {
     let n = chars.len();
-    let mut mask = vec![false; n];
+    let mut region = vec![Region::Code; n];
 
     let mut in_string: Option<StrKind> = None;
     let mut in_line_comment = false;
@@ -30,21 +41,17 @@ pub fn mask_strings_and_comments(chars: &[char]) -> Vec<bool> {
 
         if in_line_comment {
             if c == '\n' {
-                // The terminating newline is the comment's boundary, not
-                // its content - leave it unmasked so passes that care
-                // about line breaks (e.g. asi's semicolon insertion) still
-                // see it as a real one.
                 in_line_comment = false;
             } else {
-                mask[i] = true;
+                region[i] = Region::Comment;
             }
             i += 1;
             continue;
         }
         if in_block_comment {
-            mask[i] = true;
+            region[i] = Region::Comment;
             if c == '*' && chars.get(i + 1) == Some(&'/') {
-                mask[i + 1] = true;
+                region[i + 1] = Region::Comment;
                 i += 2;
                 in_block_comment = false;
                 continue;
@@ -53,9 +60,9 @@ pub fn mask_strings_and_comments(chars: &[char]) -> Vec<bool> {
             continue;
         }
         if let Some(kind) = in_string {
-            mask[i] = true;
+            region[i] = Region::StringLit;
             if kind != StrKind::Raw && c == '\\' && i + 1 < n {
-                mask[i + 1] = true;
+                region[i + 1] = Region::StringLit;
                 i += 2;
                 continue;
             }
@@ -74,36 +81,42 @@ pub fn mask_strings_and_comments(chars: &[char]) -> Vec<bool> {
         match c {
             '"' => {
                 in_string = Some(StrKind::Double);
-                mask[i] = true;
+                region[i] = Region::StringLit;
                 i += 1;
             }
             '\'' => {
                 in_string = Some(StrKind::Single);
-                mask[i] = true;
+                region[i] = Region::StringLit;
                 i += 1;
             }
             '`' => {
                 in_string = Some(StrKind::Raw);
-                mask[i] = true;
+                region[i] = Region::StringLit;
                 i += 1;
             }
             '/' if chars.get(i + 1) == Some(&'/') => {
                 in_line_comment = true;
-                mask[i] = true;
-                mask[i + 1] = true;
+                region[i] = Region::Comment;
+                region[i + 1] = Region::Comment;
                 i += 2;
             }
             '/' if chars.get(i + 1) == Some(&'*') => {
                 in_block_comment = true;
-                mask[i] = true;
-                mask[i + 1] = true;
+                region[i] = Region::Comment;
+                region[i + 1] = Region::Comment;
                 i += 2;
             }
             _ => i += 1,
         }
     }
 
-    mask
+    region
+}
+
+/// Returns a mask the same length as `chars`: `true` at every index that is
+/// part of a string literal (delimiters included) or a `//`/`/* */` comment.
+pub fn mask_strings_and_comments(chars: &[char]) -> Vec<bool> {
+    classify(chars).iter().map(|r| *r != Region::Code).collect()
 }
 
 #[cfg(test)]
