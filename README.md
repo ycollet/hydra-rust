@@ -74,9 +74,22 @@ hydra-rust is the visual engine of [Sova](https://github.com/Bubobubobubobubo/So
 
 ## Current limitations
 
-- No video or image source loading
-- No audio reactivity (FFT)
 - Max nesting depth of 16
+- Audio reactivity (`a.fft[]`, `a.setBins`/`setCutoff`/`setScale`/`setSmooth`) and webcam input (`initCam`) require building with the `audio`/`webcam` Cargo features respectively (off by default)
+
+### Stub functions (accepted, but not yet implemented)
+
+These are registered so scripts calling them don't hard-error, but they don't do anything real yet:
+
+| Function | Status |
+|----------|--------|
+| `initImage(idx, url)` | No-op — no image loading/decoding pipeline |
+| `initVideo(idx, url)` | No-op — no video file loading pipeline |
+| `initScreen(idx[, screen])` | No-op — no screen/display capture |
+| `setResolution(w, h)` | No-op — canvas resolution isn't script-controllable |
+| `a.show()` / `a.hide()` | No-op — no on-screen FFT debug graph to toggle |
+| `smooth(amount)` (pattern) | Accepted but not faithful — any non-zero amount just enables the existing on/off smoothing; doesn't reproduce hydra.js's actual interpolation curve |
+| `Math.random()` | Not rewritten at all (unlike other `Math.*` methods) — no GLSL-expression equivalent for real randomness |
 
 ## License
 
