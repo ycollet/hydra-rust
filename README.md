@@ -89,6 +89,9 @@ These are registered so scripts calling them don't hard-error, but they don't do
 | `setResolution(w, h)` | No-op — canvas resolution isn't script-controllable |
 | `a.show()` / `a.hide()` | No-op — no on-screen FFT debug graph to toggle |
 | `smooth(amount)` (pattern) | Accepted but not faithful — any non-zero amount just enables the existing on/off smoothing; doesn't reproduce hydra.js's actual interpolation curve |
+| `ease(name)` (pattern) | No-op — passes the pattern through unchanged; no easing-curve implementations |
+| `fit(lo, hi)` (pattern) | No-op — passes the pattern through unchanged; no value-range remapping |
+| `screencap()` | No-op — saving/sharing a screenshot isn't supported |
 | `Math.random()` | Not rewritten at all (unlike other `Math.*` methods) — no GLSL-expression equivalent for real randomness |
 
 ## License
