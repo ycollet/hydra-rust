@@ -161,11 +161,26 @@ Pipeline order (each step's output feeds the next):
    mark a value as per-frame-dynamic (`rotate(()=>time*0.1)` →
    `rotate(time*0.1)`). This is safe here because hydra-rust's reactive
    values (§3) are already "dynamic" without a wrapper — they compile
-   straight into live GLSL uniform expressions. Deliberately **not**
-   rewritten: multi-param or bare-identifier arrows (`(a,b)=>...`, `x=>...`,
-   used for pattern/sequencer callbacks — unsupported) and block-bodied
-   arrows (`()=>{ ... }` — don't reduce to a single expression).
-8. **`asi::insert_missing_semicolons`** — JS has automatic semicolon
+   straight into live GLSL uniform expressions. Also strips the
+   destructured-parameter form real hydra.js per-frame callbacks use
+   (`invert(({time})=>Math.sin(time)*3)` → `invert(Math.sin(time)*3)`,
+   likewise for multiple properties, `({time,mouse})=>...`) — the
+   destructured names are simply dropped, since they already resolve
+   correctly in the body whenever they match one of hydra-rust's own
+   globals. Deliberately **not** rewritten: multi-param or bare-identifier
+   arrows (`(a,b)=>...`, `x=>...`, used for pattern/sequencer callbacks —
+   unsupported) and block-bodied arrows (`()=>{ ... }` — don't reduce to a
+   single expression).
+8. **`ternary::rewrite_ternaries`** — rewrites JS ternaries (`cond ? a : b`)
+   into Rhai's `if`/`else` expression form (`if cond { a } else { b }`,
+   valid since Rhai's `if`/`else` blocks evaluate to their last statement's
+   value). Rhai has no `?:` operator at all ("Unknown operator: '?'").
+   Boundaries are found structurally — a top-level `,`/`;`/bare `=` marks
+   where a branch starts or ends, and brackets are recursed into — rather
+   than via full expression-grammar parsing; nested/chained ternaries
+   (`a?b:c?d:e`, right-associative) are handled via recursion on the
+   extracted branches.
+9. **`asi::insert_missing_semicolons`** — JS has automatic semicolon
    insertion; Rhai doesn't. Real multi-buffer sketches routinely put each
    statement on its own line with no `;` (`osc(10).out(o0)\nosc(20).out(o1)`).
    Inserts `;` at line breaks that are genuine statement boundaries (bracket
@@ -180,8 +195,9 @@ of ~46,600 real, publicly-shared hydra sketches — see `examples/check_corpus.r
 and is scoped narrowly enough to avoid false positives on the surrounding
 code. What's still unhandled — `await`/`async`/`new`/`var`/`null` (reserved
 Rhai keywords colliding with real JS syntax, mostly from module-loading code
-outside the scope of a visual patch DSL), JS ternaries (`cond ? a : b`),
-multi-param/block-bodied arrows, and `a.settings[i].cutoff = ...` (a bigger,
+outside the scope of a visual patch DSL), `function(...) {...}` expression
+syntax (same "block body doesn't reduce to an expression" limitation as
+multi-statement arrows), and `a.settings[i].cutoff = ...` (a bigger,
 not-yet-designed indexable-config feature) — is left as syntax or semantic
 errors from `eval()`, surfaced to the caller as `Err(String)`.
 
