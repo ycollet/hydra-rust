@@ -134,7 +134,7 @@ impl HydraApp {
             return;
         };
         if self.code.is_empty() {
-            renderer.compile_buffers(
+            let _ = renderer.compile_buffers(
                 &[Some(hydra_rust::shader::DEFAULT_SHADER.to_owned()), None, None, None],
                 Default::default(),
             );
@@ -146,7 +146,7 @@ impl HydraApp {
                 if let Some(ref td) = result.text_data {
                     renderer.upload_text(td);
                 }
-                renderer.compile_buffers(&result.shaders, result.render_mode);
+                let compile_errors = renderer.compile_buffers(&result.shaders, result.render_mode);
                 #[cfg(feature = "webcam")]
                 for req in &result.source_requests {
                     match req {
@@ -164,7 +164,13 @@ impl HydraApp {
                         AudioRequest::SetSmooth(s) => self.audio_manager.set_smooth(*s),
                     }
                 }
-                self.error = None;
+                if compile_errors.is_empty() {
+                    self.error = None;
+                } else {
+                    let msg = format!("shader compile error: {}", compile_errors.join("; "));
+                    log::error!("{msg}");
+                    self.error = Some((msg, Instant::now()));
+                }
             }
             Err(e) => {
                 log::error!("patch eval error: {e}");

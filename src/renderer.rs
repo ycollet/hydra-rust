@@ -212,24 +212,37 @@ impl ShaderRenderer {
         }
     }
 
+    /// Compiles each buffer's shader, swapping in the new program on
+    /// success (the previous one, if any, is deleted either way - a
+    /// compile failure just means that buffer keeps rendering nothing
+    /// rather than a broken program). Returns one error string per buffer
+    /// that failed to compile, so the caller can surface it - `eval()`
+    /// only validates the Rhai/GLSL-codegen side, so a GLSL body ported
+    /// into `library.glsl` with a real syntax mistake would otherwise fail
+    /// completely silently here.
     pub fn compile_buffers(
         &mut self,
         shaders: &[Option<String>; NUM_BUFFERS],
         render_mode: RenderMode,
-    ) {
+    ) -> Vec<String> {
+        let mut errors = Vec::new();
         for (i, shader_src) in shaders.iter().enumerate() {
             if let Some(old) = self.snapshot.programs[i].take() {
                 unsafe { self.gl.delete_program(old.program) };
             }
             if let Some(code) = shader_src {
                 let full_src = shader::fragment_source(code);
-                if let Ok(program) = compile_program(&self.gl, &full_src) {
-                    self.snapshot.programs[i] =
-                        Some(resolve_program_state(&self.gl, program));
+                match compile_program(&self.gl, &full_src) {
+                    Ok(program) => {
+                        self.snapshot.programs[i] =
+                            Some(resolve_program_state(&self.gl, program));
+                    }
+                    Err(e) => errors.push(format!("buffer {i}: {e}")),
                 }
             }
         }
         self.snapshot.render_mode = render_mode;
+        errors
     }
 }
 
