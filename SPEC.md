@@ -509,6 +509,15 @@ are shown as an in-app toast and logged via `log::error!`, so `RUST_LOG=error`
 (or lower) surfaces either on the console for scripted workflows. See
 `README.md` for the full list of editor keybindings and build instructions.
 
+A sketch loaded via the CLI argument is **not** run automatically - it's
+shown in the editor, with a persistent on-screen banner, until the user
+explicitly evaluates it (Ctrl+Enter/Cmd+Enter). This is deliberate: such a
+file may not be one the user wrote themselves (e.g. shared online), and
+could call `initCam()`/reference `a.fft[i]` to access the camera or
+microphone (`webcam`/`audio` features) - those shouldn't run just because
+the file was opened. The restored previous session (the user's own,
+already-run code) is exempt and still auto-evaluates as before.
+
 ## 11. Adding a missing function
 
 Most "missing function" corpus failures (§4's methodology) turn out to be
