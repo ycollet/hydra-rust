@@ -19,7 +19,7 @@ mod imp {
     }
 
     pub struct AudioManager {
-        command_tx: mpsc::Sender<Command>,
+        command_tx: Option<mpsc::Sender<Command>>,
         samples: Arc<Mutex<VecDeque<f32>>>,
         fft: Arc<dyn Fft<f32>>,
         scratch: Vec<Complex<f32>>,
@@ -37,23 +37,16 @@ mod imp {
     }
 
     impl AudioManager {
+        /// Doesn't touch the microphone - see `ensure_started`. Constructing
+        /// this (e.g. once at app startup) must not, by itself, start
+        /// capturing audio; only a script that actually uses `a.*` should.
         pub fn new() -> Self {
             let samples: Arc<Mutex<VecDeque<f32>>> =
                 Arc::new(Mutex::new(VecDeque::with_capacity(FFT_SIZE)));
-            let (command_tx, command_rx) = mpsc::channel();
-
-            {
-                let samples = samples.clone();
-                thread::Builder::new()
-                    .name("hydra-audio".into())
-                    .spawn(move || capture_thread(samples, command_rx))
-                    .expect("spawn audio capture thread");
-            }
-
             let fft = FftPlanner::<f32>::new().plan_fft_forward(FFT_SIZE);
 
             Self {
-                command_tx,
+                command_tx: None,
                 samples,
                 fft,
                 scratch: vec![Complex { re: 0.0, im: 0.0 }; FFT_SIZE],
@@ -63,6 +56,26 @@ mod imp {
                 scale: 1.0,
                 smooth: 0.4,
             }
+        }
+
+        /// Opens the default microphone input stream, if it isn't already
+        /// open. Idempotent - safe to call on every frame. Call this only
+        /// once a script is known to actually reference `a.*` (checking for
+        /// an `AudioRequest` or `iFft` in its compiled output), not
+        /// unconditionally at startup: capturing audio is a real privacy-
+        /// sensitive action a script shouldn't get "for free" just because
+        /// the `audio` feature happens to be compiled in.
+        pub fn ensure_started(&mut self) {
+            if self.command_tx.is_some() {
+                return;
+            }
+            let (command_tx, command_rx) = mpsc::channel();
+            let samples = self.samples.clone();
+            thread::Builder::new()
+                .name("hydra-audio".into())
+                .spawn(move || capture_thread(samples, command_rx))
+                .expect("spawn audio capture thread");
+            self.command_tx = Some(command_tx);
         }
 
         pub fn set_bins(&mut self, n: usize) {
@@ -119,7 +132,9 @@ mod imp {
 
     impl Drop for AudioManager {
         fn drop(&mut self) {
-            let _ = self.command_tx.send(Command::Shutdown);
+            if let Some(tx) = &self.command_tx {
+                let _ = tx.send(Command::Shutdown);
+            }
         }
     }
 
