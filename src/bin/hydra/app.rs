@@ -73,6 +73,14 @@ pub struct HydraApp {
     editor_opacity: f32,
     sidebar_open: bool,
     current_file: Option<PathBuf>,
+    /// True while a file opened via a CLI argument is sitting in the editor
+    /// without having been run yet. Unlike the restored previous session
+    /// (the user's own code, already run by them before), a freshly-opened
+    /// file could be from an untrusted source (e.g. shared online) -
+    /// running it automatically would let it silently call `initCam()`
+    /// with no confirmation beyond the OS's one-time, blanket camera
+    /// permission. Cleared the first time the user explicitly evaluates.
+    pending_confirmation: bool,
     #[cfg(feature = "webcam")]
     source_manager: SourceManager,
     #[cfg(feature = "audio")]
@@ -97,23 +105,33 @@ impl HydraApp {
             editor_opacity: 1.0,
             sidebar_open: false,
             current_file: session.current_file,
+            pending_confirmation: false,
             #[cfg(feature = "webcam")]
             source_manager: SourceManager::new(),
             #[cfg(feature = "audio")]
             audio_manager: AudioManager::new(),
         };
 
+        let mut loaded_from_file = false;
         if let Some(path) = file_arg {
             match std::fs::read_to_string(&path) {
                 Ok(contents) => {
                     app.code = contents;
                     app.current_file = Some(path);
+                    loaded_from_file = true;
                 }
                 Err(e) => log::warn!("failed to read {}: {e}", path.display()),
             }
         }
 
-        if !app.code.is_empty() {
+        if loaded_from_file {
+            // Don't silently run a file just because it was opened - it
+            // may not be a sketch the user wrote themselves (see the
+            // `pending_confirmation` field doc comment). The restored
+            // previous session, by contrast, is always the user's own
+            // already-run code, so it's fine to resume automatically.
+            app.pending_confirmation = !app.code.is_empty();
+        } else if !app.code.is_empty() {
             app.evaluate();
         }
         app
@@ -130,6 +148,7 @@ impl HydraApp {
     }
 
     fn evaluate(&mut self) {
+        self.pending_confirmation = false;
         let Some(renderer) = &mut self.renderer else {
             return;
         };
@@ -156,12 +175,26 @@ impl HydraApp {
                     }
                 }
                 #[cfg(feature = "audio")]
-                for req in &result.audio_requests {
-                    match req {
-                        AudioRequest::SetBins(n) => self.audio_manager.set_bins(*n),
-                        AudioRequest::SetCutoff(c) => self.audio_manager.set_cutoff(*c),
-                        AudioRequest::SetScale(s) => self.audio_manager.set_scale(*s),
-                        AudioRequest::SetSmooth(s) => self.audio_manager.set_smooth(*s),
+                {
+                    // Only open the microphone once a script is actually
+                    // known to use it - either by calling one of the
+                    // setters below, or by reading `a.fft[i]` (which
+                    // compiles straight to an `iFft[...]` GLSL reference,
+                    // with no AudioRequest of its own to detect it by).
+                    // Merely having the `audio` feature compiled in must
+                    // not, by itself, start capturing audio.
+                    let uses_audio = !result.audio_requests.is_empty()
+                        || result.shaders.iter().any(|s| s.as_deref().is_some_and(|s| s.contains("iFft[")));
+                    if uses_audio {
+                        self.audio_manager.ensure_started();
+                    }
+                    for req in &result.audio_requests {
+                        match req {
+                            AudioRequest::SetBins(n) => self.audio_manager.set_bins(*n),
+                            AudioRequest::SetCutoff(c) => self.audio_manager.set_cutoff(*c),
+                            AudioRequest::SetScale(s) => self.audio_manager.set_scale(*s),
+                            AudioRequest::SetSmooth(s) => self.audio_manager.set_smooth(*s),
+                        }
                     }
                 }
                 if compile_errors.is_empty() {
@@ -341,6 +374,32 @@ impl HydraApp {
             });
     }
 
+    /// Persistent (non-fading, unlike `show_error_toast`) banner shown
+    /// while a file opened via a CLI argument hasn't been explicitly run
+    /// yet - see the `pending_confirmation` field doc comment.
+    fn show_pending_confirmation_banner(&self, ctx: &egui::Context) {
+        if !self.pending_confirmation {
+            return;
+        }
+        egui::Area::new(egui::Id::new("pending_confirmation_banner"))
+            .anchor(egui::Align2::CENTER_TOP, [0.0, 20.0])
+            .interactable(false)
+            .show(ctx, |ui| {
+                egui::Frame::NONE
+                    .fill(Color32::from_rgba_unmultiplied(60, 45, 0, 200))
+                    .inner_margin(egui::Margin::symmetric(12, 6))
+                    .show(ui, |ui| {
+                        ui.label(
+                            egui::RichText::new(
+                                "Loaded from file, not yet run (it may access your camera/mic) - press Ctrl+Enter to run it",
+                            )
+                            .color(Color32::from_rgb(255, 200, 100))
+                            .monospace(),
+                        );
+                    });
+            });
+    }
+
     fn show_error_toast(&mut self, ctx: &egui::Context) {
         let Some((msg, when)) = &self.error else { return };
         let elapsed = when.elapsed().as_secs_f32();
@@ -453,6 +512,7 @@ impl eframe::App for HydraApp {
 
         self.show_editor(ctx);
         self.show_error_toast(ctx);
+        self.show_pending_confirmation_banner(ctx);
     }
 
     fn on_exit(&mut self, _gl: Option<&glow::Context>) {
