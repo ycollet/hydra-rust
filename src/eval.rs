@@ -940,6 +940,21 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
     engine.register_fn("setResolution", |w: i64, h: i64| {
         log::warn!("setResolution({w}, {h}) ignored: script-driven resize is not supported");
     });
+    // A widely-copy-pasted community extension adds o0-o3.setNearest()/
+    // .setLinear()/.setMode("nearest"|"linear") to toggle a buffer's texture
+    // filtering. hydra-rust always samples buffers with linear filtering
+    // (see renderer.rs) and has no per-buffer sampler state to switch, so
+    // these are no-ops kept only so sketches calling them still evaluate
+    // their other effects instead of hard erroring at this line.
+    engine.register_fn("setNearest", |buf: i64| {
+        log::warn!("o{buf}.setNearest() ignored: per-buffer texture filtering is not supported");
+    });
+    engine.register_fn("setLinear", |buf: i64| {
+        log::warn!("o{buf}.setLinear() ignored: per-buffer texture filtering is not supported");
+    });
+    engine.register_fn("setMode", |buf: i64, mode: ImmutableString| {
+        log::warn!("o{buf}.setMode(\"{mode}\") ignored: per-buffer texture filtering is not supported");
+    });
     engine.register_fn("screencap", || {
         log::warn!("screencap() ignored: saving a screenshot is not supported");
     });
