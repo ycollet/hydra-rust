@@ -654,6 +654,35 @@ fn register_glsl_ops(engine: &mut Engine) {
     engine.register_fn("min", |a: f64, b: f64| -> f64 { a.min(b) });
     engine.register_fn("max", |a: f64, b: f64| -> f64 { a.max(b) });
     engine.register_fn("atan", |a: f64, b: f64| -> f64 { a.atan2(b) });
+
+    // `Math.random()` (rewritten to `random()` by mathjs::rewrite_math) is
+    // called once at script-eval time, same as everywhere else it's used in
+    // real hydra.js sketches (hydra-rust has no per-frame closures for a
+    // "reactive" random() to make sense of anyway) - so a genuine one-shot
+    // RNG call here is a faithful equivalent, baking a real random literal
+    // into the compiled GLSL, same as JS would.
+    engine.register_fn("random", || -> f64 { next_random_f64() });
+}
+
+/// One-shot, dependency-free pseudo-random `f64` in `[0, 1)`, mixed from the
+/// system clock and a per-process call counter via splitmix64. Not
+/// cryptographic - just needs to vary between calls and patch reloads,
+/// which is all `Math.random()` is ever used for in a sketch.
+fn next_random_f64() -> f64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let count = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let mut z = nanos.wrapping_add(count.wrapping_mul(0x9E3779B97F4A7C15));
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+    z ^= z >> 31;
+    (z >> 11) as f64 * (1.0 / (1u64 << 53) as f64)
 }
 
 fn register_patterns(engine: &mut Engine) {

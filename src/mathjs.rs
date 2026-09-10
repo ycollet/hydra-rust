@@ -1,12 +1,16 @@
 //! Rewrites JS `Math.*` references into the plain function/constant names
 //! hydra-rust already registers (`Math.sin(x)` -> `sin(x)`, `Math.PI` ->
-//! a numeric literal), for the subset of `Math` that has a direct GLSL
-//! equivalent. `Math.random()` and anything else not in `METHOD_MAP` is
-//! deliberately left alone (no GLSL-expression equivalent).
+//! a numeric literal), for the subset of `Math` that has a direct
+//! equivalent. Anything not in `METHOD_MAP`/`CONST_MAP` is deliberately
+//! left alone.
 
 use crate::srcscan::mask_strings_and_comments;
 
 const MATH_PI: &str = "3.141592653589793";
+const MATH_E: &str = "2.718281828459045";
+
+/// JS `Math` constant name -> its numeric literal text.
+const CONST_MAP: &[(&str, &str)] = &[("PI", MATH_PI), ("E", MATH_E)];
 
 /// JS `Math` method name -> registered Rhai/GLSL function name.
 /// `atan2` maps to `atan`, matching GLSL's two-argument `atan(y, x)`
@@ -30,6 +34,7 @@ const METHOD_MAP: &[(&str, &str)] = &[
     ("pow", "pow"),
     ("min", "min"),
     ("max", "max"),
+    ("random", "random"),
 ];
 
 pub fn rewrite_math(src: &str) -> String {
@@ -46,8 +51,10 @@ pub fn rewrite_math(src: &str) -> String {
             let ident_end = ident_end(&chars, ident_start);
             let ident: String = chars[ident_start..ident_end].iter().collect();
 
-            if ident == "PI" && !is_ident_char(chars.get(ident_end).copied()) {
-                out.push_str(MATH_PI);
+            if let Some((_, literal)) = CONST_MAP.iter().find(|(js, _)| *js == ident)
+                && !is_ident_char(chars.get(ident_end).copied())
+            {
+                out.push_str(literal);
                 i = ident_end;
                 continue;
             }
@@ -114,8 +121,21 @@ mod tests {
     }
 
     #[test]
-    fn leaves_random_alone() {
-        assert_eq!(rewrite_math("Math.random()"), "Math.random()");
+    fn rewrites_e_constant() {
+        assert_eq!(rewrite_math("Math.E*2"), "2.718281828459045*2");
+    }
+
+    #[test]
+    fn rewrites_random_call() {
+        // Math.random() is called once at script-load time in real JS
+        // (hydra-rust has no per-frame closures either), so a plain
+        // eval-time RNG call is a faithful equivalent.
+        assert_eq!(rewrite_math("Math.random()"), "random()");
+    }
+
+    #[test]
+    fn leaves_random_without_call_alone() {
+        assert_eq!(rewrite_math("Math.random"), "Math.random");
     }
 
     #[test]
