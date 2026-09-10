@@ -848,10 +848,13 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
 
     #[cfg(feature = "webcam")]
     {
-        // initCam(slot) — default camera (index 0)
+        // initCam(slot) — default camera (index 0). Returns the slot's
+        // source Node (`src(slot)`), matching real hydra.js returning the
+        // source object itself - real sketches routinely chain straight off
+        // of it (`s0.initCam(0).out()`).
         {
             let s = state.clone();
-            engine.register_fn("initCam", move |slot: i64| {
+            engine.register_fn("initCam", move |slot: i64| -> Node {
                 if slot >= 100 {
                     let idx = (slot - 100) as usize;
                     s.lock().unwrap().source_requests.push(SourceRequest::InitCam {
@@ -859,12 +862,13 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
                         camera_index: 0,
                     });
                 }
+                idx_to_source(slot)
             });
         }
         // initCam(slot, camera_index)
         {
             let s = state.clone();
-            engine.register_fn("initCam", move |slot: i64, cam: i64| {
+            engine.register_fn("initCam", move |slot: i64, cam: i64| -> Node {
                 if slot >= 100 {
                     let idx = (slot - 100) as usize;
                     s.lock().unwrap().source_requests.push(SourceRequest::InitCam {
@@ -872,6 +876,7 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
                         camera_index: cam as u32,
                     });
                 }
+                idx_to_source(slot)
             });
         }
     }
@@ -919,23 +924,35 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
         engine.register_fn("hide", |_a: Audio| {});
     }
 
-    // initImage/initVideo/initScreen (external image/video/display capture)
-    // and setResolution have no implementation here (no image decoding,
-    // video, or screen-capture pipeline, and no script-driven canvas
-    // resize) - these are no-ops, logged once per call, purely so sketches
-    // that call them still evaluate their other effects instead of hard
-    // erroring at this line.
-    engine.register_fn("initImage", |idx: i64, url: ImmutableString| {
+    // initImage/initVideo/initScreen/initGif (external image/video/GIF/
+    // display capture) and setResolution have no implementation here (no
+    // image decoding, video, GIF, or screen-capture pipeline, and no
+    // script-driven canvas resize) - these are no-ops, logged once per
+    // call, purely so sketches that call them still evaluate their other
+    // effects instead of hard erroring at this line. Real hydra.js returns
+    // the source object itself for chaining (`sN.initVideo(url).out(o0)`
+    // is a common real-world shape); these return the equivalent Node
+    // (`src(idx)`, reading whatever - nothing, in practice - is already in
+    // that slot) so such chains keep evaluating too.
+    engine.register_fn("initImage", |idx: i64, url: ImmutableString| -> Node {
         log::warn!("initImage({idx}, \"{url}\") ignored: image sources are not supported");
+        idx_to_source(idx)
     });
-    engine.register_fn("initVideo", |idx: i64, url: ImmutableString| {
+    engine.register_fn("initVideo", |idx: i64, url: ImmutableString| -> Node {
         log::warn!("initVideo({idx}, \"{url}\") ignored: video sources are not supported");
+        idx_to_source(idx)
     });
-    engine.register_fn("initScreen", |idx: i64| {
+    engine.register_fn("initGif", |idx: i64, url: ImmutableString| -> Node {
+        log::warn!("initGif({idx}, \"{url}\") ignored: GIF sources are not supported");
+        idx_to_source(idx)
+    });
+    engine.register_fn("initScreen", |idx: i64| -> Node {
         log::warn!("initScreen({idx}) ignored: screen capture is not supported");
+        idx_to_source(idx)
     });
-    engine.register_fn("initScreen", |idx: i64, screen: i64| {
+    engine.register_fn("initScreen", |idx: i64, screen: i64| -> Node {
         log::warn!("initScreen({idx}, {screen}) ignored: screen capture is not supported");
+        idx_to_source(idx)
     });
     engine.register_fn("setResolution", |w: i64, h: i64| {
         log::warn!("setResolution({w}, {h}) ignored: script-driven resize is not supported");
