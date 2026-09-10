@@ -397,3 +397,376 @@ vec2 modulatePixelate(vec2 _st, vec4 _c0, float multiple, float offset) {
 vec2 modulateHue(vec2 _st, vec4 _c0, float amount) {
   return _st + (vec2(_c0.g - _c0.r, _c0.b - _c0.g) * amount * (1.0 / iResolution));
 }
+
+// Ported from popular community extensions loaded via loadScript() in real
+// hydra.js sketches (see SPEC.md §4, jsfunctions/loadScript). loadScript()
+// itself stays a no-op (no dynamic module loading), but these specific
+// functions are common enough to be worth porting natively.
+
+// spiral, from metagrowing/extra-shaders-for-hydra (lib/lib-pattern.js),
+// AGPL-3.0, by Thomas Jourdan.
+vec4 spiral(vec2 _st, float a, float b, float thickness) {
+  vec2 center = _st - vec2(0.5);
+  float thick = clamp(thickness, 0.0, 1.0);
+  float phi = atan(center.y, center.x) / 6.283185307179586 + 0.5;
+  float r = length(center);
+  float w = mod(a * phi - b * r, 1.0);
+  const float epsilon = 0.00001;
+  float d = smoothstep(epsilon, epsilon, w)
+          - smoothstep(thick - epsilon, thick + epsilon, w);
+  return vec4(d, d, d, 1.0);
+}
+
+// turb, from metagrowing/extra-shaders-for-hydra (lib/lib-noise.js),
+// AGPL-3.0, by Thomas Jourdan.
+vec4 turb(vec2 _st, float scale, float offset, float octaves) {
+  int on = int(abs(octaves));
+  float fr = fract(octaves);
+  vec2 pos = scale * _st;
+  float sc = 1.0;
+  float fbm = 0.0;
+  for (int io = 0; io < 8; io++) {
+    fbm += sc * _noise(vec3(pos, offset * iTime));
+    pos *= 2.0;
+    sc /= 2.0;
+    if (io >= on) break;
+  }
+  fbm += fr * sc * _noise(vec3(pos, offset * iTime));
+  return vec4(fbm, fbm, fbm, 1.0);
+}
+
+// inversion, from geikha/hyper-hydra (hydra-fractals.js), MIT license.
+vec2 inversion(vec2 _st) {
+  _st /= dot(_st, _st);
+  return _st;
+}
+
+// colreflect, from metagrowing/extra-shaders-for-hydra (lib/lib-color.js),
+// AGPL-3.0, by Thomas Jourdan.
+vec4 colreflect(vec4 _c0, vec4 _c1, float amount) {
+  vec3 cc = cross(_c0.rgb, normalize(_c1.rgb));
+  return vec4(amount * cc + (1.0 - amount) * _c0.rgb, _c0.a);
+}
+
+// uturb, from metagrowing/extra-shaders-for-hydra (lib/lib-noise.js),
+// AGPL-3.0, by Thomas Jourdan.
+vec4 uturb(vec2 _st, float scale, float offset, float octaves) {
+  int on = int(abs(octaves));
+  float fr = fract(octaves);
+  vec2 pos = scale * _st;
+  float sc = 1.0;
+  float fbm = 0.0;
+  for (int io = 0; io < 8; io++) {
+    fbm += sc * _noise(vec3(pos, offset * iTime));
+    pos *= 2.0;
+    sc /= 2.0;
+    if (io >= on) break;
+  }
+  fbm += fr * sc * _noise(vec3(pos, offset * iTime));
+  fbm = 0.5 + 0.5 * fbm;
+  return vec4(fbm, fbm, fbm, 1.0);
+}
+
+// unoise, from metagrowing/extra-shaders-for-hydra (lib/lib-noise.js),
+// AGPL-3.0, by Thomas Jourdan.
+vec4 unoise(vec2 _st, float scale, float offset) {
+  float noi = _noise(vec3(_st * scale, offset * iTime));
+  noi = 0.5 + 0.5 * noi;
+  return vec4(noi, noi, noi, 1.0);
+}
+
+// whitenoise, from metagrowing/extra-shaders-for-hydra (lib/lib-noise.js),
+// AGPL-3.0, by Thomas Jourdan.
+vec4 whitenoise(vec2 _st, float size, float dynamic) {
+  const highp float wa = 12.9898;
+  const highp float wb = 78.233;
+  const highp float wc = 43758.5453;
+  highp float dt = dot(floor((_st * iResolution) / size), vec2(dynamic * iTime) + vec2(wa, wb));
+  highp float sn = mod(dt, 3.141592653589793);
+  highp float d = fract(sin(sn) * wc);
+  return vec4(d, d, d, 1.0);
+}
+
+// colornoise, from metagrowing/extra-shaders-for-hydra (lib/lib-noise.js),
+// AGPL-3.0, by Thomas Jourdan.
+vec4 colornoise(vec2 _st, float size, float dynamic) {
+  highp float rr;
+  highp float gg;
+  highp float bb;
+  {
+    const highp float wa = 12.9898;
+    const highp float wb = 78.233;
+    const highp float wc = 43758.5453;
+    highp float dt = dot(floor((_st * iResolution) / size), vec2(dynamic * iTime) + vec2(wa, wb));
+    highp float sn = mod(dt, 3.141592653589793);
+    rr = fract(sin(sn) * wc);
+  }
+  {
+    const highp float wa = 12.9898;
+    const highp float wb = 78.233;
+    const highp float wc = 43758.5453;
+    highp float dt = dot(floor((_st * iResolution) / size) + vec2(0.123, 0.567), vec2(dynamic * iTime) + vec2(wa, wb));
+    highp float sn = mod(dt, 3.141592653589793);
+    gg = fract(sin(sn) * wc);
+  }
+  {
+    const highp float wa = 12.9898;
+    const highp float wb = 78.233;
+    const highp float wc = 43758.5453;
+    highp float dt = dot(floor((_st * iResolution) / size) + vec2(0.543, 0.905), vec2(dynamic * iTime) + vec2(wa, wb));
+    highp float sn = mod(dt, 3.141592653589793);
+    bb = fract(sin(sn) * wc);
+  }
+  return vec4(rr, gg, bb, 1.0);
+}
+
+// warp, from metagrowing/extra-shaders-for-hydra (lib/lib-noise.js),
+// AGPL-3.0, by Thomas Jourdan (inspired by Inigo Quilez's domain warping).
+vec4 warp(vec2 _st, float scalei, float offset, float octaves, float octavesinner, float scale) {
+  int oin = int(abs(octavesinner));
+  float fri = fract(octavesinner);
+  float fbmx = 0.0;
+  {
+    vec2 pos = scalei * _st;
+    float sc = 1.0;
+    for (int io = 0; io < 8; io++) {
+      fbmx += sc * _noise(vec3(pos, offset * iTime));
+      pos *= 2.0;
+      sc /= 2.0;
+      if (io >= oin) break;
+    }
+    fbmx += fri * sc * _noise(vec3(pos, offset * iTime));
+  }
+  float fbmy = 0.0;
+  {
+    vec2 pos = scalei * (_st + vec2(5.123, 3.987));
+    float sc = 1.0;
+    for (int io = 0; io < 8; io++) {
+      fbmy += sc * _noise(vec3(pos, offset * iTime));
+      pos *= 2.0;
+      sc /= 2.0;
+      if (io >= oin) break;
+    }
+    fbmy += fri * sc * _noise(vec3(pos, offset * iTime));
+  }
+  int on = int(abs(octaves));
+  float fr = fract(octaves);
+  float fbm = 0.0;
+  vec2 pos = scale * vec2(fbmx, fbmy);
+  float sc = 1.0;
+  for (int io = 0; io < 8; io++) {
+    fbm += sc * _noise(vec3(pos, offset * iTime));
+    pos *= 2.0;
+    sc /= 2.0;
+    if (io >= on) break;
+  }
+  fbm += fr * sc * _noise(vec3(pos, offset * iTime));
+  return vec4(fbm, fbm, fbm, 1.0);
+}
+
+// cwarp, from metagrowing/extra-shaders-for-hydra (lib/lib-noise.js),
+// AGPL-3.0, by Thomas Jourdan.
+vec4 cwarp(vec2 _st, float scalei, float offset, float octaves, float octavesinner, float scale, float focus) {
+  float r = length(vec2(_st.y - 0.5, _st.x - 0.5));
+  float foc = pow(r, abs(focus));
+  int oin = int(abs(octavesinner));
+  float fri = fract(octavesinner);
+  float fbmx = 0.0;
+  {
+    vec2 pos = scalei * _st;
+    float sc = 1.0;
+    for (int io = 0; io < 8; io++) {
+      fbmx += sc * _noise(vec3(pos, offset * iTime));
+      pos *= 2.0;
+      sc /= 2.0;
+      if (io >= oin) break;
+    }
+    fbmx += fri * sc * _noise(vec3(pos, offset * iTime));
+    fbmx = (0.5 + 0.5 * fbmx) - foc;
+  }
+  float fbmy = 0.0;
+  {
+    vec2 pos = scalei * (_st + vec2(5.123, 3.987));
+    float sc = 1.0;
+    for (int io = 0; io < 8; io++) {
+      fbmy += sc * _noise(vec3(pos, offset * iTime));
+      pos *= 2.0;
+      sc /= 2.0;
+      if (io >= oin) break;
+    }
+    fbmy += fri * sc * _noise(vec3(pos, offset * iTime));
+    fbmy = (0.5 + 0.5 * fbmy) - foc;
+  }
+  int on = int(abs(octaves));
+  float fr = fract(octaves);
+  float fbm = 0.0;
+  vec2 pos = scale * vec2(fbmx, fbmy);
+  float sc = 1.0;
+  for (int io = 0; io < 8; io++) {
+    fbm += sc * _noise(vec3(pos, offset * iTime));
+    pos *= 2.0;
+    sc /= 2.0;
+    if (io >= on) break;
+  }
+  fbm += fr * sc * _noise(vec3(pos, offset * iTime));
+  fbm = (0.5 + 0.5 * fbm) - foc;
+  return vec4(fbm, fbm, fbm, 1.0);
+}
+
+// ncontour, from metagrowing/extra-shaders-for-hydra (lib/lib-noise.js),
+// AGPL-3.0, by Thomas Jourdan.
+vec4 ncontour(vec2 _st, float thresh, float smoothAmt, float octaves, float scale, float speed, float step) {
+  vec2 st = _st - 0.5;
+  float sc = scale;
+  float sp = speed;
+  float d0 = _noise(vec3(st * sc, sp * iTime));
+  for (int ni = 1; ni < 5; ++ni) {
+    if (ni >= int(octaves)) break;
+    sp /= step;
+    sc *= step;
+    d0 += _noise(vec3(st * sc, sp * iTime));
+  }
+  float d = distance(d0, thresh);
+  float g = smoothstep(0.0, smoothAmt, d);
+  return vec4(vec3(g, g, g), 1.0);
+}
+
+// pulse, from metagrowing/extra-shaders-for-hydra (lib/lib-pattern.js),
+// AGPL-3.0, by Thomas Jourdan.
+vec4 pulse(vec2 _st, float edge, float width, float epsilon) {
+  float ea = abs(epsilon);
+  float wa = abs(width);
+  float d0 = smoothstep(edge - ea, edge + ea, _st.x);
+  float d1 = smoothstep(edge + wa - ea, edge + wa + ea, _st.x);
+  float d = d0 - d1;
+  return vec4(d, d, d, 1.0);
+}
+
+// pulsetrain, from metagrowing/extra-shaders-for-hydra (lib/lib-pattern.js),
+// AGPL-3.0, by Thomas Jourdan.
+vec4 pulsetrain(vec2 _st, float train, float edge, float width, float epsilon) {
+  float ea = abs(epsilon);
+  float wa = abs(width);
+  float xp = _st.x;
+  float d = 0.0;
+  int itr = int(train);
+  for (int ii = 0; ii < 10; ii++) {
+    float d0 = smoothstep(edge - ea, edge + ea, xp);
+    float d1 = smoothstep(edge + wa - ea, edge + wa + ea, xp);
+    if (ii >= itr) break;
+    d += d0 - d1;
+    xp += 1.0 / float(itr);
+  }
+  return vec4(d, d, d, 1.0);
+}
+
+// hextile, from metagrowing/extra-shaders-for-hydra (lib/lib-pattern.js),
+// AGPL-3.0, by Thomas Jourdan.
+vec4 hextile(vec2 _st, float tiles) {
+  const vec2 hs = vec2(1.0, 1.7320508075688772);
+  vec2 p = (_st - 0.5) * tiles;
+  vec4 hC = floor(vec4(p, p - vec2(0.5, 1.0)) / hs.xyxy) + 0.5;
+  vec4 h = vec4(p - hC.xy * hs, p - (hC.zw + 0.5) * hs);
+  float d = length(h.xy) < length(h.zw) ?
+            (fract(p.x * 0.5) < 0.5 ? 0.75 : 0.0) :
+            (fract(p.x * 0.5 - hs.y - 0.01) < 0.5 ? 0.25 : 1.0);
+  return vec4(d, d, d, 1.0);
+}
+
+// concentric, from metagrowing/extra-shaders-for-hydra (lib/lib-pattern.js),
+// AGPL-3.0, by Thomas Jourdan.
+vec4 concentric(vec2 _st, float scale, float centerX, float centerY) {
+  float d = sin(scale * distance(_st, vec2(centerX, centerY)));
+  return vec4(d, d, d, 1.0);
+}
+
+// brick, from metagrowing/extra-shaders-for-hydra (lib/lib-pattern.js),
+// AGPL-3.0, by Thomas Jourdan (see Darwyn Peachey, Building Procedural
+// Textures, page 37).
+vec4 brick(vec2 _st, float width, float height, float gap) {
+  vec2 p = _st - 0.5;
+  const float eps = 0.001;
+  float bmwidth = width + gap;
+  float bmheight = height + gap;
+  float mwf = gap * 0.5 / bmwidth;
+  float mhf = gap * 0.5 / bmheight;
+  float bms = p.x / bmwidth;
+  float bmt = p.y / bmheight;
+  if (mod(bmt * 0.5, 1.0) > 0.5) bms += 0.5;
+  float sbrick = floor(bms);
+  float tbrick = floor(bmt);
+  bms -= sbrick;
+  bmt -= tbrick;
+  float w = smoothstep(mwf, mwf + eps, bms) - smoothstep(1.0 - mwf - eps, 1.0 - mwf, bms);
+  float h = smoothstep(mhf, mhf + eps, bmt) - smoothstep(1.0 - mhf - eps, 1.0 - mhf, bmt);
+  float d = w * h;
+  return vec4(d, d, d, 1.0);
+}
+
+// wave, from metagrowing/extra-shaders-for-hydra (lib/lib-pattern.js),
+// AGPL-3.0, by Thomas Jourdan.
+vec4 wave(vec2 _st, float waveTime, float frequ, float loops, float thick) {
+  const float eps = 0.001;
+  float x = _st.x - waveTime;
+  float y = _st.y - 0.5;
+  float sc = 0.25;
+  float fr = frequ;
+  float l = 0.0;
+  for (int i = 0; i < 6; ++i) {
+    y += sc * sin(fr * x);
+    if (l >= loops) break;
+    sc *= 0.5;
+    fr *= 2.0;
+    l += 1.0;
+  }
+  float d = smoothstep(0.0, eps, y) - smoothstep(thick, thick + eps, y);
+  return vec4(d, d, d, 1.0);
+}
+
+// lissa, from metagrowing/extra-shaders-for-hydra (lib/lib-pattern.js),
+// AGPL-3.0, by Thomas Jourdan (see https://en.wikipedia.org/wiki/Harmonograph).
+vec4 lissa(vec2 _st, float lissaTime, float frequ, float loops, float thick) {
+  const float eps = 0.001;
+  vec2 st2 = _st - 0.5;
+  vec2 pol = vec2(atan(st2.y, st2.x), 2.0 * length(st2));
+  float x = pol.x - lissaTime;
+  float y = pol.y - 0.5;
+  float sc = 0.25;
+  float fr = frequ;
+  float l = 0.0;
+  for (int i = 0; i < 6; ++i) {
+    y += sc * sin(fr * x);
+    if (l >= loops) break;
+    sc *= 0.5;
+    fr *= 2.0;
+    l += 1.0;
+  }
+  float d = smoothstep(0.0, eps, y) - smoothstep(thick, thick + eps, y);
+  return vec4(d, d, d, 1.0);
+}
+
+// mirrorX/mirrorY/mirrorX2/mirrorY2/mirrorWrap, from geikha/hyper-hydra
+// (hydra-fractals.js), MIT license.
+vec2 mirrorX(vec2 _st, float pos, float coverage) {
+  _st.x = (0.0 - abs(fract(_st.x / coverage) - (1.0 - 0.5 - pos)) + 0.5 - pos) * coverage;
+  return _st;
+}
+
+vec2 mirrorY(vec2 _st, float pos, float coverage) {
+  _st.y = (0.0 - abs(fract(_st.y / coverage) - (1.0 - 0.5 - pos)) + 0.5 - pos) * coverage;
+  return _st;
+}
+
+vec2 mirrorX2(vec2 _st, float pos, float coverage) {
+  _st.x = (abs(fract(_st.x / coverage) - (1.0 - 0.5 - pos)) + 0.5 - pos) * coverage;
+  return _st;
+}
+
+vec2 mirrorY2(vec2 _st, float pos, float coverage) {
+  _st.y = (0.0 - abs(fract(_st.y / coverage) - (1.0 - 0.5 - pos)) + 0.5 - pos) * coverage;
+  return _st;
+}
+
+vec2 mirrorWrap(vec2 _st) {
+  return -abs(fract(_st / 2.0) * 2.0 - 1.0) + 1.0;
+}

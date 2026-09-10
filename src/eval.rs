@@ -205,6 +205,23 @@ const FUNCTIONS: &[FnMeta] = &[
     FnMeta { name: "solid", kind: OpKind::Source, defaults: &[0.0, 0.0, 0.0, 1.0] },
     FnMeta { name: "rings", kind: OpKind::Source, defaults: &[8.0, 0.1] },
     FnMeta { name: "checker", kind: OpKind::Source, defaults: &[4.0, 4.0] },
+    // Ported community-extension functions (see SPEC.md §4, loadScript).
+    FnMeta { name: "spiral", kind: OpKind::Source, defaults: &[1.0, 5.0, 0.1] },
+    FnMeta { name: "turb", kind: OpKind::Source, defaults: &[10.0, 0.1, 3.0] },
+    FnMeta { name: "uturb", kind: OpKind::Source, defaults: &[10.0, 0.1, 3.0] },
+    FnMeta { name: "unoise", kind: OpKind::Source, defaults: &[10.0, 0.1] },
+    FnMeta { name: "whitenoise", kind: OpKind::Source, defaults: &[10.0, 0.0] },
+    FnMeta { name: "colornoise", kind: OpKind::Source, defaults: &[10.0, 0.0] },
+    FnMeta { name: "warp", kind: OpKind::Source, defaults: &[10.0, 0.1, 2.0, 3.0, 1.0] },
+    FnMeta { name: "cwarp", kind: OpKind::Source, defaults: &[10.0, 0.1, 2.0, 3.0, 1.0, 0.5] },
+    FnMeta { name: "ncontour", kind: OpKind::Source, defaults: &[0.5, 0.1, 3.0, 5.0, 0.5, 2.0] },
+    FnMeta { name: "pulse", kind: OpKind::Source, defaults: &[0.5, 0.05, 0.001] },
+    FnMeta { name: "pulsetrain", kind: OpKind::Source, defaults: &[3.0, 0.5, 0.05, 0.001] },
+    FnMeta { name: "hextile", kind: OpKind::Source, defaults: &[10.0] },
+    FnMeta { name: "concentric", kind: OpKind::Source, defaults: &[100.0, 0.5, 0.5] },
+    FnMeta { name: "brick", kind: OpKind::Source, defaults: &[0.25, 0.08, 0.01] },
+    FnMeta { name: "wave", kind: OpKind::Source, defaults: &[0.0, 10.0, 3.0, 0.025] },
+    FnMeta { name: "lissa", kind: OpKind::Source, defaults: &[0.0, 10.0, 3.0, 0.025] },
     FnMeta { name: "rotate", kind: OpKind::Geo, defaults: &[10.0, 0.0] },
     FnMeta { name: "scale", kind: OpKind::Geo, defaults: &[1.5, 1.0, 1.0, 0.5, 0.5] },
     FnMeta { name: "scroll", kind: OpKind::Geo, defaults: &[0.5, 0.5, 0.0, 0.0] },
@@ -218,6 +235,12 @@ const FUNCTIONS: &[FnMeta] = &[
     FnMeta { name: "polar", kind: OpKind::Geo, defaults: &[] },
     FnMeta { name: "cart", kind: OpKind::Geo, defaults: &[] },
     FnMeta { name: "fold", kind: OpKind::Geo, defaults: &[1.0] },
+    FnMeta { name: "inversion", kind: OpKind::Geo, defaults: &[] },
+    FnMeta { name: "mirrorX", kind: OpKind::Geo, defaults: &[0.0, 1.0] },
+    FnMeta { name: "mirrorY", kind: OpKind::Geo, defaults: &[0.0, 1.0] },
+    FnMeta { name: "mirrorX2", kind: OpKind::Geo, defaults: &[0.0, 1.0] },
+    FnMeta { name: "mirrorY2", kind: OpKind::Geo, defaults: &[0.0, 1.0] },
+    FnMeta { name: "mirrorWrap", kind: OpKind::Geo, defaults: &[] },
     FnMeta { name: "color", kind: OpKind::Color, defaults: &[1.0, 1.0, 1.0, 1.0] },
     FnMeta { name: "invert", kind: OpKind::Color, defaults: &[1.0] },
     FnMeta { name: "contrast", kind: OpKind::Color, defaults: &[1.6] },
@@ -241,6 +264,7 @@ const FUNCTIONS: &[FnMeta] = &[
     FnMeta { name: "layer", kind: OpKind::Blend, defaults: &[] },
     FnMeta { name: "mask", kind: OpKind::Blend, defaults: &[] },
     FnMeta { name: "sub", kind: OpKind::Blend, defaults: &[1.0] },
+    FnMeta { name: "colreflect", kind: OpKind::Blend, defaults: &[1.0] },
     FnMeta { name: "modulate", kind: OpKind::Modulate, defaults: &[0.1] },
     FnMeta { name: "modulateScale", kind: OpKind::Modulate, defaults: &[1.0, 1.0] },
     FnMeta { name: "modulateRotate", kind: OpKind::Modulate, defaults: &[1.0, 0.0] },
@@ -1078,6 +1102,28 @@ fn register_source(engine: &mut Engine, meta: &FnMeta) {
         engine.register_fn(name, move |a: Dynamic, b: Dynamic, c: Dynamic, d: Dynamic| {
             Node::source(name, fill_args(&[as_arg(a), as_arg(b), as_arg(c), as_arg(d)], defaults))
         });
+    }
+    if n >= 5 {
+        engine.register_fn(name, move |a: Dynamic, b: Dynamic, c: Dynamic, d: Dynamic, e: Dynamic| {
+            Node::source(
+                name,
+                fill_args(&[as_arg(a), as_arg(b), as_arg(c), as_arg(d), as_arg(e)], defaults),
+            )
+        });
+    }
+    if n >= 6 {
+        engine.register_fn(
+            name,
+            move |a: Dynamic, b: Dynamic, c: Dynamic, d: Dynamic, e: Dynamic, f: Dynamic| {
+                Node::source(
+                    name,
+                    fill_args(
+                        &[as_arg(a), as_arg(b), as_arg(c), as_arg(d), as_arg(e), as_arg(f)],
+                        defaults,
+                    ),
+                )
+            },
+        );
     }
 }
 
