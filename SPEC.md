@@ -117,18 +117,29 @@ none of the passes below ever rewrite something inside a string or comment).
 
 Pipeline order (each step's output feeds the next):
 
-1. **`quotes::rewrite_single_quoted_strings`** — JS treats `'...'` and
+1. **`whitespace::normalize_whitespace`** — real sketches, often copy-pasted
+   from a web page or word processor, sometimes contain non-ASCII Unicode
+   whitespace (non-breaking spaces, en/em spaces, ideographic space, ...).
+   Rust's `char::is_whitespace()` (used throughout the other passes here)
+   already treats these as whitespace, but Rhai's lexer only recognizes
+   ASCII space/tab/CR/LF — anything else in code position is a hard
+   "Unexpected '<char>'" lex error, even though the character is visually
+   indistinguishable from a normal space. Maps every such character to a
+   plain ASCII space. Runs first, unconditionally (no string/comment
+   masking needed): even inside a string, one of these renders identically
+   to a regular space, so there's no reason to preserve the distinction.
+2. **`quotes::rewrite_single_quoted_strings`** — JS treats `'...'` and
    `"..."` identically as general strings. Rhai's `'x'` syntax is a
    *character* literal (exactly one character); any real multi-character
    JS string written with single quotes (`.ease('sin')`) would otherwise fail
    to lex at all. Rewrites `'...'` → `"..."` (unescaping `\'`, escaping
-   embedded `"`). Runs first because every later pass's string/comment
+   embedded `"`). Runs early because every later pass's string/comment
    masking depends on a consistent double-quoted view of the source.
-2. **`numlit::insert_leading_zero`** — JS allows a decimal point with no
+3. **`numlit::insert_leading_zero`** — JS allows a decimal point with no
    leading digit (`.1`); Rhai's number grammar requires `0.1`. Inserts a `0`
    before any `.` immediately followed by a digit, unless the character
    immediately before it is itself a digit (so `1.5` is untouched).
-3. **`jskeywords::rewrite_keywords`** — `var`/`null`/`new`/`await`/`async`/
+4. **`jskeywords::rewrite_keywords`** — `var`/`null`/`new`/`await`/`async`/
    `import` are all Rhai-*reserved* keywords with no meaning registered to
    them; any bare appearance is already an unconditional hard syntax error,
    so substituting them can only help or be neutral. `var` → `let` (same
@@ -139,7 +150,7 @@ Pipeline order (each step's output feeds the next):
    strict (in)equality `===`/`!==` ("not a valid operator... Should it be
    '=='?") to `==`/`!=` — Rhai's equality already compares by value and
    type here.
-4. **`jsfunctions::rewrite_function_decls`** — rewrites JS *named* function
+5. **`jsfunctions::rewrite_function_decls`** — rewrites JS *named* function
    declarations (`function name(a, b=1) { ... }`) into Rhai's own,
    similarly-shaped function syntax (`fn name(a, b) { ... }` — spelled
    `fn`, and without default parameter values). Real sketches sometimes
@@ -147,7 +158,7 @@ Pipeline order (each step's output feeds the next):
    `function(...) { ... }` expressions are left alone, since they're often
    used as closures capturing outer-scope variables, which Rhai's
    `fn`-defined functions can't do.
-5. **`iife::unwrap_iife`** — real sketches sometimes wrap their entire body
+6. **`iife::unwrap_iife`** — real sketches sometimes wrap their entire body
    in an immediately-invoked function expression to load an extension
    library first: `(() => { BODY })()` (`async`/`await` already stripped
    by step 3), optionally followed by a promise `.then(...)`/`.catch(...)`/
@@ -157,19 +168,19 @@ Pipeline order (each step's output feeds the next):
    unbound in the body) and reduces the whole construct — handler chain
    included — to a bare Rhai block `{ BODY }`, evaluated as a normal
    statement sequence.
-5. **`autolet::insert_missing_let`** — JS creates a variable implicitly on
+7. **`autolet::insert_missing_let`** — JS creates a variable implicitly on
    first assignment (`speed = 0.8`); Rhai requires `let`. Inserts `let `
    before the first bare assignment to any name not already known (built-in
    globals from §3, or a name this same pass already declared earlier in the
    script). Only fires at paren/bracket depth 0 — `let` is a statement, and
    isn't valid inside a function call's argument list or an array literal,
    where JS allows assignment-as-expression (`foo(x = 5)`).
-4. **`mathjs::rewrite_math`** — rewrites `Math.<method>(...)` to the bare
+8. **`mathjs::rewrite_math`** — rewrites `Math.<method>(...)` to the bare
    function name for every method with a registered equivalent (§3's math
    function list, plus `atan2`→`atan`), and `Math.PI` to a numeric literal.
    `Math.random()` is deliberately left untouched — there's no
    GLSL-expression equivalent for true randomness.
-5. **`argtrunc::truncate_extra_args`** — JS silently ignores extra arguments
+9. **`argtrunc::truncate_extra_args`** — JS silently ignores extra arguments
    beyond a function's declared parameters; Rhai has no such leniency and
    errors "Function not found" if no overload matches the arity. Truncates
    each known hydra function's call-site argument list down to its real
@@ -178,7 +189,7 @@ Pipeline order (each step's output feeds the next):
    `argtrunc.rs::MAX_ARGS`; for blend/modulate-kind functions it counts the
    leading "other" operand as one of the arguments (e.g.
    `modulate(other, amount)` → max 2).
-6. **`patcall::rewrite_pattern_calls`** — real sketches often store a reusable
+10. **`patcall::rewrite_pattern_calls`** — real sketches often store a reusable
    value as `pat = ()=>expr` and invoke it later as `pat()`, JS-callback
    style. Since step 7 reduces such definitions to a plain value (not a
    callable), a later zero-argument call to a name bound this way is
@@ -186,7 +197,7 @@ Pipeline order (each step's output feeds the next):
    stripping, since it needs to see the `()=>` marker to know which names
    qualify. Only the exact zero-arg-arrow-then-zero-arg-call shape is
    rewritten; a call with any arguments is left alone.
-7. **`arrow::strip_zero_arg_arrows`** — strips the `()=>` wrapper JS uses to
+11. **`arrow::strip_zero_arg_arrows`** — strips the `()=>` wrapper JS uses to
    mark a value as per-frame-dynamic (`rotate(()=>time*0.1)` →
    `rotate(time*0.1)`). This is safe here because hydra-rust's reactive
    values (§3) are already "dynamic" without a wrapper — they compile
@@ -200,7 +211,7 @@ Pipeline order (each step's output feeds the next):
    arrows (`(a,b)=>...`, `x=>...`, used for pattern/sequencer callbacks —
    unsupported) and block-bodied arrows (`()=>{ ... }` — don't reduce to a
    single expression).
-8. **`ternary::rewrite_ternaries`** — rewrites JS ternaries (`cond ? a : b`)
+12. **`ternary::rewrite_ternaries`** — rewrites JS ternaries (`cond ? a : b`)
    into Rhai's `if`/`else` expression form (`if cond { a } else { b }`,
    valid since Rhai's `if`/`else` blocks evaluate to their last statement's
    value). Rhai has no `?:` operator at all ("Unknown operator: '?'").
@@ -209,7 +220,7 @@ Pipeline order (each step's output feeds the next):
    than via full expression-grammar parsing; nested/chained ternaries
    (`a?b:c?d:e`, right-associative) are handled via recursion on the
    extracted branches.
-9. **`asi::insert_missing_semicolons`** — JS has automatic semicolon
+13. **`asi::insert_missing_semicolons`** — JS has automatic semicolon
    insertion; Rhai doesn't. Real multi-buffer sketches routinely put each
    statement on its own line with no `;` (`osc(10).out(o0)\nosc(20).out(o1)`).
    Inserts `;` at line breaks that are genuine statement boundaries (bracket

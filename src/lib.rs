@@ -18,6 +18,7 @@ mod quotes;
 mod srcscan;
 mod ternary;
 mod text;
+mod whitespace;
 
 pub use eval::{eval, EvalResult, RenderMode};
 #[cfg(feature = "webcam")]

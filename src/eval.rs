@@ -15,6 +15,7 @@ use crate::patcall;
 use crate::quotes;
 use crate::ternary;
 use crate::text::{self, TextData};
+use crate::whitespace;
 #[cfg(feature = "audio")]
 use crate::audio::NUM_FFT_BINS;
 
@@ -730,6 +731,7 @@ fn register_patterns(engine: &mut Engine) {
 }
 
 pub fn eval(code: &str) -> Result<EvalResult, String> {
+    let code = &whitespace::normalize_whitespace(code);
     let code = &quotes::rewrite_single_quoted_strings(code);
     let code = &numlit::insert_leading_zero(code);
     let code = &jskeywords::rewrite_keywords(code);
