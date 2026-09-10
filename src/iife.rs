@@ -7,9 +7,14 @@
 //! so by the time this runs the wrapper always looks like a plain
 //! non-async arrow.) Rhai has no `=>` closure syntax at all, so this
 //! construct is a hard parse failure otherwise - reduces the whole thing
-//! to a bare Rhai block `{ BODY }`, which Rhai evaluates as a normal
-//! sequence of statements, dropping the trailing `.then`/`.catch`/
-//! `.finally` handlers entirely (there's nothing async to react to here).
+//! to the bare body text (no wrapping `{ }`), dropping the trailing
+//! `.then`/`.catch`/`.finally` handlers entirely (there's nothing async to
+//! react to here). The braces are deliberately **not** kept: this wrapper
+//! typically spans the sketch's entire top-level statement list, and
+//! `asi::insert_missing_semicolons` (which runs later) treats `{`/`}` as
+//! bracket depth just like `(`/`[` - wrapping the body in a block would
+//! leave that depth at 1 for the whole body, silently disabling semicolon
+//! insertion between its own top-level statements.
 //!
 //! Deliberately narrow: only matches a wrapper with an *empty* parameter
 //! list (`()=>`). A non-empty one (`(hydra) => { ... }`) is left alone,
@@ -28,9 +33,7 @@ pub fn unwrap_iife(src: &str) -> String {
         if !mask[i]
             && let Some((body_start, body_end, after)) = match_iife(&chars, &mask, i)
         {
-            out.push('{');
             out.extend(&chars[body_start..body_end]);
-            out.push('}');
             i = after;
             continue;
         }
@@ -144,14 +147,14 @@ mod tests {
 
     #[test]
     fn unwraps_plain_iife() {
-        assert_eq!(unwrap_iife("(()=>{osc(60).out()})()"), "{osc(60).out()}");
+        assert_eq!(unwrap_iife("(()=>{osc(60).out()})()"), "osc(60).out()");
     }
 
     #[test]
     fn drops_trailing_catch_handler() {
         assert_eq!(
             unwrap_iife("(()=>{osc(60).out()})().catch(e=>log(e))"),
-            "{osc(60).out()}"
+            "osc(60).out()"
         );
     }
 
@@ -159,7 +162,20 @@ mod tests {
     fn drops_then_and_catch_chain() {
         assert_eq!(
             unwrap_iife("(()=>{osc(60).out()})().then(x=>log(x)).catch(e=>log(e))"),
-            "{osc(60).out()}"
+            "osc(60).out()"
+        );
+    }
+
+    #[test]
+    fn unwraps_multi_statement_body_without_wrapping_braces() {
+        // regression test: wrapping the body in `{ }` made asi's paren/
+        // bracket-depth tracking see depth 1 for the whole body, which
+        // silently disabled semicolon insertion between the body's own
+        // top-level statements (the common real-world case: a whole
+        // sketch wrapped in a library-loading IIFE).
+        assert_eq!(
+            unwrap_iife("(()=>{a.setBins(6)\na.setCutoff(1)})()"),
+            "a.setBins(6)\na.setCutoff(1)"
         );
     }
 
@@ -192,7 +208,7 @@ mod tests {
     fn preserves_body_with_nested_braces() {
         assert_eq!(
             unwrap_iife("(()=>{if a { b } else { c }})()"),
-            "{if a { b } else { c }}"
+            "if a { b } else { c }"
         );
     }
 }

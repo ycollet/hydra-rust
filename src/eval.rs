@@ -730,7 +730,12 @@ fn register_patterns(engine: &mut Engine) {
     });
 }
 
-pub fn eval(code: &str) -> Result<EvalResult, String> {
+/// Runs the fixed JS-compatibility preprocessing pipeline (see SPEC.md §4)
+/// and returns the resulting Rhai source, without evaluating it. Exposed
+/// (undocumented) purely as a debugging/tooling aid for inspecting what a
+/// given sketch looks like right before it's handed to Rhai's parser.
+#[doc(hidden)]
+pub fn preprocess(code: &str) -> String {
     let code = &whitespace::normalize_whitespace(code);
     let code = &quotes::rewrite_single_quoted_strings(code);
     let code = &numlit::insert_leading_zero(code);
@@ -743,7 +748,11 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
     let code = &patcall::rewrite_pattern_calls(code);
     let code = &arrow::strip_zero_arg_arrows(code);
     let code = &ternary::rewrite_ternaries(code);
-    let code = &asi::insert_missing_semicolons(code);
+    asi::insert_missing_semicolons(code)
+}
+
+pub fn eval(code: &str) -> Result<EvalResult, String> {
+    let code = &preprocess(code);
     let state = Arc::new(Mutex::new(PatchState {
         buffers: [None, None, None, None],
         render_mode: RenderMode::default(),

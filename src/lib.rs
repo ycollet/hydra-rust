@@ -20,7 +20,7 @@ mod ternary;
 mod text;
 mod whitespace;
 
-pub use eval::{eval, EvalResult, RenderMode};
+pub use eval::{eval, preprocess, EvalResult, RenderMode};
 #[cfg(feature = "webcam")]
 pub use eval::SourceRequest;
 #[cfg(feature = "audio")]
