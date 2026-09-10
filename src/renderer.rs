@@ -52,6 +52,11 @@ pub struct RenderSnapshot {
     render_mode: RenderMode,
     text_texture: Option<glow::Texture>,
     source_textures: [Option<glow::Texture>; NUM_SOURCES],
+    /// Each source texture's last-uploaded (width, height), so
+    /// `upload_source` can stream same-size frames in place via
+    /// `tex_sub_image_2d` instead of reallocating GPU storage on every
+    /// single incoming camera frame (~30Hz per active source).
+    source_dims: [Option<(u32, u32)>; NUM_SOURCES],
 }
 
 pub struct ShaderRenderer {
@@ -112,6 +117,7 @@ impl ShaderRenderer {
                 render_mode: RenderMode::Single0,
                 text_texture: None,
                 source_textures: [None; NUM_SOURCES],
+                source_dims: [None; NUM_SOURCES],
             },
             vbo,
             gl,
@@ -195,17 +201,35 @@ impl ShaderRenderer {
 
             self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
             self.gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
-            self.gl.tex_image_2d(
-                glow::TEXTURE_2D,
-                0,
-                glow::RGB8 as i32,
-                frame.width as i32,
-                frame.height as i32,
-                0,
-                glow::RGB,
-                glow::UNSIGNED_BYTE,
-                PixelUnpackData::Slice(Some(&frame.pixels)),
-            );
+            let dims = (frame.width, frame.height);
+            if self.snapshot.source_dims[slot] == Some(dims) {
+                // Same size as last frame: stream into the existing
+                // storage rather than reallocating it from scratch.
+                self.gl.tex_sub_image_2d(
+                    glow::TEXTURE_2D,
+                    0,
+                    0,
+                    0,
+                    frame.width as i32,
+                    frame.height as i32,
+                    glow::RGB,
+                    glow::UNSIGNED_BYTE,
+                    PixelUnpackData::Slice(Some(&frame.pixels)),
+                );
+            } else {
+                self.gl.tex_image_2d(
+                    glow::TEXTURE_2D,
+                    0,
+                    glow::RGB8 as i32,
+                    frame.width as i32,
+                    frame.height as i32,
+                    0,
+                    glow::RGB,
+                    glow::UNSIGNED_BYTE,
+                    PixelUnpackData::Slice(Some(&frame.pixels)),
+                );
+                self.snapshot.source_dims[slot] = Some(dims);
+            }
             self.gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 4);
             self.gl.bind_texture(glow::TEXTURE_2D, None);
             self.snapshot.source_textures[slot] = Some(tex);
