@@ -43,6 +43,46 @@ fn strip_return_prefix(s: &str) -> Option<&str> {
     boundary.then_some(rest)
 }
 
+/// If `s` (after trimming leading whitespace) starts with an arrow
+/// function's header - `(params) =>` or a bare `ident =>` - returns the
+/// header text (params/ident plus the `=>` itself) and the remainder.
+/// Same idea as `strip_return_prefix`: a named arrow-function assignment
+/// (`let pick = (x) => x>0.5 ? 1 : 0`, handled by `arrowfn` once this pass
+/// is done) has no `,`/`;`/bare-`=` boundary between its header and body,
+/// so without this the whole `(x) =>` gets swept into the ternary's
+/// condition, producing the malformed `if (x) => x>0.5 {1} else {0}`
+/// instead of `(x) => if x>0.5 {1} else {0}`.
+fn strip_arrow_header(s: &str) -> Option<(String, String)> {
+    let chars: Vec<char> = s.trim_start().chars().collect();
+    let mask = mask_strings_and_comments(&chars);
+    let n = chars.len();
+
+    let mut j;
+    if chars.first() == Some(&'(') {
+        let close = matching_close(&chars, &mask, 0);
+        if close >= n {
+            return None;
+        }
+        j = close + 1;
+    } else if chars.first().is_some_and(|c| c.is_alphabetic() || *c == '_') {
+        j = 0;
+        while j < n && (chars[j].is_alphanumeric() || chars[j] == '_') {
+            j += 1;
+        }
+    } else {
+        return None;
+    }
+
+    while j < n && (chars[j].is_whitespace() || mask[j]) {
+        j += 1;
+    }
+    if chars.get(j) != Some(&'=') || chars.get(j + 1) != Some(&'>') {
+        return None;
+    }
+    j += 2;
+    Some((chars[..j].iter().collect(), chars[j..].iter().collect()))
+}
+
 fn matching_close(chars: &[char], mask: &[bool], open_idx: usize) -> usize {
     let open = chars[open_idx];
     let close = match open {
@@ -117,9 +157,13 @@ fn transform(chars: &[char], mask: &[bool], start: usize, end: usize) -> String 
                 i = next;
                 let (else_text, next) = scan_branch(chars, mask, i, end, false);
                 i = next;
+                let (arrow_prefix, cond) = match strip_arrow_header(&cond) {
+                    Some((header, rest)) => (header, rest),
+                    None => (String::new(), cond),
+                };
                 let (return_prefix, cond) = match strip_return_prefix(&cond) {
-                    Some(rest) => ("return ", rest),
-                    None => ("", cond.as_str()),
+                    Some(rest) => ("return ", rest.to_string()),
+                    None => ("", cond),
                 };
                 // Re-run on each extracted branch: catches chained ternaries
                 // in the else branch (`a?b:c?d:e`) and any left unconverted
@@ -127,7 +171,7 @@ fn transform(chars: &[char], mask: &[bool], start: usize, end: usize) -> String 
                 let cond = rewrite_ternaries(cond.trim());
                 let then_text = rewrite_ternaries(then_text.trim());
                 let else_text = rewrite_ternaries(else_text.trim());
-                out.push_str(&format!("{return_prefix}if {cond} {{ {then_text} }} else {{ {else_text} }}"));
+                out.push_str(&format!("{arrow_prefix}{return_prefix}if {cond} {{ {then_text} }} else {{ {else_text} }}"));
             }
             _ => {
                 seg.push(chars[i]);
@@ -246,6 +290,39 @@ mod tests {
     }
 
     #[test]
+    fn moves_parenthesized_arrow_header_outside_if() {
+        // regression test: a named arrow-function assignment
+        // (`let pick = (x) => ...`, converted to a real `fn` by `arrowfn`
+        // later in the pipeline) has no `,`/`;`/bare-`=` boundary between
+        // its `(params) =>` header and body, so without this the whole
+        // header got swept into the ternary's condition.
+        assert_eq!(
+            rewrite_ternaries("(x) => x>0.5 ? 1 : 0"),
+            "(x) =>if x>0.5 { 1 } else { 0 }"
+        );
+    }
+
+    #[test]
+    fn moves_bare_single_param_arrow_header_outside_if() {
+        assert_eq!(rewrite_ternaries("x => x>0 ? 1 : -1"), "x =>if x>0 { 1 } else { -1 }");
+    }
+
+    #[test]
+    fn moves_multi_param_arrow_header_outside_if() {
+        assert_eq!(
+            rewrite_ternaries("(a,b) => a>b ? a : b"),
+            "(a,b) =>if a>b { a } else { b }"
+        );
+    }
+
+    #[test]
+    fn does_not_misfire_on_a_plain_parenthesized_condition() {
+        // `(a) > b` is not an arrow header - no `=>` follows the `)`.
+        let src = "(a)>b?1:0";
+        assert_eq!(rewrite_ternaries(src), "if (a)>b { 1 } else { 0 }");
+    }
+
+    #[test]
     fn does_not_misfire_on_identifier_starting_with_return() {
         assert_eq!(
             rewrite_ternaries("returnValue?a:b"),
@@ -257,12 +334,13 @@ mod tests {
     fn does_not_treat_arrow_as_bare_equals() {
         // the `=` in `=>` must not itself be mistaken for a boundary-
         // resetting bare assignment: without the fix, the segment gets
-        // flushed mid-arrow, leaving a stray `>` glued onto `cond`
-        // (`pat=if >cond { t } else { f }`) instead of keeping `x=>cond`
-        // intact as the ternary's condition.
+        // flushed mid-arrow, leaving a stray `>` glued onto `cond` instead
+        // of keeping `x=>cond` intact. Combined with `strip_arrow_header`
+        // (which then correctly moves the `x=>` part outside the `if`),
+        // the end result is fully valid Rhai - not just "less broken".
         assert_eq!(
             rewrite_ternaries("pat=x=>cond?t:f"),
-            "pat=if x=>cond { t } else { f }"
+            "pat=x=>if cond { t } else { f }"
         );
     }
 
