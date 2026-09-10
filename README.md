@@ -194,7 +194,7 @@ These are registered so scripts calling them don't hard-error, but they don't do
 | `fit(lo, hi)` (pattern) | No-op — passes the pattern through unchanged; no value-range remapping |
 | `screencap()` | No-op — saving/sharing a screenshot isn't supported |
 | `loadScript(url)` | No-op — no dynamic module loading; extension-library functions it would have defined (`spiral`, `turb`, `blobs`, `warp`, ...) still won't exist |
-| `Math.random()` | Not rewritten at all (unlike other `Math.*` methods) — no GLSL-expression equivalent for real randomness |
+| `o0-o3.setNearest()` / `.setLinear()` / `.setMode(name)` | No-op — buffers are always sampled with linear filtering; no per-buffer sampler state to switch |
 
 ## License
 
