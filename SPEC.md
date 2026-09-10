@@ -244,7 +244,23 @@ Pipeline order (each step's output feeds the next):
    depth 0, and neither the end of the current line nor the start of the
    next one looks like a continuation — an operator, a trailing comma/open
    bracket, or a leading `.`/closing bracket/operator on the next line).
-   Runs last so it sees the final structural shape of the code.
+14. **`arrowfn::rewrite_named_arrows`** — real sketches commonly define
+   small helpers as a *named* arrow-function assignment
+   (`let el = (s,b,l) => shape(99,s,b)`, or block-bodied
+   `let f = (a,b) => { ... }`) rather than `function name(...) {...}`
+   (step 5). Rhai has no `=>` closure syntax at all, and unlike the
+   zero-parameter reactive-value idiom (step 11), these are called
+   elsewhere with real arguments — so they need to become genuine callable
+   `fn` declarations, not a value substitution. Rewrites
+   `IDENT = (params) => BODY` (non-empty params, `IDENT` a bare identifier
+   — `obj.prop = ...` is left alone) to `fn IDENT(params) { BODY }`,
+   stripping any leading `let`/`const` and any default parameter values
+   (not cascaded into arity-shim overloads the way step 5's does — no
+   corpus evidence yet that this form commonly needs it). Runs last,
+   after `asi`: every other pass has already rewritten the arrow body's
+   own content, and an expression body with no `{ }` needs an unambiguous
+   end, which becomes just "the next top-level `;`" once `asi` has
+   guaranteed one is there.
 
 None of these passes attempt full JS parsing; each targets one specific,
 empirically-observed idiom (found by running the pipeline against a corpus
