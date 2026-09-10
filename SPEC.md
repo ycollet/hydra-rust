@@ -448,33 +448,95 @@ plain "Function not found" error from `eval()` — there is no separate
 ## 9. Known gaps and stub functions
 
 These are registered (so a script calling them doesn't hard-error) but do
-**not** do anything real:
-
-| Function | Status |
-|---|---|
-| `initImage(idx, url)` | No-op — no image loading/decoding pipeline |
-| `initVideo(idx, url)` | No-op — no video file loading pipeline |
-| `initScreen(idx[, screen])` | No-op — no screen/display capture |
-| `setResolution(w, h)` | No-op — canvas resolution isn't script-controllable |
-| `screencap()` | No-op — saving/sharing a screenshot isn't supported |
-| `a.show()` / `a.hide()` | No-op — no on-screen FFT debug graph to toggle |
-| `smooth(amount)` (pattern) | See §7 |
-| `ease(name)` / `fit(lo, hi)` (pattern) | See §7 |
-| `Math.random()` | Not rewritten — no GLSL-expression equivalent for real randomness |
+**not** do anything real; see README.md's stub-function table for the
+full, currently-accurate list (kept there rather than duplicated here, so
+there's one place to update). As of this writing it covers `initImage`/
+`initVideo`/`initGif`/`initScreen` (return a chainable no-op source, see
+§5), `setResolution`, `screencap`, `a.show()`/`a.hide()`, `smooth`/`ease`/
+`fit` (patterns, see §7), `loadScript` (see §6 for the community-extension
+functions ported natively instead), and `o0-o3.setNearest()`/`.setLinear()`/
+`.setMode()`.
 
 Not registered at all, and not silently tolerated: `a.settings[i].cutoff =
 ...` (real hydra.js exposes indexable, mutable per-bin audio config; this
 would need a materially different, indexable settings type — bigger than
-the flat `setBins`/`setCutoff`/etc. setters here), JS ternaries, multi-param
-or block-bodied arrow functions, `var`/`new`/`async`/`await`/`null` as used
-in JS module-loading or class-based code.
+the flat `setBins`/`setCutoff`/etc. setters here), multi-param or
+block-bodied arrow functions, `var`/`new`/`async`/`await`/`null` as used in
+JS module-loading or class-based code.
 
 ## 10. Standalone binary
 
 `cargo run --bin hydra [-- <path-to-sketch.hydra>]` opens the editor with
 that file loaded (falling back to the previous session's sketch, with a
-logged warning, if the path can't be read). Patch evaluation errors from
-`eval()` are shown as an in-app toast and also logged via `log::error!`
-("patch eval error: ..."), so `RUST_LOG=error` (or lower) surfaces them on
-the console for scripted workflows. See `README.md` for the full list of
-editor keybindings and build instructions.
+logged warning, if the path can't be read). Both `eval()` errors ("patch
+eval error: ...") and GLSL compile failures ("shader compile error: ...")
+are shown as an in-app toast and logged via `log::error!`, so `RUST_LOG=error`
+(or lower) surfaces either on the console for scripted workflows. See
+`README.md` for the full list of editor keybindings and build instructions.
+
+## 11. Adding a missing function
+
+Most "missing function" corpus failures (§4's methodology) turn out to be
+a real hydra.js function hydra-rust just hasn't implemented yet, rather
+than a syntax issue. Adding one is almost always a two-part, mechanical
+change - no new Rhai plumbing required, since `register_functions` in
+`eval.rs` drives everything generically off one table.
+
+1. **Write the GLSL body in `src/library.glsl`.** Signature shape depends
+   on where the function sits in a chain (matching hydra.js's own `type`
+   if you're porting a `setFunction({...})`-based community extension -
+   see the ported functions at the end of `library.glsl` for real
+   examples of each shape):
+
+   | Chain position | Signature |
+   |---|---|
+   | Source (starts a chain) | `vec4 name(vec2 _st, float p1, ...)` |
+   | Geometry / coord (transforms `st`) | `vec2 name(vec2 _st, float p1, ...)` |
+   | Color (recolors the current value) | `vec4 name(vec4 _c0, float p1, ...)` |
+   | Blend / combine (takes another chain) | `vec4 name(vec4 _c0, vec4 _c1, float p1, ...)` |
+   | Modulate (another chain distorts `st`) | `vec2 name(vec2 _st, vec4 _c0, float p1, ...)` |
+
+   All parameters are `float` here, even ones a JS source declares as
+   `int` - cast internally (`int(param)`) where the body needs one (see
+   `ncontour`'s `octaves` for an example). Reuse `_noise`, `_luminance`,
+   `_rgbToHsv`/`_hsvToRgb` if the body needs them; `iTime`/`iResolution`
+   are this project's names for what hydra.js's own generated GLSL calls
+   `time`/`resolution`.
+
+   Watch for GLSL's reserved words when naming parameters after a JS
+   source's own names - `smooth`, `flat`, `precise`, and `invariant` are
+   real reserved qualifiers (unlike, say, `step`, which is just a builtin
+   *function* name and safe to shadow with a local parameter). `ncontour`
+   ported here renames its `smooth` input to `smoothAmt` for exactly this
+   reason.
+
+2. **Add a `FnMeta` entry to `FUNCTIONS` in `eval.rs`**, matching the name,
+   the chain position from the table above (`OpKind::Source`/`Geo`/`Color`/
+   `Blend`/`Modulate`), and a `defaults` array in parameter order. That's
+   it - `register_functions` loops over `FUNCTIONS` and calls the matching
+   `register_source`/`register_geo`/`register_color`/`register_blend`/
+   `register_modulate`, which registers one call-site overload per arity
+   from 1 up to `defaults.len()` (so `name()`, `name(a)`, `name(a,b)`, ...
+   all resolve, matching JS's own lenient/defaulted call sites).
+
+   Each `register_*` function currently has a hard ceiling on how many
+   arities it generates (`register_source` goes up to 6 as of the
+   community-extension port that needed `cwarp`/`ncontour`). If your
+   function has more parameters than the current ceiling, extend the
+   relevant `register_*` function with one more `if n >= K` block
+   (mechanical - copy the previous block's shape) rather than truncating
+   your parameter list to fit.
+
+**Verification**: `eval()` only validates the Rhai/codegen side - it never
+touches OpenGL, so a real GLSL syntax mistake in `library.glsl` won't show
+up in `cargo test` or `check_corpus` at all. Two ways it does show up:
+- A broken function anywhere in `library.glsl` breaks *every* shader,
+  including the always-on default-shader bootstrap - `cargo run --bin
+  hydra` will panic immediately at startup with the exact compiler error
+  and line number.
+- A shader that's broken only for a specific patch (e.g. an argument
+  count/order mistake between `FUNCTIONS` and the GLSL signature) shows up
+  as an in-app toast + `log::error!("shader compile error: ...")` when
+  evaluating that patch (§10) - so actually run the binary with a script
+  exercising the new function before calling it done, the same way any
+  other change here gets verified against real output.
