@@ -55,8 +55,8 @@ osc(60.0, 0.1, time * 0.5)
 - **`render()`** displays all 4 buffers in a 2x2 grid; **`render(n)`**
   displays only buffer `n`. Default display mode is buffer `0`.
 - **`hush()`** clears all four buffers and resets `o0` to solid black.
-- Multiple statements are just Rhai statements, one per chain (see §4.4 for
-  how missing `;` between them is handled).
+- Multiple statements are just Rhai statements, one per chain (see §4,
+  step 14, `asi`, for how missing `;` between them is handled).
 - **Nesting limit:** a chain passed as another chain's "other" operand
   (`.modulate(otherChain, ...)`) recurses through `compile_node`; total
   recursion depth is capped at 16 (`MAX_DEPTH`), erroring `nesting too deep
@@ -67,7 +67,7 @@ osc(60.0, 0.1, time * 0.5)
 These identifiers are pushed into every script's `Scope` before evaluation.
 Referencing one splices the given GLSL expression directly into the compiled
 shader — they are **not** callback functions like in JS; there's no need to
-wrap them in `() => ...` (see §4.6, arrow-stripping, for what happens if a
+wrap them in `() => ...` (see §4, step 12, `arrow`, for what happens if a
 script does anyway).
 
 | Identifier | GLSL expression | Notes |
@@ -150,7 +150,26 @@ Pipeline order (each step's output feeds the next):
    strict (in)equality `===`/`!==` ("not a valid operator... Should it be
    '=='?") to `==`/`!=` — Rhai's equality already compares by value and
    type here.
-5. **`jsfunctions::rewrite_function_decls`** — rewrites JS *named* function
+5. **`kwargs::strip_named_args`** — real sketches commonly call hydra
+   functions with each argument prefixed by its own (real) parameter name,
+   e.g. `noise(scale=153.413, offset=0.165)` instead of the equivalent
+   positional `noise(153.413, 0.165)`. This isn't a real JS named-argument
+   feature — it's JS's ordinary assignment-expression-as-value trick
+   (`foo(x = 5)` assigns global `x` *and* passes `5` as the argument),
+   used purely as self-documenting call-site syntax (the "assigned" name
+   always just repeats the real parameter name, and is never referenced
+   again). Rhai has no assignment-as-expression at all, so this was a hard
+   "Expecting ',' to separate the arguments" failure regardless of which
+   function was being called. Strips the `name =` prefix from each such
+   argument, keeping just its value. Deliberately leaves a parenthesized
+   group untouched when it's actually a *parameter list* rather than a
+   call's arguments — `function name(min=0, max=1) {...}` (step 6) or
+   `(min=0, max=1) => ...` (step 15) have the exact same `name = value`
+   shape, but there they're real default parameter values those later
+   steps need to see intact; detected structurally (preceded by `function
+   NAME`, or followed by `=>`) and copied verbatim instead of recursed
+   into.
+6. **`jsfunctions::rewrite_function_decls`** — rewrites JS *named* function
    declarations (`function name(a, b=1) { ... }`) into Rhai's own,
    similarly-shaped function syntax (`fn name(a, b) { ... }` — spelled
    `fn`; Rhai has no default parameter values of its own). Real sketches
@@ -167,28 +186,28 @@ Pipeline order (each step's output feeds the next):
    `function(...) { ... }` expressions are left alone, since they're often
    used as closures capturing outer-scope variables, which Rhai's
    `fn`-defined functions can't do.
-6. **`iife::unwrap_iife`** — real sketches sometimes wrap their entire body
+7. **`iife::unwrap_iife`** — real sketches sometimes wrap their entire body
    in an immediately-invoked function expression to load an extension
    library first: `(() => { BODY })()` (`async`/`await` already stripped
-   by step 3), optionally followed by a promise `.then(...)`/`.catch(...)`/
+   by step 4), optionally followed by a promise `.then(...)`/`.catch(...)`/
    `.finally(...)` handler chain. Rhai has no `=>` closure syntax at all, so
    this was a hard parse failure. Matches only the *zero-parameter* form
    (`(hydra) => {...}` is left alone, since unwrapping would leave `hydra`
    unbound in the body) and reduces the whole construct — handler chain
    included — down to the bare `BODY` text, with **no** wrapping `{ }`:
    since this wrapper typically spans the sketch's entire top-level
-   statement list, keeping a block around it would leave step 13's
+   statement list, keeping a block around it would leave step 14's
    paren/bracket-depth tracking (which counts `{`/`}` the same as `(`/`[`)
    at depth 1 for the whole body, silently disabling semicolon insertion
    between the body's own top-level statements.
-7. **`autolet::insert_missing_let`** — JS creates a variable implicitly on
+8. **`autolet::insert_missing_let`** — JS creates a variable implicitly on
    first assignment (`speed = 0.8`); Rhai requires `let`. Inserts `let `
    before the first bare assignment to any name not already known (built-in
    globals from §3, or a name this same pass already declared earlier in the
    script). Only fires at paren/bracket depth 0 — `let` is a statement, and
    isn't valid inside a function call's argument list or an array literal,
    where JS allows assignment-as-expression (`foo(x = 5)`).
-8. **`mathjs::rewrite_math`** — rewrites `Math.<method>(...)` to the bare
+9. **`mathjs::rewrite_math`** — rewrites `Math.<method>(...)` to the bare
    function name for every method with a registered equivalent (§3's math
    function list, plus `atan2`→`atan`), and `Math.PI`/`Math.E` to numeric
    literals. `Math.random()` → `random()`, a real Rhai function (registered
@@ -197,7 +216,7 @@ Pipeline order (each step's output feeds the next):
    appears in real sketches, since hydra-rust has no per-frame closures for
    a "reactive" random to mean anything else. Anything else under `Math.*`
    is left untouched.
-9. **`argtrunc::truncate_extra_args`** — JS silently ignores extra arguments
+10. **`argtrunc::truncate_extra_args`** — JS silently ignores extra arguments
    beyond a function's declared parameters; Rhai has no such leniency and
    errors "Function not found" if no overload matches the arity. Truncates
    each known hydra function's call-site argument list down to its real
@@ -206,15 +225,15 @@ Pipeline order (each step's output feeds the next):
    `argtrunc.rs::MAX_ARGS`; for blend/modulate-kind functions it counts the
    leading "other" operand as one of the arguments (e.g.
    `modulate(other, amount)` → max 2).
-10. **`patcall::rewrite_pattern_calls`** — real sketches often store a reusable
+11. **`patcall::rewrite_pattern_calls`** — real sketches often store a reusable
    value as `pat = ()=>expr` and invoke it later as `pat()`, JS-callback
-   style. Since step 7 reduces such definitions to a plain value (not a
+   style. Since step 12 reduces such definitions to a plain value (not a
    callable), a later zero-argument call to a name bound this way is
    rewritten to a bare reference (`pat()` → `pat`). Must run before arrow-
    stripping, since it needs to see the `()=>` marker to know which names
    qualify. Only the exact zero-arg-arrow-then-zero-arg-call shape is
    rewritten; a call with any arguments is left alone.
-11. **`arrow::strip_zero_arg_arrows`** — strips the `()=>` wrapper JS uses to
+12. **`arrow::strip_zero_arg_arrows`** — strips the `()=>` wrapper JS uses to
    mark a value as per-frame-dynamic (`rotate(()=>time*0.1)` →
    `rotate(time*0.1)`). This is safe here because hydra-rust's reactive
    values (§3) are already "dynamic" without a wrapper — they compile
@@ -228,7 +247,7 @@ Pipeline order (each step's output feeds the next):
    arrows (`(a,b)=>...`, `x=>...`, used for pattern/sequencer callbacks —
    unsupported) and block-bodied arrows (`()=>{ ... }` — don't reduce to a
    single expression).
-12. **`ternary::rewrite_ternaries`** — rewrites JS ternaries (`cond ? a : b`)
+13. **`ternary::rewrite_ternaries`** — rewrites JS ternaries (`cond ? a : b`)
    into Rhai's `if`/`else` expression form (`if cond { a } else { b }`,
    valid since Rhai's `if`/`else` blocks evaluate to their last statement's
    value). Rhai has no `?:` operator at all ("Unknown operator: '?'").
@@ -237,25 +256,25 @@ Pipeline order (each step's output feeds the next):
    than via full expression-grammar parsing; nested/chained ternaries
    (`a?b:c?d:e`, right-associative) are handled via recursion on the
    extracted branches.
-13. **`asi::insert_missing_semicolons`** — JS has automatic semicolon
+14. **`asi::insert_missing_semicolons`** — JS has automatic semicolon
    insertion; Rhai doesn't. Real multi-buffer sketches routinely put each
    statement on its own line with no `;` (`osc(10).out(o0)\nosc(20).out(o1)`).
    Inserts `;` at line breaks that are genuine statement boundaries (bracket
    depth 0, and neither the end of the current line nor the start of the
    next one looks like a continuation — an operator, a trailing comma/open
    bracket, or a leading `.`/closing bracket/operator on the next line).
-14. **`arrowfn::rewrite_named_arrows`** — real sketches commonly define
+15. **`arrowfn::rewrite_named_arrows`** — real sketches commonly define
    small helpers as a *named* arrow-function assignment
    (`let el = (s,b,l) => shape(99,s,b)`, or block-bodied
    `let f = (a,b) => { ... }`) rather than `function name(...) {...}`
-   (step 5). Rhai has no `=>` closure syntax at all, and unlike the
-   zero-parameter reactive-value idiom (step 11), these are called
+   (step 6). Rhai has no `=>` closure syntax at all, and unlike the
+   zero-parameter reactive-value idiom (step 12), these are called
    elsewhere with real arguments — so they need to become genuine callable
    `fn` declarations, not a value substitution. Rewrites
    `IDENT = (params) => BODY` (non-empty params, `IDENT` a bare identifier
    — `obj.prop = ...` is left alone) to `fn IDENT(params) { BODY }`,
    stripping any leading `let`/`const` and any default parameter values
-   (not cascaded into arity-shim overloads the way step 5's does — no
+   (not cascaded into arity-shim overloads the way step 6's does — no
    corpus evidence yet that this form commonly needs it). Runs last,
    after `asi`: every other pass has already rewritten the arrow body's
    own content, and an expression body with no `{ }` needs an unambiguous
