@@ -23,6 +23,10 @@ mod imp {
         samples: Arc<Mutex<VecDeque<f32>>>,
         fft: Arc<dyn Fft<f32>>,
         scratch: Vec<Complex<f32>>,
+        /// Hann window, precomputed once - `FFT_SIZE` never changes, so
+        /// recomputing `cos()` for all 1024 samples on every `poll()` call
+        /// (once per rendered frame) would be pure waste.
+        window: [f32; FFT_SIZE],
         smoothed: [f32; NUM_FFT_BINS],
         num_bins: usize,
         cutoff: f32,
@@ -50,6 +54,7 @@ mod imp {
                 samples,
                 fft,
                 scratch: vec![Complex { re: 0.0, im: 0.0 }; FFT_SIZE],
+                window: std::array::from_fn(|i| hann(i, FFT_SIZE)),
                 smoothed: [0.0; NUM_FFT_BINS],
                 num_bins: 4,
                 cutoff: 0.0,
@@ -105,7 +110,7 @@ mod imp {
                     } else {
                         *buf.get(i - offset).unwrap_or(&0.0)
                     };
-                    *slot = Complex { re: sample * hann(i, FFT_SIZE), im: 0.0 };
+                    *slot = Complex { re: sample * self.window[i], im: 0.0 };
                 }
             }
 
