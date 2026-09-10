@@ -123,8 +123,9 @@ fn rewrite_one(chars: &[char], mask: &[bool], after_kw: usize, out: &mut String)
 
 /// Parses a top-level comma-separated parameter list into `(name,
 /// default_text)` pairs, where `default_text` is the (trimmed) source text
-/// after a parameter's `=`, if it has one.
-fn parse_params(chars: &[char], mask: &[bool], start: usize, end: usize) -> Vec<(String, Option<String>)> {
+/// after a parameter's `=`, if it has one. `pub(crate)`: also used by
+/// `arrowfn` for the equivalent named-arrow-function declaration form.
+pub(crate) fn parse_params(chars: &[char], mask: &[bool], start: usize, end: usize) -> Vec<(String, Option<String>)> {
     let mut pieces = Vec::new();
     let mut depth = 0i32;
     let mut piece_start = start;
@@ -163,7 +164,7 @@ fn parse_params(chars: &[char], mask: &[bool], start: usize, end: usize) -> Vec<
     pieces
 }
 
-fn matching_close(chars: &[char], mask: &[bool], open_idx: usize, open: char, close: char) -> Option<usize> {
+pub(crate) fn matching_close(chars: &[char], mask: &[bool], open_idx: usize, open: char, close: char) -> Option<usize> {
     let mut depth = 0i32;
     let mut i = open_idx;
     while i < chars.len() {

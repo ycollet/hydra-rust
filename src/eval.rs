@@ -4,6 +4,7 @@ use rhai::{Array, CustomType, Dynamic, Engine, ImmutableString, Scope, TypeBuild
 
 use crate::argtrunc;
 use crate::arrow;
+use crate::arrowfn;
 use crate::asi;
 use crate::autolet;
 use crate::iife;
@@ -801,7 +802,8 @@ pub fn preprocess(code: &str) -> String {
     let code = &patcall::rewrite_pattern_calls(code);
     let code = &arrow::strip_zero_arg_arrows(code);
     let code = &ternary::rewrite_ternaries(code);
-    asi::insert_missing_semicolons(code)
+    let code = &asi::insert_missing_semicolons(code);
+    arrowfn::rewrite_named_arrows(code)
 }
 
 pub fn eval(code: &str) -> Result<EvalResult, String> {

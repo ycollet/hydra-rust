@@ -5,6 +5,7 @@ pub mod shader;
 pub mod source;
 mod argtrunc;
 mod arrow;
+mod arrowfn;
 mod asi;
 mod autolet;
 mod glsl;
