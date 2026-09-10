@@ -24,6 +24,15 @@ rustfft = { version = "6", optional = true }
 webcam = ["dep:nokhwa"]
 audio = ["dep:cpal", "dep:rustfft"]
 
+# Real-time rendering app: thin LTO's cross-crate inlining meaningfully
+# helps the hot per-frame path (renderer.rs) and eval()'s Rhai-engine/
+# GLSL-codegen path. Measured as effectively free here (~25s clean release
+# build either way) - `codegen-units = 1` was tried too but added ~16s for
+# comparatively little extra runtime benefit, not worth it given this repo's
+# own `--release` iteration loop (examples/check_corpus.rs).
+[profile.release]
+lto = "thin"
+
 [[bin]]
 name = "hydra"
 path = "src/bin/hydra/main.rs"
