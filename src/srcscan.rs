@@ -15,7 +15,7 @@ enum StrKind {
 }
 
 /// What a given character is part of.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Region {
     Code,
     StringLit,
@@ -121,11 +121,16 @@ pub fn mask_strings_and_comments(chars: &[char]) -> Vec<bool> {
 
 #[cfg(test)]
 mod tests {
-    use super::mask_strings_and_comments;
+    use super::{classify, mask_strings_and_comments, Region};
 
     fn mask_of(src: &str) -> Vec<bool> {
         let chars: Vec<char> = src.chars().collect();
         mask_strings_and_comments(&chars)
+    }
+
+    fn classify_of(src: &str) -> Vec<Region> {
+        let chars: Vec<char> = src.chars().collect();
+        classify(&chars)
     }
 
     #[test]
@@ -159,5 +164,92 @@ mod tests {
         assert!(!mask[0]);
         assert!(mask[2] && mask[6] && mask[10]);
         assert!(!mask[12]);
+    }
+
+    #[test]
+    fn line_comments_terminating_newline_is_not_masked() {
+        // regression test: a line comment's own newline must classify as
+        // Code (it's the comment's boundary, not its content) - asi's
+        // semicolon-insertion logic depends on seeing it as a real
+        // newline, not something to skip over.
+        let src = "a // comment\nb";
+        let regions = classify_of(src);
+        let newline_idx = src.find('\n').unwrap();
+        assert_eq!(regions[newline_idx], Region::Code);
+    }
+
+    #[test]
+    fn masks_backtick_raw_string() {
+        let src = "a(`x.y`)b";
+        let mask = mask_of(src);
+        assert!(!mask[0] && !mask[1]);
+        assert!(mask[2] && mask[6]);
+        assert!(!mask[7] && !mask[8]);
+    }
+
+    #[test]
+    fn masks_single_quoted_char_literal() {
+        let src = "a('x')b";
+        let mask = mask_of(src);
+        assert!(!mask[0] && !mask[1]);
+        assert!(mask[2] && mask[4]);
+        assert!(!mask[5] && !mask[6]);
+    }
+
+    #[test]
+    fn escaped_double_quote_does_not_end_the_string_early() {
+        let src = r#"a("x\"y")b"#;
+        let mask = mask_of(src);
+        // the whole "x\"y" span (including the escaped quote) must stay
+        // masked as one string, not end at the escaped `"`.
+        let close_idx = src.rfind('"').unwrap();
+        assert!(mask[close_idx]);
+        assert!(!mask[close_idx + 1]); // the real closing `)`
+    }
+
+    #[test]
+    fn slash_slash_inside_a_string_is_not_a_comment() {
+        // the single most common real-world case: a URL passed to
+        // initVideo/initImage/loadScript. If this ever regresses, every
+        // preprocessing pass downstream would silently start treating the
+        // rest of the line (or file, for a block-comment-shaped URL) as a
+        // comment instead of code.
+        let src = r#"initVideo(0, "https://example.com/v.mp4")"#;
+        let regions = classify_of(src);
+        let slashes = src.find("//").unwrap();
+        assert_eq!(regions[slashes], Region::StringLit);
+        assert_eq!(regions[slashes + 1], Region::StringLit);
+        // and code after the string must be seen as real code, not comment
+        let close_paren = src.rfind(')').unwrap();
+        assert_eq!(regions[close_paren], Region::Code);
+    }
+
+    #[test]
+    fn block_comment_markers_inside_a_string_are_not_a_comment() {
+        let src = r#"text("/* not a comment */")"#;
+        let regions = classify_of(src);
+        let after_string = src.rfind(')').unwrap();
+        assert_eq!(regions[after_string], Region::Code);
+    }
+
+    #[test]
+    fn distinguishes_string_from_comment_regions() {
+        let src = "\"a\" // b";
+        let regions = classify_of(src);
+        assert_eq!(regions[1], Region::StringLit); // the 'a'
+        assert_eq!(regions[6], Region::Comment); // the 'b'
+    }
+
+    #[test]
+    fn unterminated_string_stays_masked_to_end_of_input() {
+        let src = "a(\"unterminated";
+        let mask = mask_of(src);
+        assert!(!mask[0] && !mask[1]);
+        assert!(mask[2] && mask[src.len() - 1]);
+    }
+
+    #[test]
+    fn empty_input_classifies_to_an_empty_vec() {
+        assert!(classify_of("").is_empty());
     }
 }

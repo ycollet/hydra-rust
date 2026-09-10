@@ -1278,3 +1278,246 @@ fn register_modulate(engine: &mut Engine, meta: &FnMeta) {
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- fmt_f ---
+
+    #[test]
+    fn fmt_f_appends_point_zero_to_whole_numbers() {
+        assert_eq!(fmt_f(1.0), "1.0");
+        assert_eq!(fmt_f(-2.0), "-2.0");
+        assert_eq!(fmt_f(0.0), "0.0");
+    }
+
+    #[test]
+    fn fmt_f_leaves_fractional_numbers_alone() {
+        assert_eq!(fmt_f(0.1), "0.1");
+        assert_eq!(fmt_f(-0.5), "-0.5");
+        assert_eq!(fmt_f(60.25), "60.25");
+    }
+
+    // --- fill_args ---
+
+    #[test]
+    fn fill_args_appends_missing_defaults() {
+        let filled = fill_args(&[Arg::Lit(1.0)], &[1.0, 2.0, 3.0]);
+        assert_eq!(filled.len(), 3);
+        assert!(matches!(filled[1], Arg::Lit(v) if v == 2.0));
+        assert!(matches!(filled[2], Arg::Lit(v) if v == 3.0));
+    }
+
+    #[test]
+    fn fill_args_leaves_fully_provided_args_alone() {
+        let filled = fill_args(&[Arg::Lit(9.0), Arg::Lit(8.0)], &[1.0, 2.0]);
+        assert!(matches!(filled[0], Arg::Lit(v) if v == 9.0));
+        assert!(matches!(filled[1], Arg::Lit(v) if v == 8.0));
+    }
+
+    #[test]
+    fn fill_args_handles_more_provided_than_defaults() {
+        // shouldn't happen via the registered arity-limited overloads, but
+        // fill_args itself must not panic if it ever does
+        let filled = fill_args(&[Arg::Lit(1.0), Arg::Lit(2.0), Arg::Lit(3.0)], &[1.0]);
+        assert_eq!(filled.len(), 3);
+    }
+
+    // --- idx_to_source ---
+
+    #[test]
+    fn idx_to_source_below_100_reads_internal_buffer() {
+        let node = idx_to_source(2);
+        match &node.ops[..] {
+            [Op::Source { func, args }] => {
+                assert_eq!(*func, "src");
+                assert!(matches!(args[0], Arg::Lit(v) if v == 2.0));
+            }
+            other => panic!("unexpected ops: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn idx_to_source_at_99_is_still_internal_buffer() {
+        let node = idx_to_source(99);
+        match &node.ops[..] {
+            [Op::Source { func, .. }] => assert_eq!(*func, "src"),
+            other => panic!("unexpected ops: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn idx_to_source_at_100_switches_to_external_source() {
+        let node = idx_to_source(100);
+        match &node.ops[..] {
+            [Op::Source { func, args }] => {
+                assert_eq!(*func, "ext_src");
+                assert!(matches!(args[0], Arg::Lit(v) if v == 0.0));
+            }
+            other => panic!("unexpected ops: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn idx_to_source_103_is_external_source_slot_3() {
+        let node = idx_to_source(103);
+        match &node.ops[..] {
+            [Op::Source { func, args }] => {
+                assert_eq!(*func, "ext_src");
+                assert!(matches!(args[0], Arg::Lit(v) if v == 3.0));
+            }
+            other => panic!("unexpected ops: {other:?}"),
+        }
+    }
+
+    // --- Pattern::to_glsl ---
+
+    #[test]
+    fn pattern_to_glsl_empty_is_zero() {
+        assert_eq!(Pattern::from_array(Array::new()).to_glsl(), "0.0");
+    }
+
+    #[test]
+    fn pattern_to_glsl_single_value_is_a_plain_literal() {
+        let arr: Array = vec![Dynamic::from_float(0.5)];
+        assert_eq!(Pattern::from_array(arr).to_glsl(), "0.5");
+    }
+
+    #[test]
+    fn pattern_to_glsl_multi_value_uses_step_function_selection() {
+        let arr: Array = vec![Dynamic::from_float(1.0), Dynamic::from_float(2.0)];
+        let glsl = Pattern::from_array(arr).to_glsl();
+        assert!(glsl.contains("mod(iTime * 1.0, 2.0)"), "{glsl}");
+        assert!(glsl.contains("1.0 * step("), "{glsl}");
+        assert!(glsl.contains("2.0 * step("), "{glsl}");
+    }
+
+    #[test]
+    fn pattern_to_glsl_smooth_uses_mix_instead_of_step_selection() {
+        let mut p = Pattern::from_array(vec![Dynamic::from_float(1.0), Dynamic::from_float(2.0)]);
+        p.smooth = true;
+        let glsl = p.to_glsl();
+        assert!(glsl.contains("mix("), "{glsl}");
+    }
+
+    #[test]
+    fn pattern_to_glsl_nonzero_offset_appears_in_the_time_expression() {
+        let mut p = Pattern::from_array(vec![Dynamic::from_float(1.0), Dynamic::from_float(2.0)]);
+        p.offset = 0.25;
+        let glsl = p.to_glsl();
+        assert!(glsl.contains("+ 0.25"), "{glsl}");
+    }
+
+    // --- compile_node (GLSL codegen) ---
+
+    #[test]
+    fn compile_node_emits_a_plain_source_call() {
+        let node = Node::source("osc", vec![Arg::Lit(60.0), Arg::Lit(0.1), Arg::Lit(0.0)]);
+        let glsl = compile_node(&node).unwrap();
+        assert!(glsl.contains("fn mainImage(") || glsl.contains("void mainImage("), "{glsl}");
+        assert!(glsl.contains("osc(st, 60.0, 0.1, 0.0)"), "{glsl}");
+    }
+
+    #[test]
+    fn compile_node_applies_geo_before_the_source_samples_it() {
+        let node = Node::source("osc", vec![]).push_geo("rotate", vec![Arg::Lit(10.0)]);
+        let glsl = compile_node(&node).unwrap();
+        // the geo transform must run first, producing a new `st`-like var
+        // that the source then samples with instead of the original `st`
+        assert!(glsl.contains("rotate(st, 10.0)"), "{glsl}");
+        assert!(glsl.contains("osc(_st0"), "{glsl}");
+    }
+
+    #[test]
+    fn compile_node_applies_color_after_the_source() {
+        let node = Node::source("osc", vec![]).push_color("invert", vec![Arg::Lit(1.0)]);
+        let glsl = compile_node(&node).unwrap();
+        let osc_pos = glsl.find("osc(").unwrap();
+        let invert_pos = glsl.find("invert(").unwrap();
+        assert!(osc_pos < invert_pos, "{glsl}");
+    }
+
+    #[test]
+    fn compile_node_blend_compiles_the_other_chain_and_feeds_it_in() {
+        let a = Node::source("osc", vec![]);
+        let b = Node::source("noise", vec![]);
+        let node = a.push_blend("add", b, vec![Arg::Lit(1.0)]);
+        let glsl = compile_node(&node).unwrap();
+        assert!(glsl.contains("osc(st)"), "{glsl}");
+        assert!(glsl.contains("noise(st)"), "{glsl}");
+        assert!(glsl.contains("add("), "{glsl}");
+    }
+
+    #[test]
+    fn compile_node_modulate_compiles_the_other_chain_and_feeds_it_in() {
+        let a = Node::source("osc", vec![]);
+        let b = Node::source("noise", vec![]);
+        let node = a.push_modulate("modulate", b, vec![Arg::Lit(0.1)]);
+        let glsl = compile_node(&node).unwrap();
+        assert!(glsl.contains("noise(st)"), "{glsl}");
+        assert!(glsl.contains("modulate("), "{glsl}");
+    }
+
+    #[test]
+    fn compile_node_src_reads_the_matching_buffer_index() {
+        let node = Node::source("src", vec![Arg::Lit(2.0)]);
+        let glsl = compile_node(&node).unwrap();
+        assert!(glsl.contains("iBuffer2"), "{glsl}");
+    }
+
+    #[test]
+    fn compile_node_src_clamps_out_of_range_buffer_index() {
+        let node = Node::source("src", vec![Arg::Lit(7.0)]);
+        let glsl = compile_node(&node).unwrap();
+        assert!(glsl.contains("iBuffer3"), "{glsl}");
+    }
+
+    #[test]
+    fn compile_node_ext_src_reads_the_matching_source_slot() {
+        let node = Node::source("ext_src", vec![Arg::Lit(1.0)]);
+        let glsl = compile_node(&node).unwrap();
+        assert!(glsl.contains("iSource1"), "{glsl}");
+    }
+
+    #[test]
+    fn compile_node_text_src_reads_the_text_texture() {
+        let node = Node::source("text_src", vec![]);
+        let glsl = compile_node(&node).unwrap();
+        assert!(glsl.contains("iText0"), "{glsl}");
+    }
+
+    #[test]
+    fn compile_node_rejects_a_chain_with_two_sources() {
+        let node = Node { ops: vec![
+            Op::Source { func: "osc", args: vec![] },
+            Op::Source { func: "noise", args: vec![] },
+        ] };
+        let err = compile_node(&node).unwrap_err();
+        assert!(err.contains("exactly one source"), "{err}");
+    }
+
+    #[test]
+    fn compile_node_rejects_a_chain_with_no_source() {
+        let node = Node { ops: vec![Op::Color { func: "invert", args: vec![] }] };
+        let err = compile_node(&node).unwrap_err();
+        assert!(err.contains("must start with a source"), "{err}");
+    }
+
+    #[test]
+    fn compile_node_enforces_max_nesting_depth() {
+        fn make_deep_chain(depth: usize) -> Node {
+            let base = Node::source("osc", vec![]);
+            if depth == 0 {
+                return base;
+            }
+            base.push_blend("add", make_deep_chain(depth - 1), vec![])
+        }
+        let shallow = make_deep_chain(5);
+        assert!(compile_node(&shallow).is_ok());
+
+        let too_deep = make_deep_chain(20);
+        let err = compile_node(&too_deep).unwrap_err();
+        assert!(err.contains("nesting too deep"), "{err}");
+    }
+}
