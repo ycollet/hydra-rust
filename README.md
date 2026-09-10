@@ -194,7 +194,7 @@ These are registered so scripts calling them don't hard-error, but they don't do
 | `ease(name)` (pattern) | No-op — passes the pattern through unchanged; no easing-curve implementations |
 | `fit(lo, hi)` (pattern) | No-op — passes the pattern through unchanged; no value-range remapping |
 | `screencap()` | No-op — saving/sharing a screenshot isn't supported |
-| `loadScript(url)` | No-op — no dynamic module loading; extension-library functions it would have defined (`spiral`, `turb`, `blobs`, `warp`, ...) still won't exist |
+| `loadScript(url)` | No-op — no dynamic module loading. Some of the most commonly-loaded community extensions' functions are ported natively instead (`spiral`, `turb`, `uturb`, `unoise`, `whitenoise`, `colornoise`, `warp`, `cwarp`, `ncontour`, `pulse`, `pulsetrain`, `hextile`, `concentric`, `brick`, `wave`, `lissa`, `inversion`, `mirrorX`/`mirrorY`/`mirrorX2`/`mirrorY2`/`mirrorWrap`, `colreflect` — see SPEC.md §6); anything else the loaded script would have defined still won't exist |
 | `o0-o3.setNearest()` / `.setLinear()` / `.setMode(name)` | No-op — buffers are always sampled with linear filtering; no per-buffer sampler state to switch |
 
 ## License

@@ -306,6 +306,30 @@ reactive expression (§3), or a pattern (§7). GLSL semantics are in
 | `src(idx)` | | Read buffer/source `idx` (see §5) |
 | `text("...")` | | Rasterized text (see §5) |
 
+The following are ported from popular community extensions real hydra.js
+sketches load via `loadScript()` (a permanent no-op here, see the
+stub-function table in README.md) — `metagrowing/extra-shaders-for-hydra`,
+AGPL-3.0, by Thomas Jourdan, unless noted otherwise:
+
+| Function | Parameters (defaults) | Description |
+|---|---|---|
+| `spiral(a=1, b=5, thickness=0.1)` | | Archimedean-spiral band pattern |
+| `turb(scale=10, offset=0.1, octaves=3)` | | Fractional Brownian motion (turbulence) |
+| `uturb(scale=10, offset=0.1, octaves=3)` | | `turb`, normalized to `[0, 1]` |
+| `unoise(scale=10, offset=0.1)` | | `noise`, normalized to `[0, 1]` |
+| `whitenoise(size=10, dynamic=0)` | | Grayscale hash noise, blocky at `size` |
+| `colornoise(size=10, dynamic=0)` | | `whitenoise`, independent per channel |
+| `warp(scalei=10, offset=0.1, octaves=2, octavesinner=3, scale=1)` | | Domain-warped turbulence |
+| `cwarp(scalei=10, offset=0.1, octaves=2, octavesinner=3, scale=1, focus=0.5)` | | `warp` with radial focus falloff |
+| `ncontour(thresh=0.5, smooth=0.1, octaves=3, scale=5, speed=0.5, step=2)` | | Contour lines from layered noise |
+| `pulse(edge=0.5, width=0.05, epsilon=0.001)` | | Single vertical pulse band |
+| `pulsetrain(train=3, edge=0.5, width=0.05, epsilon=0.001)` | | Repeated pulse bands |
+| `hextile(tiles=10)` | | Hexagonal tiling |
+| `concentric(scale=100, centerX=0.5, centerY=0.5)` | | Concentric rings from a center point |
+| `brick(width=0.25, height=0.08, gap=0.01)` | | Brick/masonry pattern |
+| `wave(time=0, frequ=10, loops=3, thick=0.025)` | | Layered horizontal sine wave |
+| `lissa(time=0, frequ=10, loops=3, thick=0.025)` | | Polar-coordinate Lissajous/harmonograph curve |
+
 ### Geometry (transform `st` before the source samples it)
 
 | Function | Parameters (defaults) | Description |
@@ -321,6 +345,16 @@ reactive expression (§3), or a pattern (§7). GLSL semantics are in
 | `polar()` | | Cartesian → polar coordinates |
 | `cart()` | | Polar → Cartesian coordinates |
 | `fold(amount=1)` | | Mirror-fold coordinates |
+
+The following are ported from popular community extensions (`loadScript`
+itself is a permanent no-op, see README.md):
+
+| Function | Parameters (defaults) | Description |
+|---|---|---|
+| `inversion()` | | Circle inversion (`st /= dot(st, st)`) — `geikha/hyper-hydra`, MIT |
+| `mirrorX(pos=0, coverage=1)` / `mirrorY(...)` | | Mirror-fold around `pos` — `geikha/hyper-hydra`, MIT |
+| `mirrorX2(pos=0, coverage=1)` / `mirrorY2(...)` | | `mirrorX`/`mirrorY` variant, unflipped half — `geikha/hyper-hydra`, MIT |
+| `mirrorWrap()` | | Fold coordinates into `[-1, 1]` then reflect — `geikha/hyper-hydra`, MIT |
 
 ### Color
 
@@ -352,6 +386,7 @@ reactive expression (§3), or a pattern (§7). GLSL semantics are in
 | `layer(other)` | | Alpha-composite `other` over the chain |
 | `mask(other)` | | Use `other`'s luminance as an alpha mask |
 | `sub(other, amount=1)` | | Subtractive blend |
+| `colreflect(other, amount=1)` | | Cross product of the two chains' RGB (ported from a `loadScript` community extension) — `metagrowing/extra-shaders-for-hydra`, AGPL-3.0 |
 
 ### Modulate (use another chain's color to distort coordinates)
 
