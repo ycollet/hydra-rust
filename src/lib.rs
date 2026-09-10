@@ -12,6 +12,7 @@ mod glsl;
 mod iife;
 mod jsfunctions;
 mod jskeywords;
+mod kwargs;
 mod mathjs;
 mod numlit;
 mod patcall;

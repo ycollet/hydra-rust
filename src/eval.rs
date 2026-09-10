@@ -10,6 +10,7 @@ use crate::autolet;
 use crate::iife;
 use crate::jsfunctions;
 use crate::jskeywords;
+use crate::kwargs;
 use crate::mathjs;
 use crate::numlit;
 use crate::patcall;
@@ -794,6 +795,7 @@ pub fn preprocess(code: &str) -> String {
     let code = &quotes::rewrite_single_quoted_strings(code);
     let code = &numlit::insert_leading_zero(code);
     let code = &jskeywords::rewrite_keywords(code);
+    let code = &kwargs::strip_named_args(code);
     let code = &jsfunctions::rewrite_function_decls(code);
     let code = &iife::unwrap_iife(code);
     let code = &autolet::insert_missing_let(code);
