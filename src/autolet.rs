@@ -63,7 +63,7 @@ pub fn insert_missing_let(src: &str) -> String {
 fn is_plain_assignment(chars: &[char], mask: &[bool], p: usize) -> bool {
     matches!(mask.get(p), Some(false))
         && chars.get(p) == Some(&'=')
-        && !matches!(chars.get(p + 1), Some('='))
+        && !matches!(chars.get(p + 1), Some('=') | Some('>'))
 }
 
 /// True if the word immediately before `ident_start` (skipping whitespace)
@@ -167,6 +167,15 @@ mod tests {
             insert_missing_let("pat = ()=>osc(30)\nout(pat)"),
             "let pat = ()=>osc(30)\nout(pat)"
         );
+    }
+
+    #[test]
+    fn does_not_treat_single_param_arrow_as_assignment() {
+        // `x=>expr` is a single-param arrow; the `=` here is part of `=>`,
+        // not a bare assignment to `x` - inserting `let` before `x` would
+        // produce the malformed `let x=>expr`.
+        let src = "let sig = x=>1/(1+x)";
+        assert_eq!(insert_missing_let(src), src);
     }
 
     #[test]

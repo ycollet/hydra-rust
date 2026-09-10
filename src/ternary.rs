@@ -22,13 +22,25 @@ fn is_bare_equals(chars: &[char], i: usize) -> bool {
     if chars[i] != '=' {
         return false;
     }
-    if chars.get(i + 1) == Some(&'=') {
-        return false; // ==
+    if matches!(chars.get(i + 1), Some('=') | Some('>')) {
+        return false; // ==, =>
     }
     if i > 0 && matches!(chars[i - 1], '=' | '!' | '<' | '>' | '+' | '-' | '*' | '/' | '%') {
         return false; // !=, <=, >=, +=, -=, *=, /=, %=
     }
     true
+}
+
+/// If `s` (after trimming leading whitespace) starts with the whole word
+/// `return`, returns the text following it (unstripped of its own leading
+/// whitespace). Used so `return cond?a:b` becomes `return if cond {a} else
+/// {b}` rather than the malformed `if return cond {a} else {b}` - `return`
+/// isn't a `,`/`;`/`=` boundary, so without this it gets swept into the
+/// ternary's condition text along with everything after it.
+fn strip_return_prefix(s: &str) -> Option<&str> {
+    let rest = s.trim_start().strip_prefix("return")?;
+    let boundary = rest.chars().next().is_none_or(|c| !c.is_alphanumeric() && c != '_');
+    boundary.then_some(rest)
 }
 
 fn matching_close(chars: &[char], mask: &[bool], open_idx: usize) -> usize {
@@ -105,13 +117,17 @@ fn transform(chars: &[char], mask: &[bool], start: usize, end: usize) -> String 
                 i = next;
                 let (else_text, next) = scan_branch(chars, mask, i, end, false);
                 i = next;
+                let (return_prefix, cond) = match strip_return_prefix(&cond) {
+                    Some(rest) => ("return ", rest),
+                    None => ("", cond.as_str()),
+                };
                 // Re-run on each extracted branch: catches chained ternaries
                 // in the else branch (`a?b:c?d:e`) and any left unconverted
                 // because they weren't inside a bracket `scan_branch` recursed into.
                 let cond = rewrite_ternaries(cond.trim());
                 let then_text = rewrite_ternaries(then_text.trim());
                 let else_text = rewrite_ternaries(else_text.trim());
-                out.push_str(&format!("if {cond} {{ {then_text} }} else {{ {else_text} }}"));
+                out.push_str(&format!("{return_prefix}if {cond} {{ {then_text} }} else {{ {else_text} }}"));
             }
             _ => {
                 seg.push(chars[i]);
@@ -212,6 +228,41 @@ mod tests {
         assert_eq!(
             rewrite_ternaries("a?1:b?2:3"),
             "if a { 1 } else { if b { 2 } else { 3 } }"
+        );
+    }
+
+    #[test]
+    fn moves_return_keyword_outside_if() {
+        assert_eq!(
+            rewrite_ternaries("return rn()>x?1:-1"),
+            "return if rn()>x { 1 } else { -1 }"
+        );
+    }
+
+    #[test]
+    fn leaves_return_of_non_ternary_alone() {
+        let src = "return foo(x)";
+        assert_eq!(rewrite_ternaries(src), src);
+    }
+
+    #[test]
+    fn does_not_misfire_on_identifier_starting_with_return() {
+        assert_eq!(
+            rewrite_ternaries("returnValue?a:b"),
+            "if returnValue { a } else { b }"
+        );
+    }
+
+    #[test]
+    fn does_not_treat_arrow_as_bare_equals() {
+        // the `=` in `=>` must not itself be mistaken for a boundary-
+        // resetting bare assignment: without the fix, the segment gets
+        // flushed mid-arrow, leaving a stray `>` glued onto `cond`
+        // (`pat=if >cond { t } else { f }`) instead of keeping `x=>cond`
+        // intact as the ternary's condition.
+        assert_eq!(
+            rewrite_ternaries("pat=x=>cond?t:f"),
+            "pat=if x=>cond { t } else { f }"
         );
     }
 
