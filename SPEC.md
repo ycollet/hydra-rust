@@ -153,8 +153,17 @@ Pipeline order (each step's output feeds the next):
 5. **`jsfunctions::rewrite_function_decls`** — rewrites JS *named* function
    declarations (`function name(a, b=1) { ... }`) into Rhai's own,
    similarly-shaped function syntax (`fn name(a, b) { ... }` — spelled
-   `fn`, and without default parameter values). Real sketches sometimes
-   define small helpers this way (easing curves, custom math). Anonymous
+   `fn`; Rhai has no default parameter values of its own). Real sketches
+   sometimes define small helpers this way (easing curves, custom math),
+   and often call them relying on a default actually applying at a
+   shorter arity (`r()` where `r` is declared `function r(min=0,max=1)`).
+   Since Rhai resolves functions by arity, when every default is
+   *trailing* (`a,b=1,c=2`, never `a=1,b`) each shorter arity is
+   synthesized as its own `fn` forwarding to the next arity up with that
+   default spliced in, cascading down to the full-arity original:
+   `fn r(min,max) {BODY}`, `fn r(min) {r(min,1)}`, `fn r() {r(0)}`.
+   Non-trailing defaults just get their header stripped, no shims (a
+   shorter arity couldn't unambiguously fill the gap). Anonymous
    `function(...) { ... }` expressions are left alone, since they're often
    used as closures capturing outer-scope variables, which Rhai's
    `fn`-defined functions can't do.
