@@ -181,9 +181,13 @@ Pipeline order (each step's output feeds the next):
    where JS allows assignment-as-expression (`foo(x = 5)`).
 8. **`mathjs::rewrite_math`** — rewrites `Math.<method>(...)` to the bare
    function name for every method with a registered equivalent (§3's math
-   function list, plus `atan2`→`atan`), and `Math.PI` to a numeric literal.
-   `Math.random()` is deliberately left untouched — there's no
-   GLSL-expression equivalent for true randomness.
+   function list, plus `atan2`→`atan`), and `Math.PI`/`Math.E` to numeric
+   literals. `Math.random()` → `random()`, a real Rhai function (registered
+   in `eval.rs`, backed by a small dependency-free splitmix64-mixed PRNG)
+   called once at script-eval time — same as everywhere else `Math.random()`
+   appears in real sketches, since hydra-rust has no per-frame closures for
+   a "reactive" random to mean anything else. Anything else under `Math.*`
+   is left untouched.
 9. **`argtrunc::truncate_extra_args`** — JS silently ignores extra arguments
    beyond a function's declared parameters; Rhai has no such leniency and
    errors "Function not found" if no overload matches the arity. Truncates
@@ -361,6 +365,7 @@ reactive expression (§3), or a pattern (§7). GLSL semantics are in
 | `out()` / `out(bufIdx)` | Write chain to buffer `o0`, or `bufIdx` (see §2) |
 | `render()` / `render(bufIdx)` | Display mode (see §2) |
 | `hush()` | Clear all buffers (see §2) |
+| `random()` | One-shot pseudo-random `f64` in `[0, 1)`, called once at script-eval time (target of `Math.random()`, see §4) |
 
 ## 7. Patterns
 
