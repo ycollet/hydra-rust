@@ -184,9 +184,10 @@ These are registered so scripts calling them don't hard-error, but they don't do
 
 | Function | Status |
 |----------|--------|
-| `initImage(idx, url)` | No-op — no image loading/decoding pipeline |
-| `initVideo(idx, url)` | No-op — no video file loading pipeline |
-| `initScreen(idx[, screen])` | No-op — no screen/display capture |
+| `initImage(idx, url)` | No-op (returns the source as a chainable value, like real hydra.js) — no image loading/decoding pipeline |
+| `initVideo(idx, url)` | No-op (returns the source as a chainable value) — no video file loading pipeline |
+| `initGif(idx, url)` | No-op (returns the source as a chainable value) — no GIF loading pipeline |
+| `initScreen(idx[, screen])` | No-op (returns the source as a chainable value) — no screen/display capture |
 | `setResolution(w, h)` | No-op — canvas resolution isn't script-controllable |
 | `a.show()` / `a.hide()` | No-op — no on-screen FFT debug graph to toggle |
 | `smooth(amount)` (pattern) | Accepted but not faithful — any non-zero amount just enables the existing on/off smoothing; doesn't reproduce hydra.js's actual interpolation curve |
