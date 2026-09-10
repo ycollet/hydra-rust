@@ -166,8 +166,12 @@ Pipeline order (each step's output feeds the next):
    this was a hard parse failure. Matches only the *zero-parameter* form
    (`(hydra) => {...}` is left alone, since unwrapping would leave `hydra`
    unbound in the body) and reduces the whole construct — handler chain
-   included — to a bare Rhai block `{ BODY }`, evaluated as a normal
-   statement sequence.
+   included — down to the bare `BODY` text, with **no** wrapping `{ }`:
+   since this wrapper typically spans the sketch's entire top-level
+   statement list, keeping a block around it would leave step 13's
+   paren/bracket-depth tracking (which counts `{`/`}` the same as `(`/`[`)
+   at depth 1 for the whole body, silently disabling semicolon insertion
+   between the body's own top-level statements.
 7. **`autolet::insert_missing_let`** — JS creates a variable implicitly on
    first assignment (`speed = 0.8`); Rhai requires `let`. Inserts `let `
    before the first bare assignment to any name not already known (built-in
