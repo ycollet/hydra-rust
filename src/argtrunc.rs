@@ -26,6 +26,23 @@ const MAX_ARGS: &[(&str, usize)] = &[
     ("solid", 4),
     ("rings", 2),
     ("checker", 2),
+    // ported community-extension functions (see SPEC.md §6/§11)
+    ("spiral", 3),
+    ("turb", 3),
+    ("uturb", 3),
+    ("unoise", 2),
+    ("whitenoise", 2),
+    ("colornoise", 2),
+    ("warp", 5),
+    ("cwarp", 6),
+    ("ncontour", 6),
+    ("pulse", 3),
+    ("pulsetrain", 4),
+    ("hextile", 1),
+    ("concentric", 3),
+    ("brick", 3),
+    ("wave", 4),
+    ("lissa", 4),
     // geo
     ("rotate", 2),
     ("scale", 5),
@@ -40,6 +57,12 @@ const MAX_ARGS: &[(&str, usize)] = &[
     ("polar", 0),
     ("cart", 0),
     ("fold", 1),
+    ("inversion", 0),
+    ("mirrorX", 2),
+    ("mirrorY", 2),
+    ("mirrorX2", 2),
+    ("mirrorY2", 2),
+    ("mirrorWrap", 0),
     // color
     ("color", 4),
     ("invert", 1),
@@ -65,6 +88,7 @@ const MAX_ARGS: &[(&str, usize)] = &[
     ("layer", 1),
     ("mask", 1),
     ("sub", 2),
+    ("colreflect", 2),
     // modulate (other + extras)
     ("modulate", 2),
     ("modulateScale", 3),
@@ -262,6 +286,15 @@ mod tests {
     #[test]
     fn zero_arg_function_drops_everything() {
         assert_eq!(truncate_extra_args("polar(1,2)"), "polar()");
+    }
+
+    #[test]
+    fn truncates_extra_arg_on_ported_zero_arg_geo_function() {
+        // regression test: real sketches call `.inversion(N)` even though
+        // the ported hydra.js function takes no arguments - without a
+        // MAX_ARGS entry this was a hard "Function not found" instead of
+        // JS's usual silently-ignored extra argument.
+        assert_eq!(truncate_extra_args("src(o0).inversion(6)"), "src(o0).inversion()");
     }
 
     #[test]
