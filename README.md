@@ -190,9 +190,7 @@ These are registered so scripts calling them don't hard-error, but they don't do
 | `initScreen(idx[, screen])` | No-op (returns the source as a chainable value) — no screen/display capture |
 | `setResolution(w, h)` | No-op — canvas resolution isn't script-controllable |
 | `a.show()` / `a.hide()` | No-op — no on-screen FFT debug graph to toggle |
-| `smooth(amount)` (pattern) | Accepted but not faithful — any non-zero amount just enables the existing on/off smoothing; doesn't reproduce hydra.js's actual interpolation curve |
-| `ease(name)` (pattern) | No-op — passes the pattern through unchanged; no easing-curve implementations |
-| `fit(lo, hi)` (pattern) | No-op — passes the pattern through unchanged; no value-range remapping |
+| `ease(name)` (pattern) | Accepted but not faithful — `smooth()` still interpolates linearly regardless of the named curve; no non-linear easing curves are implemented |
 | `screencap()` | No-op — saving/sharing a screenshot isn't supported |
 | `loadScript(url)` | No-op — no dynamic module loading. Some of the most commonly-loaded community extensions' functions are ported natively instead (`spiral`, `turb`, `uturb`, `unoise`, `whitenoise`, `colornoise`, `warp`, `cwarp`, `ncontour`, `pulse`, `pulsetrain`, `hextile`, `concentric`, `brick`, `wave`, `lissa`, `inversion`, `mirrorX`/`mirrorY`/`mirrorX2`/`mirrorY2`/`mirrorWrap`, `colreflect` — see SPEC.md §6); anything else the loaded script would have defined still won't exist |
 | `o0-o3.setNearest()` / `.setLinear()` / `.setMode(name)` | No-op — buffers are always sampled with linear filtering; no per-buffer sampler state to switch |

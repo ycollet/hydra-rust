@@ -159,6 +159,16 @@ fn stroke_text_variants_alias_the_same_rendering_as_text() {
 }
 
 #[test]
+fn smooth_and_fit_pattern_calls_compile_to_valid_glsl() {
+    // .smooth() interpolates between array entries over time; .fit()
+    // remaps the array's own value range - both must compile cleanly
+    // whether chained onto a bare array or onto each other.
+    let glsl = ok_shader0("osc(60, [0.1, 0.5, 0.9].smooth().fit(0, 1), 0).out()");
+    assert!(glsl.contains("step("), "{glsl}");
+    assert!(glsl.contains("iTempo"), "{glsl}");
+}
+
+#[test]
 fn hydratext_config_assignments_are_harmless_no_ops() {
     // the hydra-text.js community extension's config object - real
     // sketches set arbitrary properties on it before calling the

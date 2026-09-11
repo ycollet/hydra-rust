@@ -486,17 +486,19 @@ itself is a permanent no-op, see README.md):
 ## 7. Patterns
 
 An array literal (`[1, 2, 3]`) can be used almost anywhere a plain number
-is expected. It compiles to a `mod(iTime * speed, N)`-indexed step function
-in GLSL that cycles through the values once per unit of `iTime`, one value
-per `1.0`-wide step (see `Pattern::to_glsl` in `eval.rs`).
+is expected. It compiles to an `iTime * speed * (iTempo / 60.0) + offset`
+-indexed step function in GLSL that cycles through the values once per
+beat (not once per raw second — ported from real hydra.js's
+`array-utils.js`, whose index is scaled by `bpm/60`), one value per
+`1.0`-wide step (see `Pattern::to_glsl` in `eval.rs`).
 
 | Modifier | Effect |
 |---|---|
 | `.fast(speed)` | Multiplies the cycle rate (default `1`) |
-| `.smooth()` / `.smooth(amount)` | Cross-fades between consecutive values instead of stepping. **`amount` is accepted but not faithful** — any value just turns smoothing fully on; there's no partial-interpolation curve. |
-| `.offset(amount)` | Shifts the pattern's phase |
-| `.ease(name)` | **Stub.** Accepted (any curve name), but the pattern passes through unchanged — no easing-curve implementations exist. |
-| `.fit(lo, hi)` | **Stub.** Accepted, but the pattern passes through unchanged — no value-range remapping exists. |
+| `.smooth()` / `.smooth(amount)` | Linearly interpolates between the current and next value over an `amount`-beat-wide window (default `1`), ported from real hydra.js's `getValue` formula. Faithful except that a chained `.ease(name)` still always blends linearly, never the named curve. |
+| `.offset(amount)` | Shifts the pattern's phase (default `0.5`, matching real hydra.js) |
+| `.ease(name)` | Accepted (any curve name) but only toggles smoothing on (`amount = 1`) if not already smoothed — the interpolation itself is always linear; no named easing curves are implemented. |
+| `.fit(lo, hi)` | Remaps the array's own `[min, max]` into `[lo, hi]` (default `0, 1`), matching real hydra.js's `Array.prototype.fit`. Faithfully resets `.offset()` (real hydra.js's `fit` doesn't carry it over) while preserving `.fast()`/`.smooth()`. |
 
 `.reverse()` (Rhai's own array method, overridden here) returns the
 reversed array for chaining (`[0,1].reverse().smooth()`), matching JS's

@@ -100,7 +100,9 @@ struct Pattern {
     values: Vec<f64>,
     speed: f64,
     offset: f64,
-    smooth: bool,
+    // 0.0 = no smoothing (stepped), matching real hydra.js's
+    // `arr._smooth` (falsy/unset = 0). See array-utils.js's `getValue`.
+    smooth: f64,
 }
 
 impl Pattern {
@@ -112,7 +114,25 @@ impl Pattern {
                     .unwrap_or_else(|_| d.as_int().map(|i| i as f64).unwrap_or(0.0))
             })
             .collect();
-        Self { values, speed: 1.0, offset: 0.0, smooth: false }
+        Self { values, speed: 1.0, offset: 0.0, smooth: 0.0 }
+    }
+
+    /// `.fit(low, high)`: remaps each value from the array's own
+    /// [min, max] range into [low, high]. Ported from real hydra.js's
+    /// array-utils.js: `map(num, in_min, in_max, out_min, out_max) =
+    /// (num - in_min) * (out_max - out_min) / (in_max - in_min) + out_min`.
+    /// Real hydra.js preserves `_speed`/`_smooth`/`_ease` across `.fit()`
+    /// but drops `_offset` - matched here for fidelity.
+    fn fit(&self, lo: f64, hi: f64) -> Self {
+        let lowest = self.values.iter().cloned().fold(f64::INFINITY, f64::min);
+        let highest = self.values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let span = highest - lowest;
+        let values = self
+            .values
+            .iter()
+            .map(|v| if span == 0.0 { lo } else { (v - lowest) * (hi - lo) / span + lo })
+            .collect();
+        Self { values, speed: self.speed, offset: 0.0, smooth: self.smooth }
     }
 
     fn to_glsl(&self) -> String {
@@ -124,42 +144,45 @@ impl Pattern {
             return fmt_f(self.values[0]);
         }
 
-        let offset_part = if self.offset != 0.0 {
-            format!(" + {}", fmt_f(self.offset))
-        } else {
-            String::new()
-        };
-        let base = format!("mod(iTime * {}{}, {}.0)", fmt_f(self.speed), offset_part, n);
+        // Real hydra.js: index = time * speed * (bpm/60) + offset (see
+        // array-utils.js's getValue - the array is stepped once per
+        // *beat*, not once per raw second).
+        let idx = format!(
+            "(iTime * {} * (iTempo / 60.0) + {})",
+            fmt_f(self.speed),
+            fmt_f(self.offset)
+        );
 
-        let terms: Vec<String> = if self.smooth {
-            self.values
-                .iter()
-                .enumerate()
-                .map(|(i, v)| {
-                    let next = self.values[(i + 1) % n];
-                    format!(
-                        "mix({}, {}, fract({base})) * step(abs(floor({base}) - {}.0), 0.5)",
-                        fmt_f(*v),
-                        fmt_f(next),
-                        i
-                    )
-                })
-                .collect()
+        if self.smooth != 0.0 {
+            // _index = index - smooth/2; currValue/nextValue are the
+            // values at floor(mod(_index, n))/floor(mod(_index+1, n));
+            // t = min(mod(_index, 1)/smooth, 1); linearly interpolate
+            // between them (real hydra.js also allows a non-linear
+            // .ease() curve here in place of the plain `t`; not yet
+            // supported, so this always behaves like the 'linear' default).
+            let smooth = fmt_f(self.smooth);
+            let sub_idx = format!("({idx} - {smooth} / 2.0)");
+            let curr = self.select_term(&format!("mod({sub_idx}, {n}.0)"));
+            let next = self.select_term(&format!("mod({sub_idx} + 1.0, {n}.0)"));
+            let t = format!("min(mod({sub_idx}, 1.0) / {smooth}, 1.0)");
+            format!("(({t}) * (({next}) - ({curr})) + ({curr}))")
         } else {
-            self.values
-                .iter()
-                .enumerate()
-                .map(|(i, v)| {
-                    format!(
-                        "{} * step(abs(floor({base}) - {}.0), 0.5)",
-                        fmt_f(*v),
-                        i
-                    )
-                })
-                .collect()
-        };
+            format!("({})", self.select_term(&format!("mod({idx}, {n}.0)")))
+        }
+    }
 
-        format!("({})", terms.join(" + "))
+    /// `values[floor(wrapped_idx)]`, built as a sum of step-masked terms:
+    /// GLSL 330 doesn't reliably support indexing an inline-constructed
+    /// array as a pure expression, and `to_glsl` only ever produces one
+    /// (no local variables), so this stays arithmetic rather than an
+    /// actual array lookup.
+    fn select_term(&self, wrapped_idx: &str) -> String {
+        self.values
+            .iter()
+            .enumerate()
+            .map(|(i, v)| format!("{} * step(abs(floor({wrapped_idx}) - {i}.0), 0.5)", fmt_f(*v)))
+            .collect::<Vec<_>>()
+            .join(" + ")
     }
 }
 
@@ -731,25 +754,25 @@ fn next_random_f64() -> f64 {
 }
 
 fn register_patterns(engine: &mut Engine) {
-    // fast()/offset() take defaults in real hydra.js (speed=1, offset=0),
-    // matching Pattern::from_array's own defaults - a 0-arg call is a no-op.
+    // fast()'s default (speed=1) matches Pattern::from_array's own default,
+    // so a 0-arg call is a no-op. offset()'s 0-arg default is *not* a
+    // no-op - see its own registrations below.
     engine.register_fn("fast", |arr: Array| -> Pattern { Pattern::from_array(arr) });
     engine.register_fn("fast", |arr: Array, speed: Dynamic| -> Pattern {
         let mut p = Pattern::from_array(arr);
         p.speed = dyn_to_f64(speed);
         p
     });
+    // Real hydra.js's smooth(amount=1) sets the interpolation window's
+    // width in array-steps (array-utils.js: `this._smooth = smooth`).
     engine.register_fn("smooth", |arr: Array| -> Pattern {
         let mut p = Pattern::from_array(arr);
-        p.smooth = true;
+        p.smooth = 1.0;
         p
     });
-    // Real hydra.js's smooth(amount) takes an interpolation-amount argument;
-    // hydra-rust's Pattern only supports smoothing fully on or off, so any
-    // amount just enables it (an approximation, not a faithful 1:1 port).
-    engine.register_fn("smooth", |arr: Array, _amount: Dynamic| -> Pattern {
+    engine.register_fn("smooth", |arr: Array, amount: Dynamic| -> Pattern {
         let mut p = Pattern::from_array(arr);
-        p.smooth = true;
+        p.smooth = dyn_to_f64(amount);
         p
     });
     engine.register_fn("fast", |p: Pattern| -> Pattern { p });
@@ -758,27 +781,36 @@ fn register_patterns(engine: &mut Engine) {
         p
     });
     engine.register_fn("smooth", |mut p: Pattern| -> Pattern {
-        p.smooth = true;
+        p.smooth = 1.0;
         p
     });
-    engine.register_fn("smooth", |mut p: Pattern, _amount: Dynamic| -> Pattern {
-        p.smooth = true;
+    engine.register_fn("smooth", |mut p: Pattern, amount: Dynamic| -> Pattern {
+        p.smooth = dyn_to_f64(amount);
         p
     });
-    engine.register_fn("offset", |p: Pattern| -> Pattern { p });
-    engine.register_fn("offset", |arr: Array| -> Pattern { Pattern::from_array(arr) });
+    // Real hydra.js's offset(amount=0.5) shifts the pattern's phase by a
+    // fraction of one array-step (array-utils.js reduces it `% 1.0`).
+    engine.register_fn("offset", |mut p: Pattern| -> Pattern {
+        p.offset = 0.5;
+        p
+    });
+    engine.register_fn("offset", |arr: Array| -> Pattern {
+        let mut p = Pattern::from_array(arr);
+        p.offset = 0.5;
+        p
+    });
     engine.register_fn("offset", |mut p: Pattern, o: Dynamic| -> Pattern {
-        p.offset = dyn_to_f64(o);
+        p.offset = dyn_to_f64(o) % 1.0;
         p
     });
     engine.register_fn("offset", |arr: Array, o: Dynamic| -> Pattern {
         let mut p = Pattern::from_array(arr);
-        p.offset = dyn_to_f64(o);
+        p.offset = dyn_to_f64(o) % 1.0;
         p
     });
-    // ease(name)/fit(lo, hi) are real hydra.js pattern utilities (easing
-    // curves, value-range remapping); no interpolation-curve or remapping
-    // machinery exists here, so these pass the pattern through unchanged
+    // ease(name) is a real hydra.js pattern utility (named interpolation
+    // curve); no curve machinery exists here, so it passes the pattern
+    // through unchanged (smoothing still applies, just always linear)
     // rather than hard-erroring.
     engine.register_fn("ease", |arr: Array| -> Pattern { Pattern::from_array(arr) });
     engine.register_fn("ease", |p: Pattern| -> Pattern { p });
@@ -786,14 +818,20 @@ fn register_patterns(engine: &mut Engine) {
         Pattern::from_array(arr)
     });
     engine.register_fn("ease", |p: Pattern, _name: Dynamic| -> Pattern { p });
-    engine.register_fn("fit", |arr: Array| -> Pattern { Pattern::from_array(arr) });
-    engine.register_fn("fit", |p: Pattern| -> Pattern { p });
-    engine.register_fn("fit", |arr: Array, _lo: Dynamic| -> Pattern { Pattern::from_array(arr) });
-    engine.register_fn("fit", |p: Pattern, _lo: Dynamic| -> Pattern { p });
-    engine.register_fn("fit", |arr: Array, _lo: Dynamic, _hi: Dynamic| -> Pattern {
-        Pattern::from_array(arr)
+    // fit(low=0, high=1): remaps the array's own [min,max] into [low,high]
+    // (real hydra.js: array-utils.js's `Array.prototype.fit`).
+    engine.register_fn("fit", |arr: Array| -> Pattern { Pattern::from_array(arr).fit(0.0, 1.0) });
+    engine.register_fn("fit", |p: Pattern| -> Pattern { p.fit(0.0, 1.0) });
+    engine.register_fn("fit", |arr: Array, lo: Dynamic| -> Pattern {
+        Pattern::from_array(arr).fit(dyn_to_f64(lo), 1.0)
     });
-    engine.register_fn("fit", |p: Pattern, _lo: Dynamic, _hi: Dynamic| -> Pattern { p });
+    engine.register_fn("fit", |p: Pattern, lo: Dynamic| -> Pattern { p.fit(dyn_to_f64(lo), 1.0) });
+    engine.register_fn("fit", |arr: Array, lo: Dynamic, hi: Dynamic| -> Pattern {
+        Pattern::from_array(arr).fit(dyn_to_f64(lo), dyn_to_f64(hi))
+    });
+    engine.register_fn("fit", |p: Pattern, lo: Dynamic, hi: Dynamic| -> Pattern {
+        p.fit(dyn_to_f64(lo), dyn_to_f64(hi))
+    });
 
     // Rhai's built-in Array::reverse() mutates in place and returns unit
     // (Rust convention); JS's Array.prototype.reverse() returns the array
@@ -1490,17 +1528,32 @@ mod tests {
     fn pattern_to_glsl_multi_value_uses_step_function_selection() {
         let arr: Array = vec![Dynamic::from_float(1.0), Dynamic::from_float(2.0)];
         let glsl = Pattern::from_array(arr).to_glsl();
-        assert!(glsl.contains("mod(iTime * 1.0, 2.0)"), "{glsl}");
+        assert!(glsl.contains("iTime * 1.0 * (iTempo / 60.0)"), "{glsl}");
         assert!(glsl.contains("1.0 * step("), "{glsl}");
         assert!(glsl.contains("2.0 * step("), "{glsl}");
     }
 
     #[test]
-    fn pattern_to_glsl_smooth_uses_mix_instead_of_step_selection() {
+    fn pattern_to_glsl_smooth_interpolates_between_current_and_next_value() {
         let mut p = Pattern::from_array(vec![Dynamic::from_float(1.0), Dynamic::from_float(2.0)]);
-        p.smooth = true;
+        p.smooth = 1.0;
         let glsl = p.to_glsl();
-        assert!(glsl.contains("mix("), "{glsl}");
+        // linear-interpolation shape: t * (next - curr) + curr, with both
+        // curr/next themselves step-selected from the array's values.
+        assert!(glsl.contains("min(mod("), "{glsl}");
+        assert!(glsl.contains(" - 1.0 / 2.0)"), "{glsl}");
+        assert!(glsl.contains("1.0 * step("), "{glsl}");
+        assert!(glsl.contains("2.0 * step("), "{glsl}");
+    }
+
+    #[test]
+    fn pattern_to_glsl_zero_smooth_amount_falls_back_to_stepped() {
+        // real hydra.js treats `_smooth == 0` as falsy/off, same as never
+        // having called .smooth() at all.
+        let mut p = Pattern::from_array(vec![Dynamic::from_float(1.0), Dynamic::from_float(2.0)]);
+        p.smooth = 0.0;
+        let glsl = p.to_glsl();
+        assert!(!glsl.contains("min(mod("), "{glsl}");
     }
 
     #[test]
@@ -1509,6 +1562,46 @@ mod tests {
         p.offset = 0.25;
         let glsl = p.to_glsl();
         assert!(glsl.contains("+ 0.25"), "{glsl}");
+    }
+
+    #[test]
+    fn eval_offset_with_no_args_defaults_to_half_a_step() {
+        let result = eval("osc(60, [1, 2].offset(), 0).out()").unwrap();
+        let glsl = result.shaders[0].as_ref().unwrap();
+        assert!(glsl.contains("+ 0.5"), "{glsl}");
+    }
+
+    #[test]
+    fn eval_offset_reduces_its_argument_modulo_one_step() {
+        let result = eval("osc(60, [1, 2].offset(1.25), 0).out()").unwrap();
+        let glsl = result.shaders[0].as_ref().unwrap();
+        assert!(glsl.contains("+ 0.25"), "{glsl}");
+    }
+
+    #[test]
+    fn pattern_fit_remaps_values_into_the_given_range() {
+        let arr: Array = vec![Dynamic::from_float(0.0), Dynamic::from_float(5.0), Dynamic::from_float(10.0)];
+        let p = Pattern::from_array(arr).fit(0.0, 1.0);
+        assert_eq!(p.values, vec![0.0, 0.5, 1.0]);
+    }
+
+    #[test]
+    fn pattern_fit_preserves_speed_and_smooth_but_resets_offset() {
+        let mut p = Pattern::from_array(vec![Dynamic::from_float(0.0), Dynamic::from_float(10.0)]);
+        p.speed = 2.0;
+        p.smooth = 1.0;
+        p.offset = 0.5;
+        let fitted = p.fit(0.0, 1.0);
+        assert_eq!(fitted.speed, 2.0);
+        assert_eq!(fitted.smooth, 1.0);
+        assert_eq!(fitted.offset, 0.0);
+    }
+
+    #[test]
+    fn pattern_fit_on_a_constant_array_does_not_divide_by_zero() {
+        let arr: Array = vec![Dynamic::from_float(3.0), Dynamic::from_float(3.0)];
+        let p = Pattern::from_array(arr).fit(2.0, 4.0);
+        assert_eq!(p.values, vec![2.0, 2.0]);
     }
 
     // --- compile_node (GLSL codegen) ---
