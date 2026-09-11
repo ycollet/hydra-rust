@@ -864,9 +864,24 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
     }
     // s0-s3 constants are 100-103; indices below 100 are internal buffers
     engine.register_fn("src", idx_to_source);
-    {
+    // strokeText/fillStrokeText/strokeFillText are the hydra-text.js
+    // community extension's stroke/outline text variants (loadScript-
+    // loaded, so otherwise entirely absent) - aliased to the exact same
+    // rendering as our own text(): "accepted but not faithful" (no
+    // separate stroke-vs-fill rendering mode here), the same treatment
+    // already given to e.g. smooth()'s approximated interpolation curve.
+    // Real hydra.js's text() and friends also accept an optional second
+    // `config` argument (font/style overrides); accepted and ignored,
+    // since there's no per-call font configuration here at all.
+    for name in ["text", "strokeText", "fillStrokeText", "strokeFillText"] {
         let s = state.clone();
-        engine.register_fn("text", move |txt: ImmutableString| -> Node {
+        engine.register_fn(name, move |txt: ImmutableString| -> Node {
+            let data = text::rasterize(&txt);
+            s.lock().unwrap().text_data = Some(data);
+            Node::source("text_src", vec![])
+        });
+        let s = state.clone();
+        engine.register_fn(name, move |txt: ImmutableString, _config: Dynamic| -> Node {
             let data = text::rasterize(&txt);
             s.lock().unwrap().text_data = Some(data);
             Node::source("text_src", vec![])

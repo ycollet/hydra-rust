@@ -148,6 +148,17 @@ fn pb_setname_and_list_are_harmless_no_ops() {
 }
 
 #[test]
+fn stroke_text_variants_alias_the_same_rendering_as_text() {
+    // hydra-text.js's strokeText/fillStrokeText/strokeFillText - not a
+    // faithful stroke-vs-fill render, but shouldn't hard-fail, and should
+    // accept the optional config argument real sketches often pass.
+    for call in ["strokeText(\"hi\")", "fillStrokeText(\"hi\", hydraText)", "strokeFillText(\"hi\")"] {
+        let src = format!("solid(0,0,0,1).diff({call}).out()");
+        assert!(eval(&src).is_ok(), "{call} failed");
+    }
+}
+
+#[test]
 fn hydratext_config_assignments_are_harmless_no_ops() {
     // the hydra-text.js community extension's config object - real
     // sketches set arbitrary properties on it before calling the
