@@ -297,11 +297,20 @@ Pipeline order (each step's output feeds the next):
    zero-parameter reactive-value idiom (step 14), these are called
    elsewhere with real arguments — so they need to become genuine callable
    `fn` declarations, not a value substitution. Rewrites
-   `IDENT = (params) => BODY` (non-empty params, `IDENT` a bare identifier
-   — `obj.prop = ...` is left alone) to `fn IDENT(params) { BODY }`,
-   stripping any leading `let`/`const` and any default parameter values
-   (not cascaded into arity-shim overloads the way step 6's does — no
-   corpus evidence yet that this form commonly needs it). Runs last,
+   `IDENT = (params) => BODY` to `fn IDENT(params) { BODY }`, stripping any
+   leading `let`/`const` and any default parameter values (not cascaded
+   into arity-shim overloads the way step 6's does — no corpus evidence yet
+   that this form commonly needs it). `params` may be parenthesized
+   (`(a,b)`, possibly empty) or, for one parameter, bare (`v => ...`); an
+   empty parameter list is only accepted with a block `BODY` (an empty
+   *expression*-bodied arrow is the reactive-value idiom from step 14
+   instead, handled upstream). If `IDENT` is a property path (`obj.prop =
+   ...`, however deeply dotted) rather than a bare identifier, the whole
+   statement is dropped instead: Rhai has no way to declare a function "on"
+   a property path, and every real instance of this shape in the corpus is
+   JS/p5.js/DOM event-handler wiring (`p.setup = () => {...}`) that nothing
+   here would ever invoke anyway — dropping it is strictly no worse than
+   the hard parse error it replaces. Runs last,
    after `asi`: every other pass has already rewritten the arrow body's
    own content, and an expression body with no `{ }` needs an unambiguous
    end, which becomes just "the next top-level `;`" once `asi` has
