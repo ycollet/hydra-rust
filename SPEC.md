@@ -56,7 +56,7 @@ osc(60.0, 0.1, time * 0.5)
   displays only buffer `n`. Default display mode is buffer `0`.
 - **`hush()`** clears all four buffers and resets `o0` to solid black.
 - Multiple statements are just Rhai statements, one per chain (see §4,
-  step 16, `asi`, for how missing `;` between them is handled).
+  step 17, `asi`, for how missing `;` between them is handled).
 - **Nesting limit:** a chain passed as another chain's "other" operand
   (`.modulate(otherChain, ...)`) recurses through `compile_node`; total
   recursion depth is capped at 16 (`MAX_DEPTH`), erroring `nesting too deep
@@ -164,7 +164,7 @@ Pipeline order (each step's output feeds the next):
    argument, keeping just its value. Deliberately leaves a parenthesized
    group untouched when it's actually a *parameter list* rather than a
    call's arguments — `function name(min=0, max=1) {...}` (step 6) or
-   `(min=0, max=1) => ...` (step 17) have the exact same `name = value`
+   `(min=0, max=1) => ...` (step 18) have the exact same `name = value`
    shape, but there they're real default parameter values those later
    steps need to see intact; detected structurally (preceded by `function
    NAME`, or followed by `=>`) and copied verbatim instead of recursed
@@ -196,7 +196,7 @@ Pipeline order (each step's output feeds the next):
    unbound in the body) and reduces the whole construct — handler chain
    included — down to the bare `BODY` text, with **no** wrapping `{ }`:
    since this wrapper typically spans the sketch's entire top-level
-   statement list, keeping a block around it would leave step 16's
+   statement list, keeping a block around it would leave step 17's
    paren/bracket-depth tracking (which counts `{`/`}` the same as `(`/`[`)
    at depth 1 for the whole body, silently disabling semicolon insertion
    between the body's own top-level statements.
@@ -217,7 +217,7 @@ Pipeline order (each step's output feeds the next):
    (an empty `cond`, `for(;;)`, becomes `true`, matching JS's own "no
    condition" semantics). A brace-less single-statement body
    (`for (...) stmt;`, valid JS, seen in real sketches) is normalized to a
-   block either way. Runs asi (step 16) directly on the loop body's own
+   block either way. Runs asi (step 17) directly on the loop body's own
    content before wrapping it (combined with the update clause, for the
    C-style form, so asi correctly sees "something follows" when deciding
    whether the body's last line needs a `;`) — otherwise the *global* asi
@@ -273,7 +273,34 @@ Pipeline order (each step's output feeds the next):
    arrows (`(a,b)=>...`, `x=>...`, used for pattern/sequencer callbacks —
    unsupported) and block-bodied arrows (`()=>{ ... }` — don't reduce to a
    single expression).
-15. **`ternary::rewrite_ternaries`** — rewrites JS ternaries (`cond ? a : b`)
+15. **`objlit::rewrite_object_literals`** — rewrites JS object literals
+   (`{key: value, ...}`) into Rhai's map literal syntax (`#{key: value,
+   ...}`) wherever one appears in value position (a call argument,
+   assignment RHS, array element, or nested property value) - Rhai's map
+   literal grammar is otherwise identical, so only the leading `#` is
+   missing. Real sketches pass these to calls hydra-rust doesn't implement
+   (`s0.init({src: canvas})`, `P5({mode:"WEBGL"})`,
+   `THREE.MeshBasicMaterial({color: 0x00ff00})`) — the call itself still
+   won't do anything meaningful, but before this pass the object literal
+   was an unconditional hard parse error that aborted the *entire* script;
+   parsing it as an (unused) map lets whatever real hydra content follows
+   it in the same script still run. A bare-identifier key that happens to
+   be one of Rhai's own reserved words (currently just `default`) is
+   additionally quoted (`"default": ...`), since Rhai doesn't allow it
+   unquoted there even though real JS has no such restriction. Telling a
+   value-position `{` apart from a *block* uses the same default JS itself
+   does ("prefer block unless there's affirmative evidence otherwise"):
+   only a `{` immediately preceded by `(`, `,`, `[`, `:`, a bare (non-
+   comparison, non-arrow) `=`, or the `return` keyword counts as a value;
+   anything else (including "nothing", i.e. start of input) is left alone.
+   Runs right after step 14, not before: a destructured-parameter reactive
+   arrow (`({time})=>expr`) has a `{` preceded by `(`, exactly like a
+   call-argument object literal - indistinguishable from this pass's
+   purely local check alone, but step 14's own check is stronger and more
+   specific (a destructure pattern is bare identifiers only, no `:`), so by
+   running after it, any `{` this pass still sees immediately after `(` is
+   guaranteed not to be a destructure pattern.
+16. **`ternary::rewrite_ternaries`** — rewrites JS ternaries (`cond ? a : b`)
    into Rhai's `if`/`else` expression form (`if cond { a } else { b }`,
    valid since Rhai's `if`/`else` blocks evaluate to their last statement's
    value). Rhai has no `?:` operator at all ("Unknown operator: '?'").
@@ -282,14 +309,14 @@ Pipeline order (each step's output feeds the next):
    than via full expression-grammar parsing; nested/chained ternaries
    (`a?b:c?d:e`, right-associative) are handled via recursion on the
    extracted branches.
-16. **`asi::insert_missing_semicolons`** — JS has automatic semicolon
+17. **`asi::insert_missing_semicolons`** — JS has automatic semicolon
    insertion; Rhai doesn't. Real multi-buffer sketches routinely put each
    statement on its own line with no `;` (`osc(10).out(o0)\nosc(20).out(o1)`).
    Inserts `;` at line breaks that are genuine statement boundaries (bracket
    depth 0, and neither the end of the current line nor the start of the
    next one looks like a continuation — an operator, a trailing comma/open
    bracket, or a leading `.`/closing bracket/operator on the next line).
-17. **`arrowfn::rewrite_named_arrows`** — real sketches commonly define
+18. **`arrowfn::rewrite_named_arrows`** — real sketches commonly define
    small helpers as a *named* arrow-function assignment
    (`let el = (s,b,l) => shape(99,s,b)`, or block-bodied
    `let f = (a,b) => { ... }`) rather than `function name(...) {...}`

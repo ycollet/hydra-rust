@@ -159,6 +159,28 @@ fn stroke_text_variants_alias_the_same_rendering_as_text() {
 }
 
 #[test]
+fn object_literal_call_arguments_no_longer_hard_parse_error() {
+    // real sketches pass these to calls hydra-rust doesn't implement
+    // (p5.js/Three.js/canvas interop, here stood in for by the fictitious
+    // `init`) - once the object literal itself parses as an (unused) Rhai
+    // map, the failure becomes an ordinary "function not found" instead of
+    // the syntax error that used to abort the whole script at this line.
+    let err = match eval("s0.init({src: 1, default: 2})") {
+        Err(e) => e,
+        Ok(_) => panic!("expected `init` to be an unregistered function"),
+    };
+    assert!(!err.contains("Syntax error"), "{err}");
+}
+
+#[test]
+fn destructured_reactive_arrow_still_works_alongside_object_literals() {
+    // the exact ambiguity objlit and arrow.rs must agree on: both are a
+    // `{` immediately preceded by `(`.
+    let glsl = ok_shader0("noise(10, ({time})=>Math.sin(time)*3).out()");
+    assert!(glsl.contains("noise("), "{glsl}");
+}
+
+#[test]
 #[cfg(feature = "image_url")]
 fn init_image_queues_a_source_request_without_touching_the_network() {
     // eval() itself never performs the actual fetch - it only records the

@@ -15,6 +15,7 @@ use crate::jskeywords;
 use crate::kwargs;
 use crate::mathjs;
 use crate::numlit;
+use crate::objlit;
 use crate::patcall;
 use crate::quotes;
 use crate::ternary;
@@ -865,6 +866,7 @@ pub fn preprocess(code: &str) -> String {
     let code = &argtrunc::truncate_extra_args(code);
     let code = &patcall::rewrite_pattern_calls(code);
     let code = &arrow::strip_zero_arg_arrows(code);
+    let code = &objlit::rewrite_object_literals(code);
     let code = &ternary::rewrite_ternaries(code);
     let code = &asi::insert_missing_semicolons(code);
     arrowfn::rewrite_named_arrows(code)

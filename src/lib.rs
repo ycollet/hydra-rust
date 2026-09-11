@@ -18,6 +18,7 @@ mod jskeywords;
 mod kwargs;
 mod mathjs;
 mod numlit;
+mod objlit;
 mod patcall;
 mod quotes;
 mod srcscan;
