@@ -4,15 +4,19 @@ use std::time::Instant;
 
 use eframe::egui;
 use egui::{Color32, FontId, TextBuffer};
-#[cfg(feature = "webcam")]
+#[cfg(any(feature = "webcam", feature = "image_url"))]
 use hydra_rust::eval::SourceRequest;
 #[cfg(feature = "audio")]
 use hydra_rust::eval::AudioRequest;
 use hydra_rust::renderer::{self, RenderUniforms, ShaderRenderer};
 #[cfg(feature = "webcam")]
 use hydra_rust::source::{CameraStatus, SourceManager, NUM_SOURCES};
+#[cfg(all(feature = "image_url", not(feature = "webcam")))]
+use hydra_rust::source::NUM_SOURCES;
 #[cfg(feature = "audio")]
 use hydra_rust::audio::AudioManager;
+#[cfg(feature = "image_url")]
+use hydra_rust::imageload::ImageManager;
 use serde::{Deserialize, Serialize};
 
 use crate::highlight::HydraHighlighter;
@@ -85,6 +89,8 @@ pub struct HydraApp {
     source_manager: SourceManager,
     #[cfg(feature = "audio")]
     audio_manager: AudioManager,
+    #[cfg(feature = "image_url")]
+    image_manager: ImageManager,
 }
 
 impl HydraApp {
@@ -110,6 +116,8 @@ impl HydraApp {
             source_manager: SourceManager::new(),
             #[cfg(feature = "audio")]
             audio_manager: AudioManager::new(),
+            #[cfg(feature = "image_url")]
+            image_manager: ImageManager::new(),
         };
 
         let mut loaded_from_file = false;
@@ -166,11 +174,16 @@ impl HydraApp {
                     renderer.upload_text(td);
                 }
                 let compile_errors = renderer.compile_buffers(&result.shaders, result.render_mode);
-                #[cfg(feature = "webcam")]
+                #[cfg(any(feature = "webcam", feature = "image_url"))]
                 for req in &result.source_requests {
                     match req {
+                        #[cfg(feature = "webcam")]
                         SourceRequest::InitCam { slot, camera_index } => {
                             self.source_manager.init_cam(*slot, *camera_index);
+                        }
+                        #[cfg(feature = "image_url")]
+                        SourceRequest::InitImage { slot, url } => {
+                            self.image_manager.init_image(*slot, url.clone());
                         }
                     }
                 }
@@ -266,6 +279,12 @@ impl HydraApp {
         #[cfg(feature = "webcam")]
         for slot in 0..NUM_SOURCES {
             if let Some(frame) = self.source_manager.poll(slot) {
+                renderer.upload_source(slot, &frame);
+            }
+        }
+        #[cfg(feature = "image_url")]
+        for slot in 0..NUM_SOURCES {
+            if let Some(frame) = self.image_manager.poll(slot) {
                 renderer.upload_source(slot, &frame);
             }
         }

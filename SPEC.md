@@ -324,7 +324,8 @@ errors from `eval()`, surfaced to the caller as `Err(String)`.
 - **`o0`-`o3`** (Rhai constants `0`-`3`): the four output buffers, each
   double-buffered (ping-pong) so a buffer can read its own previous frame.
 - **`s0`-`s3`** (Rhai constants `100`-`103`): four external source slots,
-  populated by camera capture (`initCam`, behind the `webcam` feature).
+  populated by camera capture (`initCam`, behind the `webcam` feature) or a
+  fetched image (`initImage`, behind the `image_url` feature).
 - **`src(idx)`**: reads a buffer or source as a chain-starting `Node`. `idx <
   100` reads buffer `idx`'s previous frame (`texture(iBufferN, st)`); `idx >=
   100` reads external source slot `idx - 100` (`texture(iSourceN, ...)`,
@@ -354,6 +355,13 @@ errors from `eval()`, surfaced to the caller as `Err(String)`.
   camera `cameraIndex` (default `0`). This only queues a request in the
   returned `EvalResult`; actual capture happens on the host side
   (`SourceManager`), asynchronously, outside of `eval()`.
+- **`initImage(slot, url)`**: without the `image_url` feature, a no-op
+  (logged once) that still returns the slot's source `Node` for chaining.
+  With it, this queues an `InitImage` request the same way `initCam` queues
+  one; the host side (`ImageManager` in `imageload.rs`) fetches and decodes
+  the URL on a background thread and uploads it to that slot once ready,
+  through the same `upload_source` path camera frames use. Since a fetched
+  image never changes, it's uploaded exactly once, not every frame.
 
 ## 6. Function reference
 
@@ -507,29 +515,40 @@ place and returns nothing).
 
 ## 8. Feature flags
 
-Two Cargo features gate optional hardware/dependency-heavy functionality,
-both off by default:
+Three Cargo features gate optional hardware/network/dependency-heavy
+functionality, all off by default:
 
 | Feature | Deps | Enables |
 |---|---|---|
 | `webcam` | `nokhwa` | `initCam(slot[, cameraIndex])`, populating `s0`-`s3` from a physical camera |
 | `audio` | `cpal`, `rustfft` | `a.fft[i]`, `a.setBins(n)`, `a.setCutoff(c)`, `a.setScale(s)`, `a.setSmooth(s)`, `a.show()`/`a.hide()` (no-op) |
+| `image_url` | `image`, `ureq` | `initImage(slot, url)`, fetching and decoding the URL in the background (see `imageload.rs`) and populating `s0`-`s3` from it, the same way `initCam` populates them from a camera |
 
-Calling a feature-gated function in a build without that feature produces a
-plain "Function not found" error from `eval()` — there is no separate
-"feature not compiled in" error path.
+Calling `initCam`/`a.fft[]`/etc. in a build without `webcam`/`audio`
+produces a plain "Function not found" error from `eval()` — there is no
+separate "feature not compiled in" error path. `initImage` is the one
+exception: it's *always* registered (see §9), so it never hard-errors
+either way; without `image_url` it's just a no-op instead of a real fetch.
+
+Without `image_url`, `initImage`'s network fetch obviously can't happen at
+all - but even *with* it enabled, note that `eval()` itself never touches
+the network: it only records an `InitImage` request (see `SourceRequest`
+in `eval.rs`) for the embedding app to act on later (`imageload.rs`'s
+`ImageManager`, wired up in `src/bin/hydra/app.rs`). This means calling
+`eval()` directly (as `examples/check_corpus.rs` does) is always
+network-free, regardless of which features are compiled in.
 
 ## 9. Known gaps and stub functions
 
 These are registered (so a script calling them doesn't hard-error) but do
 **not** do anything real; see README.md's stub-function table for the
 full, currently-accurate list (kept there rather than duplicated here, so
-there's one place to update). As of this writing it covers `initImage`/
-`initVideo`/`initGif`/`initScreen` (return a chainable no-op source, see
-§5), `setResolution`, `screencap`, `a.show()`/`a.hide()`, `smooth`/`ease`/
-`fit` (patterns, see §7), `loadScript` (see §6 for the community-extension
-functions ported natively instead), and `o0-o3.setNearest()`/`.setLinear()`/
-`.setMode()`.
+there's one place to update). As of this writing it covers `initVideo`/
+`initGif`/`initScreen` (return a chainable no-op source, see §5; `initImage`
+is a real implementation behind `image_url`, see §8), `setResolution`,
+`screencap`, `a.show()`/`a.hide()`, `ease` (patterns, see §7), `loadScript`
+(see §6 for the community-extension functions ported natively instead), and
+`o0-o3.setNearest()`/`.setLinear()`/`.setMode()`.
 
 Not registered at all, and not silently tolerated: `a.settings[i].cutoff =
 ...` (real hydra.js exposes indexable, mutable per-bin audio config; this
@@ -553,9 +572,11 @@ shown in the editor, with a persistent on-screen banner, until the user
 explicitly evaluates it (Ctrl+Enter/Cmd+Enter). This is deliberate: such a
 file may not be one the user wrote themselves (e.g. shared online), and
 could call `initCam()`/reference `a.fft[i]` to access the camera or
-microphone (`webcam`/`audio` features) - those shouldn't run just because
-the file was opened. The restored previous session (the user's own,
-already-run code) is exempt and still auto-evaluates as before.
+microphone (`webcam`/`audio` features), or call `initImage(...)` to make an
+outbound network request to an arbitrary URL (`image_url` feature) - none
+of those should run just because the file was opened. The restored
+previous session (the user's own, already-run code) is exempt and still
+auto-evaluates as before.
 
 ## 11. Adding a missing function
 

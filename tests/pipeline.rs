@@ -159,6 +159,25 @@ fn stroke_text_variants_alias_the_same_rendering_as_text() {
 }
 
 #[test]
+#[cfg(feature = "image_url")]
+fn init_image_queues_a_source_request_without_touching_the_network() {
+    // eval() itself never performs the actual fetch - it only records the
+    // request for the app to act on (see imageload.rs) - so this is safe
+    // to run offline/in CI.
+    use hydra_rust::eval::SourceRequest;
+    let result = eval("s0.initImage(\"https://example.com/pic.png\").out()").unwrap();
+    assert_eq!(result.source_requests.len(), 1);
+    match &result.source_requests[0] {
+        SourceRequest::InitImage { slot, url } => {
+            assert_eq!(*slot, 0);
+            assert_eq!(url.as_str(), "https://example.com/pic.png");
+        }
+        #[allow(unreachable_patterns)]
+        other => panic!("unexpected request: {other:?}"),
+    }
+}
+
+#[test]
 fn smooth_and_fit_pattern_calls_compile_to_valid_glsl() {
     // .smooth() interpolates between array entries over time; .fit()
     // remaps the array's own value range - both must compile cleanly

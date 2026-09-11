@@ -19,10 +19,13 @@ regex = "1"
 rfd = "0.15"
 cpal = { version = "0.15", optional = true }
 rustfft = { version = "6", optional = true }
+image = { version = "0.25", optional = true, default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+ureq = { version = "2", optional = true, features = ["tls"] }
 
 [features]
 webcam = ["dep:nokhwa"]
 audio = ["dep:cpal", "dep:rustfft"]
+image_url = ["dep:image", "dep:ureq"]
 
 # Real-time rendering app: thin LTO's cross-crate inlining meaningfully
 # helps the hot per-frame path (renderer.rs) and eval()'s Rhai-engine/

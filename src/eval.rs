@@ -31,10 +31,13 @@ pub enum RenderMode {
     All,
 }
 
-#[cfg(feature = "webcam")]
+#[cfg(any(feature = "webcam", feature = "image_url"))]
 #[derive(Debug, Clone)]
 pub enum SourceRequest {
+    #[cfg(feature = "webcam")]
     InitCam { slot: usize, camera_index: u32 },
+    #[cfg(feature = "image_url")]
+    InitImage { slot: usize, url: String },
 }
 
 #[cfg(feature = "audio")]
@@ -50,7 +53,7 @@ pub struct EvalResult {
     pub shaders: [Option<String>; 4],
     pub render_mode: RenderMode,
     pub text_data: Option<TextData>,
-    #[cfg(feature = "webcam")]
+    #[cfg(any(feature = "webcam", feature = "image_url"))]
     pub source_requests: Vec<SourceRequest>,
     #[cfg(feature = "audio")]
     pub audio_requests: Vec<AudioRequest>,
@@ -569,7 +572,7 @@ struct PatchState {
     buffers: [Option<Node>; 4],
     render_mode: RenderMode,
     text_data: Option<TextData>,
-    #[cfg(feature = "webcam")]
+    #[cfg(any(feature = "webcam", feature = "image_url"))]
     source_requests: Vec<SourceRequest>,
     #[cfg(feature = "audio")]
     audio_requests: Vec<AudioRequest>,
@@ -873,7 +876,7 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
         buffers: [None, None, None, None],
         render_mode: RenderMode::default(),
         text_data: None,
-        #[cfg(feature = "webcam")]
+        #[cfg(any(feature = "webcam", feature = "image_url"))]
         source_requests: Vec::new(),
         #[cfg(feature = "audio")]
         audio_requests: Vec::new(),
@@ -1026,16 +1029,32 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
         engine.register_fn("hide", |_a: Audio| {});
     }
 
-    // initImage/initVideo/initScreen/initGif (external image/video/GIF/
-    // display capture) and setResolution have no implementation here (no
-    // image decoding, video, GIF, or screen-capture pipeline, and no
-    // script-driven canvas resize) - these are no-ops, logged once per
-    // call, purely so sketches that call them still evaluate their other
-    // effects instead of hard erroring at this line. Real hydra.js returns
-    // the source object itself for chaining (`sN.initVideo(url).out(o0)`
-    // is a common real-world shape); these return the equivalent Node
-    // (`src(idx)`, reading whatever - nothing, in practice - is already in
-    // that slot) so such chains keep evaluating too.
+    // initVideo/initScreen/initGif (external video/GIF/display capture) and
+    // setResolution have no implementation here (no video, GIF, or
+    // screen-capture pipeline, and no script-driven canvas resize) - these
+    // are no-ops, logged once per call, purely so sketches that call them
+    // still evaluate their other effects instead of hard erroring at this
+    // line. Real hydra.js returns the source object itself for chaining
+    // (`sN.initVideo(url).out(o0)` is a common real-world shape); these
+    // return the equivalent Node (`src(idx)`, reading whatever - nothing,
+    // in practice - is already in that slot) so such chains keep evaluating
+    // too. initImage is a real implementation when the `image_url` feature
+    // is enabled (network fetch + decode, see imageload.rs) - the plain
+    // no-op stub below is only registered without it.
+    #[cfg(feature = "image_url")]
+    {
+        let s = state.clone();
+        engine.register_fn("initImage", move |idx: i64, url: ImmutableString| -> Node {
+            if idx >= 100 {
+                s.lock().unwrap().source_requests.push(SourceRequest::InitImage {
+                    slot: (idx - 100) as usize,
+                    url: url.to_string(),
+                });
+            }
+            idx_to_source(idx)
+        });
+    }
+    #[cfg(not(feature = "image_url"))]
     engine.register_fn("initImage", |idx: i64, url: ImmutableString| -> Node {
         log::warn!("initImage({idx}, \"{url}\") ignored: image sources are not supported");
         idx_to_source(idx)
@@ -1173,7 +1192,7 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
         shaders,
         render_mode: patch.render_mode,
         text_data: patch.text_data.take(),
-        #[cfg(feature = "webcam")]
+        #[cfg(any(feature = "webcam", feature = "image_url"))]
         source_requests: std::mem::take(&mut patch.source_requests),
         #[cfg(feature = "audio")]
         audio_requests: std::mem::take(&mut patch.audio_requests),

@@ -1,5 +1,6 @@
 pub mod audio;
 pub mod eval;
+pub mod imageload;
 pub mod renderer;
 pub mod shader;
 pub mod source;

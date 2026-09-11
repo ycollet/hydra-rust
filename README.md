@@ -67,11 +67,11 @@ python3 scripts/fetch_corpus.py          # downloads into ./sketches
 ```
 
 Then run the harness against it (built with `--release` and every feature,
-so `a.fft[...]`/`initCam(...)`-style sketches don't fail just because those
-functions aren't registered):
+so `a.fft[...]`/`initCam(...)`/`initImage(...)`-style sketches don't fail
+just because those functions aren't registered):
 
 ```bash
-cargo run --release --features webcam,audio --example check_corpus -- sketches
+cargo run --release --features webcam,audio,image_url --example check_corpus -- sketches
 ```
 
 This prints an ok/failed count and the top failure buckets, and writes
@@ -176,7 +176,7 @@ hydra-rust is the visual engine of [Sova](https://github.com/Bubobubobubobubo/So
 ## Current limitations
 
 - Max nesting depth of 16
-- Audio reactivity (`a.fft[]`, `a.setBins`/`setCutoff`/`setScale`/`setSmooth`) and webcam input (`initCam`) require building with the `audio`/`webcam` Cargo features respectively (off by default)
+- Audio reactivity (`a.fft[]`, `a.setBins`/`setCutoff`/`setScale`/`setSmooth`), webcam input (`initCam`), and image-URL loading (`initImage`) require building with the `audio`/`webcam`/`image_url` Cargo features respectively (off by default)
 
 ### Stub functions (accepted, but not yet implemented)
 
@@ -184,7 +184,7 @@ These are registered so scripts calling them don't hard-error, but they don't do
 
 | Function | Status |
 |----------|--------|
-| `initImage(idx, url)` | No-op (returns the source as a chainable value, like real hydra.js) — no image loading/decoding pipeline |
+| `initImage(idx, url)` | Real implementation behind the `image_url` feature: fetches the URL and decodes it (PNG/JPEG/GIF/WebP) in the background, then uploads it to the source slot once it's ready, through the same texture path webcam frames use. Without that feature, it's a no-op (returns the source as a chainable value, like real hydra.js) |
 | `initVideo(idx, url)` | No-op (returns the source as a chainable value) — no video file loading pipeline |
 | `initGif(idx, url)` | No-op (returns the source as a chainable value) — no GIF loading pipeline |
 | `initScreen(idx[, screen])` | No-op (returns the source as a chainable value) — no screen/display capture |
