@@ -79,7 +79,7 @@ script does anyway).
 | `mouseX`, `mouseY` | `iMouse.x`, `iMouse.y` | Constants, normalized `[0, 1]`. |
 | `mouse.x`, `mouse.y` | `iMouse.x`, `iMouse.y` | Same values, object-property form matching real hydra.js. `mouse` itself is a marker value, not reassignable in any useful way. |
 | `width`, `height` | `iResolution.x`, `iResolution.y` | Constants — canvas resolution in pixels. |
-| `window.innerWidth`, `window.innerHeight` | `iResolution.x`, `iResolution.y` | Same values, DOM-style form some sketches use instead. |
+| `window.innerWidth`, `window.innerHeight` / bare `innerWidth`, `innerHeight` | `iResolution.x`, `iResolution.y` | Same values, DOM-style form some sketches use instead (bare, since in a real browser `window` is the global object). |
 | `a.fft[i]` | `iFft[i]` | **`audio` feature only.** `i` may be an integer literal (clamped to `[0, NUM_FFT_BINS-1]`, currently 8 bins) or itself a reactive `GlslExpr`, in which case the index becomes `int(mod(expr, 8.0))` in GLSL. |
 
 Arithmetic between these values and plain numbers works via operator

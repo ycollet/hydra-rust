@@ -196,6 +196,8 @@ These are registered so scripts calling them don't hard-error, but they don't do
 | `screencap()` | No-op — saving/sharing a screenshot isn't supported |
 | `loadScript(url)` | No-op — no dynamic module loading. Some of the most commonly-loaded community extensions' functions are ported natively instead (`spiral`, `turb`, `uturb`, `unoise`, `whitenoise`, `colornoise`, `warp`, `cwarp`, `ncontour`, `pulse`, `pulsetrain`, `hextile`, `concentric`, `brick`, `wave`, `lissa`, `inversion`, `mirrorX`/`mirrorY`/`mirrorX2`/`mirrorY2`/`mirrorWrap`, `colreflect` — see SPEC.md §6); anything else the loaded script would have defined still won't exist |
 | `o0-o3.setNearest()` / `.setLinear()` / `.setMode(name)` | No-op — buffers are always sampled with linear filtering; no per-buffer sampler state to switch |
+| `pb.setName(name)` / `pb.list()` | No-op — not a hydra.js API at all; boilerplate an external platform injects when a sketch is exported/shared |
+| `hydraText.font = ...` / any other property | No-op — the `hydra-text.js` extension's config object (`loadScript`-loaded); accepts assignment to any property, but the extension's own `strokeText`/text-rendering function still won't exist |
 
 ## License
 
