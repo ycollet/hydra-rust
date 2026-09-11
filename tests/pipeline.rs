@@ -128,3 +128,30 @@ fn setnearest_stub_does_not_break_the_rest_of_the_chain() {
     let src = "osc(60).out(o0)\no0.setNearest()";
     assert!(eval(src).is_ok());
 }
+
+#[test]
+fn bare_inner_width_and_height_are_usable_without_a_window_prefix() {
+    // in a real browser `window` is the global object, so real sketches
+    // often use `innerWidth`/`innerHeight` bare, not just `window.innerWidth`
+    let glsl = ok_shader0("osc(1,1,innerWidth/innerHeight).out()");
+    assert!(glsl.contains("iResolution.x"), "{glsl}");
+    assert!(glsl.contains("iResolution.y"), "{glsl}");
+}
+
+#[test]
+fn pb_setname_and_list_are_harmless_no_ops() {
+    // `pb.setName(...)`/`pb.list()` are boilerplate some external platform
+    // injects when a sketch is shared - not a hydra.js API at all - and
+    // must not stop the sketch's real content from evaluating.
+    let src = "pb.setName(\"someone\")\npb.list()\nosc(60).out()";
+    assert!(eval(src).is_ok());
+}
+
+#[test]
+fn hydratext_config_assignments_are_harmless_no_ops() {
+    // the hydra-text.js community extension's config object - real
+    // sketches set arbitrary properties on it before calling the
+    // extension's own (unsupported) text-rendering function.
+    let src = "hydraText.font = \"serif\";\nhydraText.lineWidth = \"2%\";\nosc(60).out()";
+    assert!(eval(src).is_ok());
+}

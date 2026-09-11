@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use rhai::{Array, CustomType, Dynamic, Engine, ImmutableString, Scope, TypeBuilder};
+use rhai::{Array, CustomType, Dynamic, Engine, ImmutableString, Map, Scope, TypeBuilder};
 
 use crate::argtrunc;
 use crate::arrow;
@@ -76,6 +76,15 @@ struct Mouse;
 /// `iResolution` uniform here.
 #[derive(Debug, Clone, Copy)]
 struct Window;
+
+/// `pb.setName("...")` (and occasionally `pb.list()`) appears, always as
+/// one of the very first statements, in a large number of real sketches -
+/// not a hydra.js API at all, but boilerplate some external platform
+/// injects when a sketch is exported/shared (`setName`'s argument is
+/// always a person's name/handle, never referenced again). No-op, purely
+/// so the sketch's *actual* hydra content past this line still evaluates.
+#[derive(Debug, Clone, Copy)]
+struct Pb;
 
 #[derive(Debug, Clone)]
 enum Arg {
@@ -1040,6 +1049,8 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
     engine.register_get("innerHeight", |_w: &mut Window| -> GlslExpr {
         GlslExpr("iResolution.y".to_string())
     });
+    engine.register_fn("setName", |_pb: Pb, _name: ImmutableString| {});
+    engine.register_fn("list", |_pb: Pb| {});
 
     let mut scope = Scope::new();
     scope.push_constant("o0", 0_i64);
@@ -1063,10 +1074,25 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
     scope.push_constant("mouseY", GlslExpr("iMouse.y".to_string()));
     scope.push_constant("width", GlslExpr("iResolution.x".to_string()));
     scope.push_constant("height", GlslExpr("iResolution.y".to_string()));
+    // In a real browser `window` is the global object, so `innerWidth`/
+    // `innerHeight` are usable bare, without a `window.` prefix - and real
+    // sketches often do exactly that.
+    scope.push_constant("innerWidth", GlslExpr("iResolution.x".to_string()));
+    scope.push_constant("innerHeight", GlslExpr("iResolution.y".to_string()));
     // Pushed as a regular (non-constant) variable, same reasoning as `a` below:
     // property-getter dispatch on a constant `Mouse`/`Window` isn't worth risking.
     scope.push("mouse", Mouse);
     scope.push("window", Window);
+    scope.push("pb", Pb);
+    // The `hydra-text.js` community extension (loaded via loadScript(),
+    // itself a no-op) exposes a config object real sketches set arbitrary
+    // properties on (`hydraText.font = "serif"`, `.lineWidth`, `.fontSize`,
+    // ...) before calling the extension's own advanced text-rendering
+    // function - which, since the extension never actually loads, still
+    // won't exist. A plain Rhai object map accepts any property name with
+    // no per-property registration needed, so the assignments themselves
+    // at least don't hard-fail the rest of the sketch.
+    scope.push("hydraText", Map::new());
     // Pushed as a regular (non-constant) variable, unlike the GlslExpr constants above:
     // Rhai forbids mutable-receiver method calls on constants, and `a.setBins(...)`
     // dispatches as one even though the registered fns take `Audio` by value.
