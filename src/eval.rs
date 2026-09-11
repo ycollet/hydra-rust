@@ -723,18 +723,41 @@ fn register_glsl_ops(engine: &mut Engine) {
     glsl_fn2!("atan");
 
     // Plain-number overloads (no GlslExpr involved) for the same four names.
+    // Real JS's Math.* functions coerce either argument type freely (unlike
+    // Rhai, which needs a distinct overload per exact type combination), so
+    // every i64/f64 mix is registered too - not just the all-f64 case.
     engine.register_fn("pow", |a: f64, b: f64| -> f64 { a.powf(b) });
+    engine.register_fn("pow", |a: i64, b: i64| -> f64 { (a as f64).powf(b as f64) });
+    engine.register_fn("pow", |a: f64, b: i64| -> f64 { a.powf(b as f64) });
+    engine.register_fn("pow", |a: i64, b: f64| -> f64 { (a as f64).powf(b) });
     engine.register_fn("min", |a: f64, b: f64| -> f64 { a.min(b) });
+    engine.register_fn("min", |a: i64, b: i64| -> f64 { (a as f64).min(b as f64) });
+    engine.register_fn("min", |a: f64, b: i64| -> f64 { a.min(b as f64) });
+    engine.register_fn("min", |a: i64, b: f64| -> f64 { (a as f64).min(b) });
     engine.register_fn("max", |a: f64, b: f64| -> f64 { a.max(b) });
+    engine.register_fn("max", |a: i64, b: i64| -> f64 { (a as f64).max(b as f64) });
+    engine.register_fn("max", |a: f64, b: i64| -> f64 { a.max(b as f64) });
+    engine.register_fn("max", |a: i64, b: f64| -> f64 { (a as f64).max(b) });
     engine.register_fn("atan", |a: f64, b: f64| -> f64 { a.atan2(b) });
+    engine.register_fn("atan", |a: i64, b: i64| -> f64 { (a as f64).atan2(b as f64) });
+    engine.register_fn("atan", |a: f64, b: i64| -> f64 { a.atan2(b as f64) });
+    engine.register_fn("atan", |a: i64, b: f64| -> f64 { (a as f64).atan2(b) });
 
     // `Math.random()` (rewritten to `random()` by mathjs::rewrite_math) is
     // called once at script-eval time, same as everywhere else it's used in
     // real hydra.js sketches (hydra-rust has no per-frame closures for a
     // "reactive" random() to make sense of anyway) - so a genuine one-shot
     // RNG call here is a faithful equivalent, baking a real random literal
-    // into the compiled GLSL, same as JS would.
+    // into the compiled GLSL, same as JS would. Real JS's Math.random()
+    // takes no arguments at all, but silently ignores any extras passed to
+    // it rather than erroring (ordinary JS excess-argument tolerance) - real
+    // sketches sometimes call it as if it took a range (`random(min, max)`),
+    // so 1- and 2-argument overloads are registered too, matching that
+    // same "ignore whatever's passed" behavior rather than implementing an
+    // actual ranged random that real hydra.js doesn't have either.
     engine.register_fn("random", || -> f64 { next_random_f64() });
+    engine.register_fn("random", |_a: Dynamic| -> f64 { next_random_f64() });
+    engine.register_fn("random", |_a: Dynamic, _b: Dynamic| -> f64 { next_random_f64() });
 }
 
 /// One-shot, dependency-free pseudo-random `f64` in `[0, 1)`, mixed from the
@@ -1071,6 +1094,10 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
         log::warn!("initGif({idx}, \"{url}\") ignored: GIF sources are not supported");
         idx_to_source(idx)
     });
+    engine.register_fn("initStream", |idx: i64, url: ImmutableString| -> Node {
+        log::warn!("initStream({idx}, \"{url}\") ignored: WebRTC/live-stream sources are not supported");
+        idx_to_source(idx)
+    });
     engine.register_fn("initScreen", |idx: i64| -> Node {
         log::warn!("initScreen({idx}) ignored: screen capture is not supported");
         idx_to_source(idx)
@@ -1115,6 +1142,53 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
     // even though whatever the extension would have defined won't exist.
     engine.register_fn("loadScript", |url: ImmutableString| {
         log::warn!("loadScript(\"{url}\") ignored: dynamic script loading is not supported");
+    });
+    // `P5`/`new P5(...)` (`new` is already stripped as a bare keyword - see
+    // jskeywords.rs) constructs a p5.js instance real sketches use to draw
+    // extra overlay graphics alongside the hydra visuals (see README.md's
+    // "Known-broken sketches: p5.js dependency") - a whole separate
+    // creative-coding framework with no Rust equivalent here. Returning a
+    // plain Rhai map (like `hydraText`) rather than hard-erroring means the
+    // assignment itself (`let p1 = P5(...)`) still succeeds, and later
+    // property reads/writes on it (`p1.canvas`, `p1.width = ...`) are
+    // harmless instead of "Variable not found" - real method calls on it
+    // (`p1.createCanvas(...)`) still won't exist, same as before.
+    engine.register_fn("P5", || -> Map { Map::new() });
+    engine.register_fn("P5", |_config: Dynamic| -> Map { Map::new() });
+    // A handful of the most commonly-called p5.js instance methods, as
+    // no-ops on that same stand-in map - not an attempt at covering p5's
+    // whole API (dozens of methods), just the ones seen often enough in
+    // the corpus to be worth it.
+    engine.register_fn("hide", |_p: Map| {});
+    engine.register_fn("show", |_p: Map| {});
+    engine.register_fn("textSize", |_p: Map, _size: Dynamic| {});
+    engine.register_fn("fill", |_p: Map, _color: Dynamic| {});
+    engine.register_fn("fill", |_p: Map, _r: Dynamic, _g: Dynamic, _b: Dynamic| {});
+    // `sN.init({src: ...})` - not a real hydra.js API at all, but a
+    // pattern some external platforms/community sketches use to feed a
+    // p5.js canvas (or other DOM element) into a hydra source slot. No
+    // such canvas-capture pipeline exists here, so this is a no-op that
+    // still returns the slot's own source Node for chaining, same
+    // treatment as `initImage`/`initVideo` without the `image_url` feature.
+    engine.register_fn("init", |idx: i64, _config: Map| -> Node {
+        log::warn!("init({idx}, ...) ignored: canvas/DOM element sources are not supported");
+        idx_to_source(idx)
+    });
+    // Real hydra.js's setFunction(descriptor) registers a custom GLSL
+    // source/color/combine/combineCoord function from a JS object
+    // describing its name/inputs/GLSL body - no such dynamic
+    // function-registration or GLSL-embedding exists here, so this is a
+    // no-op: whatever function it would have defined simply won't exist
+    // (surfacing as an ordinary "missing function" if called), but the
+    // rest of the sketch still gets to evaluate.
+    engine.register_fn("setFunction", |_descriptor: Map| {
+        log::warn!("setFunction(...) ignored: custom GLSL function registration is not supported");
+    });
+    // Some external VJ/live-coding integrations call a bare `Scene("name")`
+    // to switch between named cue banks - not a hydra.js API at all, and
+    // with no such integration here, a no-op.
+    engine.register_fn("Scene", |name: ImmutableString| {
+        log::warn!("Scene(\"{name}\") ignored: external scene/cue integration is not supported");
     });
 
     engine.register_get("x", |_m: &mut Mouse| -> GlslExpr { GlslExpr("iMouse.x".to_string()) });

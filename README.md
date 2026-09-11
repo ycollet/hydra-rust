@@ -187,8 +187,13 @@ These are registered so scripts calling them don't hard-error, but they don't do
 | `initImage(idx, url)` | Real implementation behind the `image_url` feature: fetches the URL and decodes it (PNG/JPEG/GIF/WebP) in the background, then uploads it to the source slot once it's ready, through the same texture path webcam frames use. Without that feature, it's a no-op (returns the source as a chainable value, like real hydra.js) |
 | `initVideo(idx, url)` | No-op (returns the source as a chainable value) — no video file loading pipeline |
 | `initGif(idx, url)` | No-op (returns the source as a chainable value) — no GIF loading pipeline |
+| `initStream(idx, url)` | No-op (returns the source as a chainable value) — no WebRTC/live-stream pipeline |
 | `initScreen(idx[, screen])` | No-op (returns the source as a chainable value) — no screen/display capture |
+| `sN.init({src: ...})` | No-op (returns the slot's source as a chainable value) — not a real hydra.js API at all, but a pattern some external platforms use to feed a p5.js canvas/DOM element into a source slot; no such capture pipeline exists here |
 | `setResolution(w, h)` | No-op — canvas resolution isn't script-controllable |
+| `P5(...)` / `new P5(...)` | Returns a plain settable map (like `hydraText`) rather than hard-erroring, so an assignment (`let p1 = P5(...)`) and later property reads/writes on it still work — p5.js is a whole separate creative-coding framework with no Rust equivalent here. A handful of its most commonly-called instance methods (`hide`, `show`, `textSize`, `fill`) are additionally registered as no-ops on that map; the rest of its (large) API isn't |
+| `setFunction(descriptor)` | No-op — real hydra.js registers a custom GLSL source/color/combine function from a JS descriptor object + GLSL string; no dynamic function-registration or GLSL-embedding pipeline exists here |
+| `Scene(name)` | No-op — not a hydra.js API at all; some external VJ/live-coding integrations use it to switch named cue banks |
 | `a.show()` / `a.hide()` | No-op — no on-screen FFT debug graph to toggle |
 | `ease(name)` (pattern) | Accepted but not faithful — `smooth()` still interpolates linearly regardless of the named curve; no non-linear easing curves are implemented |
 | `screencap()` | No-op — saving/sharing a screenshot isn't supported |

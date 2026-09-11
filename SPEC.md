@@ -545,7 +545,7 @@ itself is a permanent no-op, see README.md):
 | `out()` / `out(bufIdx)` | Write chain to buffer `o0`, or `bufIdx` (see §2) |
 | `render()` / `render(bufIdx)` | Display mode (see §2) |
 | `hush()` | Clear all buffers (see §2) |
-| `random()` | One-shot pseudo-random `f64` in `[0, 1)`, called once at script-eval time (target of `Math.random()`, see §4) |
+| `random()` / `random(...)` | One-shot pseudo-random `f64` in `[0, 1)`, called once at script-eval time (target of `Math.random()`, see §4). Accepts and ignores 0-2 extra arguments, matching real JS's own excess-argument tolerance (real `Math.random()` takes none either) rather than implementing an actual ranged random some sketches seem to expect |
 
 ## 7. Patterns
 

@@ -148,6 +148,40 @@ fn pb_setname_and_list_are_harmless_no_ops() {
 }
 
 #[test]
+fn p5_instance_and_its_common_methods_are_harmless_no_ops() {
+    // p5.js is a whole separate creative-coding framework with no Rust
+    // equivalent here (see README.md); a P5 instance is stood in for by a
+    // plain settable map so the sketch's real hydra content downstream
+    // still gets to evaluate instead of hard-failing on this boilerplate.
+    let src = r#"
+        let p1 = P5({mode: "WEBGL"});
+        p1.hide();
+        p1.show();
+        p1.textSize(24);
+        p1.someArbitraryProperty = "anything";
+        osc(60).out()
+    "#;
+    assert!(eval(src).is_ok());
+}
+
+#[test]
+fn source_slot_init_with_a_dom_element_config_is_a_harmless_no_op() {
+    // `sN.init({src: ...})` - not a real hydra.js API, but a pattern some
+    // external platforms use to feed a p5.js canvas into a source slot.
+    let src = "s0.init({src: 1});\nosc(60).out()";
+    assert!(eval(src).is_ok());
+}
+
+#[test]
+fn ranged_random_and_mixed_numeric_math_calls_are_accepted() {
+    // real JS's Math.random()/Math.pow() etc. tolerate any argument types
+    // real hydra.js sketches occasionally pass (Math.random() takes none
+    // at all but silently ignores extras; Math.pow accepts any numerics).
+    let src = "noise(pow(2, 3), random(0, 1)).out()";
+    assert!(eval(src).is_ok());
+}
+
+#[test]
 fn stroke_text_variants_alias_the_same_rendering_as_text() {
     // hydra-text.js's strokeText/fillStrokeText/strokeFillText - not a
     // faithful stroke-vs-fill render, but shouldn't hard-fail, and should
@@ -177,14 +211,15 @@ fn arrow_function_parameter_lists_survive_comma_tuple_handling() {
 
 #[test]
 fn object_literal_call_arguments_no_longer_hard_parse_error() {
-    // real sketches pass these to calls hydra-rust doesn't implement
-    // (p5.js/Three.js/canvas interop, here stood in for by the fictitious
-    // `init`) - once the object literal itself parses as an (unused) Rhai
-    // map, the failure becomes an ordinary "function not found" instead of
-    // the syntax error that used to abort the whole script at this line.
-    let err = match eval("s0.init({src: 1, default: 2})") {
+    // real sketches pass these to calls hydra-rust doesn't implement for
+    // real (p5.js/Three.js/canvas interop, here stood in for by the
+    // fictitious `notARealFunction`) - once the object literal itself
+    // parses as an (unused) Rhai map, the failure becomes an ordinary
+    // "function not found" instead of the syntax error that used to abort
+    // the whole script at this line.
+    let err = match eval("notARealFunction({src: 1, default: 2})") {
         Err(e) => e,
-        Ok(_) => panic!("expected `init` to be an unregistered function"),
+        Ok(_) => panic!("expected `notARealFunction` to be an unregistered function"),
     };
     assert!(!err.contains("Syntax error"), "{err}");
 }
