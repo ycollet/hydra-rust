@@ -343,12 +343,20 @@ fn idx_to_source(idx: i64) -> Node {
 /// Real hydra.js lets you write e.g. `.modulate(s0, 0.5)`, treating `s0`/`o1`
 /// as first-class chainable source objects; here they're bare `i64`
 /// constants, so this accepts that raw index directly (equivalent to
-/// `src(s0)`) as well as an already-built `Node` chain.
+/// `src(s0)`) as well as an already-built `Node` chain. Also accepts a
+/// plain `f64` (`.mult(0.2)`, a common real-sketch idiom): real hydra.js
+/// auto-promotes a bare number passed where a texture is expected into a
+/// flat color, so this does too - `solid(v, v, v, 1)`, matching `solid`'s
+/// own default alpha. `i64` is deliberately kept as "buffer/source index"
+/// rather than also being colorized: `o0`/`s0` etc. are themselves `i64`
+/// constants, and that meaning is by far the dominant real usage.
 fn as_node(d: Dynamic) -> Result<Node, Box<rhai::EvalAltResult>> {
     if d.is::<Node>() {
         Ok(d.cast::<Node>())
     } else if let Ok(idx) = d.as_int() {
         Ok(idx_to_source(idx))
+    } else if let Ok(v) = d.as_float() {
+        Ok(Node::source("solid", vec![Arg::Lit(v), Arg::Lit(v), Arg::Lit(v), Arg::Lit(1.0)]))
     } else {
         Err(format!("expected a source or a chain, found {}", d.type_name()).into())
     }
@@ -982,8 +990,16 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
         log::warn!("initScreen({idx}, {screen}) ignored: screen capture is not supported");
         idx_to_source(idx)
     });
-    engine.register_fn("setResolution", |w: i64, h: i64| {
-        log::warn!("setResolution({w}, {h}) ignored: script-driven resize is not supported");
+    // Real sketches often call this with reactive values (e.g.
+    // `setResolution(window.innerWidth, window.innerHeight)`), not just
+    // plain numbers - accept `Dynamic` so those don't hard-fail with
+    // "Function not found" on top of this being an already-documented no-op.
+    engine.register_fn("setResolution", |w: Dynamic, h: Dynamic| {
+        log::warn!(
+            "setResolution({}, {}) ignored: script-driven resize is not supported",
+            dyn_to_f64(w),
+            dyn_to_f64(h)
+        );
     });
     // A widely-copy-pasted community extension adds o0-o3.setNearest()/
     // .setLinear()/.setMode("nearest"|"linear") to toggle a buffer's texture
@@ -1367,6 +1383,47 @@ mod tests {
                 assert_eq!(*func, "ext_src");
                 assert!(matches!(args[0], Arg::Lit(v) if v == 3.0));
             }
+            other => panic!("unexpected ops: {other:?}"),
+        }
+    }
+
+    // --- as_node ---
+
+    #[test]
+    fn as_node_promotes_a_bare_float_to_a_flat_color() {
+        // real hydra.js idiom: `.mult(0.2)` auto-promotes the bare number
+        // into a flat-color texture rather than requiring an explicit
+        // `solid(...)` chain.
+        let node = as_node(Dynamic::from_float(0.2)).unwrap();
+        match &node.ops[..] {
+            [Op::Source { func, args }] => {
+                assert_eq!(*func, "solid");
+                assert!(matches!(args[0], Arg::Lit(v) if v == 0.2));
+                assert!(matches!(args[1], Arg::Lit(v) if v == 0.2));
+                assert!(matches!(args[2], Arg::Lit(v) if v == 0.2));
+                assert!(matches!(args[3], Arg::Lit(v) if v == 1.0));
+            }
+            other => panic!("unexpected ops: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn as_node_still_treats_int_as_a_buffer_index_not_a_color() {
+        // o0/s0 etc. are i64 constants - that meaning must take priority
+        // over the new float-to-color promotion.
+        let node = as_node(Dynamic::from_int(2)).unwrap();
+        match &node.ops[..] {
+            [Op::Source { func, .. }] => assert_eq!(*func, "src"),
+            other => panic!("unexpected ops: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn as_node_passes_through_an_existing_node() {
+        let inner = Node::source("noise", vec![]);
+        let node = as_node(Dynamic::from(inner)).unwrap();
+        match &node.ops[..] {
+            [Op::Source { func, .. }] => assert_eq!(*func, "noise"),
             other => panic!("unexpected ops: {other:?}"),
         }
     }
