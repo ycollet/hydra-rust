@@ -71,11 +71,20 @@ fn transform(chars: &[char], mask: &[bool], start: usize, end: usize) -> String 
 /// `function` keyword sits *two* words before `(` - past the function's
 /// own name), or immediately followed by `=>`.
 fn is_declaration_parens(chars: &[char], mask: &[bool], open: usize, close: usize) -> bool {
-    if let Some((name_start, _)) = word_ending_before(chars, mask, open)
-        && let Some((kw_start, kw_end)) = word_ending_before(chars, mask, name_start)
-        && chars[kw_start..kw_end].iter().collect::<String>() == "function"
-    {
-        return true;
+    if let Some((name_start, name_end)) = word_ending_before(chars, mask, open) {
+        // `for`/`while`/`if` take a parenthesized header/condition, not
+        // call arguments - `for(i=0;...)`'s `i=0` looks exactly like a
+        // named-arg call (`i` followed by `=`), but stripping the `i=`
+        // there would corrupt the loop header instead.
+        let word: String = chars[name_start..name_end].iter().collect();
+        if matches!(word.as_str(), "for" | "while" | "if") {
+            return true;
+        }
+        if let Some((kw_start, kw_end)) = word_ending_before(chars, mask, name_start)
+            && chars[kw_start..kw_end].iter().collect::<String>() == "function"
+        {
+            return true;
+        }
     }
     let mut j = close + 1;
     skip_ws(chars, mask, &mut j);
@@ -266,6 +275,23 @@ mod tests {
         // jsfunctions::rewrite_function_decls to parse correctly.
         let src = "function r(min=0,max=1) { return max-min; }";
         assert_eq!(strip_named_args(src), src);
+    }
+
+    #[test]
+    fn leaves_c_style_for_loop_header_alone() {
+        // regression test: `for(i=0;...)`'s bare `i=0` init clause looks
+        // exactly like a named-arg call (`i` followed by `=`), but
+        // `for(...)` is a loop header, not a call - stripping the `i=`
+        // would corrupt it before `forloop::rewrite_for_loops` gets to
+        // desugar it.
+        let src = "for(i=0;i<q;i++){y=i;}";
+        assert_eq!(strip_named_args(src), src);
+    }
+
+    #[test]
+    fn leaves_while_and_if_condition_parens_alone() {
+        assert_eq!(strip_named_args("while(x=1){}"), "while(x=1){}");
+        assert_eq!(strip_named_args("if(x=1){}"), "if(x=1){}");
     }
 
     #[test]

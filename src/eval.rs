@@ -7,7 +7,9 @@ use crate::arrow;
 use crate::arrowfn;
 use crate::asi;
 use crate::autolet;
+use crate::forloop;
 use crate::iife;
+use crate::increment;
 use crate::jsfunctions;
 use crate::jskeywords;
 use crate::kwargs;
@@ -806,6 +808,8 @@ pub fn preprocess(code: &str) -> String {
     let code = &kwargs::strip_named_args(code);
     let code = &jsfunctions::rewrite_function_decls(code);
     let code = &iife::unwrap_iife(code);
+    let code = &increment::rewrite_increment_decrement(code);
+    let code = &forloop::rewrite_for_loops(code);
     let code = &autolet::insert_missing_let(code);
     let code = &mathjs::rewrite_math(code);
     let code = &argtrunc::truncate_extra_args(code);
