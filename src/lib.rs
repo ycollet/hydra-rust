@@ -17,6 +17,7 @@ mod jsfunctions;
 mod jskeywords;
 mod kwargs;
 mod mathjs;
+mod commaexpr;
 mod numlit;
 mod objlit;
 mod patcall;

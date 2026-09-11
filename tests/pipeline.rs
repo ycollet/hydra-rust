@@ -159,6 +159,23 @@ fn stroke_text_variants_alias_the_same_rendering_as_text() {
 }
 
 #[test]
+fn comma_tuple_call_argument_collapses_to_its_last_value() {
+    // real sketches very commonly write this exact shape, plausibly
+    // meaning an array `[a,b]` - but real JS's comma operator actually
+    // just discards `0.01` and keeps `0.2`, so that's what this compiles.
+    let glsl = ok_shader0("shape(4, (0.01, 0.2), 1).out()");
+    assert!(glsl.contains("shape(st, 4.0, 0.2, 1.0)"), "{glsl}");
+}
+
+#[test]
+fn arrow_function_parameter_lists_survive_comma_tuple_handling() {
+    // the exact ambiguity commaexpr and arrowfn/arrow.rs must agree on:
+    // both a real tuple and an arrow's own params are `(a, b)`.
+    let glsl = ok_shader0("let f = (a,b) => a+b;\nsolid(f(0.2,0.3)).out()");
+    assert!(glsl.contains("solid("), "{glsl}");
+}
+
+#[test]
 fn object_literal_call_arguments_no_longer_hard_parse_error() {
     // real sketches pass these to calls hydra-rust doesn't implement
     // (p5.js/Three.js/canvas interop, here stood in for by the fictitious

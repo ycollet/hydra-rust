@@ -337,11 +337,31 @@ Pipeline order (each step's output feeds the next):
    a property path, and every real instance of this shape in the corpus is
    JS/p5.js/DOM event-handler wiring (`p.setup = () => {...}`) that nothing
    here would ever invoke anyway — dropping it is strictly no worse than
-   the hard parse error it replaces. Runs last,
-   after `asi`: every other pass has already rewritten the arrow body's
-   own content, and an expression body with no `{ }` needs an unambiguous
-   end, which becomes just "the next top-level `;`" once `asi` has
-   guaranteed one is there.
+   the hard parse error it replaces. Runs right after `asi` (one more step
+   still follows, see step 19): every other pass has already rewritten the
+   arrow body's own content, and an expression body with no `{ }` needs an
+   unambiguous end, which becomes just "the next top-level `;`" once `asi`
+   has guaranteed one is there.
+19. **`commaexpr::rewrite_comma_expressions`** — rewrites a parenthesized,
+   non-call, comma-containing group (`(a, b, c)`) down to just its last
+   term, `(c)` — JS's own comma-operator semantics (every sub-expression is
+   evaluated in order, but only the last one's value survives). Rhai has no
+   comma operator at all; a grouping paren containing a bare top-level
+   comma is a hard parse error. Real sketches very commonly write this
+   (`shape(4, (0.01, 0.2 + a.fft[2]), 1)`) where they plausibly *meant* an
+   array `[a, b]` (hydra-rust's own pattern arrays elsewhere suggest
+   exactly that intent) — but real hydra.js/JS would actually run this
+   exact code via the comma operator, discarding the first value, so this
+   matches that real, faithful behavior rather than guessing at author
+   intent. A function call's own argument-list parens (`foo(a, b)`) and an
+   arrow function's own parameter list (`(a, b) => ...`, including
+   argument-position ones like `.fast((val,i)=>val*2)` that nothing earlier
+   in the pipeline touches) are correctly left alone — distinguished the
+   same way `objlit` (step 15) tells a block from a value: a `(` preceded
+   by an identifier character or `)`/`]` is a call, and a `)` followed by
+   `=>` is a parameter list. Runs last, on the fully-settled final shape of
+   the code, so it isn't fighting any other pass still rewriting arrow
+   functions or calls around it.
 
 None of these passes attempt full JS parsing; each targets one specific,
 empirically-observed idiom (found by running the pipeline against a corpus
