@@ -307,7 +307,12 @@ errors from `eval()`, surfaced to the caller as `Err(String)`.
   blend/modulate function (`.modulate(s0, 0.5)`) is implicitly converted the
   same way — real hydra.js treats these as first-class chainable objects;
   here it's a convenience conversion (`as_node` in `eval.rs`) rather than a
-  real object model.
+  real object model. A bare **`f64`** in that same position (`.mult(0.2)`,
+  a common real-sketch idiom) is converted the same way `as_node` handles
+  everything else there — into a flat color, `solid(v, v, v, 1)` —
+  matching real hydra.js's own auto-promotion of a plain number into a
+  texture. An `i64` there keeps its buffer/source-index meaning rather
+  than also being colorized, since that's by far the dominant real usage.
 - **`text("...")`**: rasterizes a string (via the bundled Hack font,
   `src/text.rs`) into a single shared text texture (`iText0`) and returns a
   chain reading it. Only one `text()` call's content is visible at a time
