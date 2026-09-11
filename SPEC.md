@@ -339,10 +339,16 @@ errors from `eval()`, surfaced to the caller as `Err(String)`.
   matching real hydra.js's own auto-promotion of a plain number into a
   texture. An `i64` there keeps its buffer/source-index meaning rather
   than also being colorized, since that's by far the dominant real usage.
-- **`text("...")`**: rasterizes a string (via the bundled Hack font,
-  `src/text.rs`) into a single shared text texture (`iText0`) and returns a
-  chain reading it. Only one `text()` call's content is visible at a time
-  (last one wins within an evaluation).
+- **`text("...")`** (and, aliased to the exact same rendering,
+  `strokeText`/`fillStrokeText`/`strokeFillText` — the `hydra-text.js`
+  community extension's stroke/outline variants; "accepted but not
+  faithful" since `src/text.rs`'s rasterizer has no stroke/outline mode):
+  rasterizes a string (via the bundled Hack font) into a single shared
+  text texture (`iText0`) and returns a chain reading it. Only one call's
+  content is visible at a time (last one wins within an evaluation). All
+  four accept an optional second `config` argument (a font/style override
+  in real hydra.js); accepted and ignored, since there's no per-call font
+  configuration here at all.
 - **`initCam(slot)` / `initCam(slot, cameraIndex)`** (`webcam` feature only):
   requests slot `slot` (must be `s0`-`s3`, i.e. `>= 100`) be filled from
   camera `cameraIndex` (default `0`). This only queues a request in the
@@ -370,7 +376,7 @@ reactive expression (§3), or a pattern (§7). GLSL semantics are in
 | `rings(freq=8, speed=0.1)` | | Concentric animated rings |
 | `checker(cols=4, rows=4)` | | Checkerboard |
 | `src(idx)` | | Read buffer/source `idx` (see §5) |
-| `text("...")` | | Rasterized text (see §5) |
+| `text("...")` / `strokeText(...)` / `fillStrokeText(...)` / `strokeFillText(...)` | | Rasterized text (see §5) — the latter three alias `text`'s exact rendering |
 
 The following are ported from popular community extensions real hydra.js
 sketches load via `loadScript()` (a permanent no-op here, see the
