@@ -31,8 +31,8 @@ See [SPEC.md](SPEC.md) for the full language specification (reactive values, fun
 - File save/load (`.hydra` files)
 - Session persistence
 - Options sidebar (tempo, font size, text opacity)
-- Toggle editor visibility with `Tab` or `Ctrl+Shift+H`
 - Scene banks — 4 banks x 16 slots for instant scene recall, see [below](#scene-banks)
+- Keyboard-driven — see [Keyboard shortcuts](#keyboard-shortcuts)
 
 ### Library
 
@@ -50,17 +50,24 @@ cargo test           # tests
 cargo clippy         # lint
 ```
 
-## Scene banks
-
-A native port of [HYDRACTRL](https://github.com/dxviie/HYDRACTRL)'s own scene-bank system: **4 banks x 16 slots** (64 scenes total) for instant recall during a live-coding performance. Each slot holds a saved sketch's source code (no thumbnail preview, unlike HYDRACTRL's browser-canvas one — there's no cheap equivalent in a native GL app). Banks persist across restarts as part of the usual session file (`~/.hydra-rust.json`); a single bank (16 slots) can also be exported/imported as its own portable `.bhr` ("bank hydra rust") JSON file.
+## Keyboard shortcuts
 
 | Shortcut | Action |
 |----------|--------|
-| `Alt + 0`-`9` / `A`-`F` | Recall slot `0`-`F` (hex) in the active bank — loads and immediately evaluates its saved code |
-| `Alt + Shift + 0`-`9` / `A`-`F` | Save the editor's current code into that slot |
-| `Alt + ←` / `→` | Cycle to the previous/next bank (always available — unlike HYDRACTRL, there's no MIDI-controller bank-switch mapping to defer to) |
-| `Alt + X` | Export the active bank (16 slots) as a `.bhr` file |
-| `Alt + I` | Import a `.bhr` file into the active bank, replacing its 16 slots |
+| `Ctrl/Cmd + Enter` | Evaluate the current sketch |
+| `Ctrl/Cmd + S` | Save the current sketch to a `.hydra` file |
+| `Ctrl/Cmd + O` | Open a `.hydra` file |
+| `Ctrl/Cmd + Shift + H` | Toggle editor visibility (hide the code overlay, keep the visuals running) |
+| `Tab` | Toggle the options sidebar — tempo/font/text-opacity, camera status, and the scene-bank grid (see below) |
+| `Alt/⌥ + 0`-`9` / `A`-`F` | Recall slot `0`-`F` (hex) in the active bank — loads and immediately evaluates its saved code |
+| `Alt/⌥ + Shift + 0`-`9` / `A`-`F` | Save the editor's current code into that slot |
+| `Alt/⌥ + ←` / `→` | Cycle to the previous/next scene bank |
+| `Alt/⌥ + X` | Export the active bank (16 slots) as a `.bhr` file |
+| `Alt/⌥ + I` | Import a `.bhr` file into the active bank, replacing its 16 slots |
+
+## Scene banks
+
+A native port of [HYDRACTRL](https://github.com/dxviie/HYDRACTRL)'s own scene-bank system: **4 banks x 16 slots** (64 scenes total) for instant recall during a live-coding performance. Each slot holds a saved sketch's source code (no thumbnail preview, unlike HYDRACTRL's browser-canvas one — there's no cheap equivalent in a native GL app). Banks persist across restarts as part of the usual session file (`~/.hydra-rust.json`); a single bank (16 slots) can also be exported/imported as its own portable `.bhr` ("bank hydra rust") JSON file. See [Keyboard shortcuts](#keyboard-shortcuts) above for the `Alt`-based recall/save/cycle/export/import shortcuts (there's no MIDI-controller bank-switch mapping to defer to here, unlike HYDRACTRL, so cycling banks is always available).
 
 Slots can also be clicked directly in the sidebar (`Tab` to show it) — the current bank number and a `0`-`F` slot grid are displayed there (white = the last slot you touched, magenta = filled, gray = empty).
 
