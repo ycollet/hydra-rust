@@ -49,6 +49,71 @@ cargo test           # tests
 cargo clippy         # lint
 ```
 
+## Feature-gated functions
+
+The functions below only exist when the library is built with the matching Cargo feature (`cargo build --features <name>`, or comma-separated for several: `--features webcam,audio,image_url,midi`). Without the feature, calling one of these fails with a plain "Function not found" error. See [SPEC.md](SPEC.md) for the complete function reference, including the ~48 always-available core functions.
+
+### `webcam` — camera input
+
+```bash
+cargo run --features webcam --bin hydra
+```
+
+| Function | Description | Example |
+|----------|-------------|---------|
+| `initCam(slot)` | Starts the default camera (index 0), populating source slot `s0`-`s3` | `s0.initCam().out()` |
+| `initCam(slot, cameraIndex)` | Starts a specific camera by index | `s0.initCam(1).out()` |
+
+### `audio` — microphone FFT reactivity
+
+```bash
+cargo run --features audio --bin hydra
+```
+
+The microphone is only opened once a script actually uses one of these (calls a setter, or reads `a.fft[i]`) — never just because the feature is compiled in.
+
+| Function | Description | Example |
+|----------|-------------|---------|
+| `a.fft[i]` | A frequency bin's magnitude (roughly `0`-`1`, shaped by the setters below); usable as any numeric argument | `osc(60, 0.1, a.fft[0]).out()` |
+| `a.setBins(n)` | How many bins to reduce the spectrum into (default `4`) | `a.setBins(8)` |
+| `a.setCutoff(c)` | Zeroes out bin values below this noise-floor threshold (default `0`) | `a.setCutoff(0.15)` |
+| `a.setScale(s)` | Multiplies every bin's value (default `1`) | `a.setScale(2)` |
+| `a.setSmooth(s)` | Exponential smoothing between frames, `0`-`1` (default `0.4`) | `a.setSmooth(0.8)` |
+| `a.show()` / `a.hide()` | No-op — no on-screen FFT debug graph exists here | `a.show()` |
+
+### `image_url` — load an image from a URL
+
+```bash
+cargo run --features image_url --bin hydra
+```
+
+| Function | Description | Example |
+|----------|-------------|---------|
+| `initImage(slot, url)` | Fetches and decodes an image (PNG/JPEG/GIF/WebP) in the background, uploading it to a source slot once it's ready | `s0.initImage("https://example.com/pic.png").out()` |
+
+### `midi` — MIDI input
+
+```bash
+cargo run --features midi --bin hydra
+```
+
+A native port of the [hydra-midi](https://github.com/arnoson/hydra-midi) community extension's API — real hydra.js has no MIDI support in its own core at all. Note names use standard scientific-pitch-notation/General-MIDI numbering (`"C4"` is 60, middle C). All MIDI channels and input devices are merged into one rather than filtered separately.
+
+| Function | Description | Example |
+|----------|-------------|---------|
+| `note(nameOrNumber[, channel])` | A gate: `1` while the note is held, `0` otherwise (not velocity) | `osc().invert(note(60)).out()` |
+| `note(...).velocity()` | The note's last velocity, `0`-`1` (`0` once released) | `osc(60, 0.1, note("C4").velocity()).out()` |
+| `note(...).adsr(a, d, s, r)` | An ADSR envelope (`a`/`d`/`r` in milliseconds, `s` a `0`-`1` sustain level) triggered by the note's on/off events | `solid(1, 0, note(60).adsr(50, 100, 0.7, 300)).out()` |
+| `cc(index[, channel])` | A CC controller's value, normalized to `0`-`1` | `osc().rotate(cc(1)).out()` |
+| `cc(...).smooth(factor=0.01)` | Exponential slew of a CC value between frames | `osc(cc(1).smooth(0.2)).out()` |
+| `.range(lo, hi)` (on `note`/`cc`/`.velocity()`) | Remaps a `0`-`1` value into `[lo, hi]` | `osc().rotate(cc(1).range(0, 6.28)).out()` |
+| `.scale(factor)` (on `note`/`cc`/`.velocity()`) | Multiplies a value | `osc(1, 1, note(60).scale(0.5)).out()` |
+| `_note(...)` / `_cc(...)` / `_noteVelocity(...)` | Plain (non-chainable) equivalents, for use inside a `()=>` wrapper | `osc(1, 1, _note(60) * 0.5).out()` |
+| `midi.start()` | Connects to every available MIDI input device (required before any of the above reacts to anything) | `midi.start()` |
+| `midi.pause()` | Disconnects from all MIDI input devices | `midi.pause()` |
+| `midi.show()` / `.hide()` | No-op — no on-screen MIDI monitor exists here | `midi.show()` |
+| `midi.channel(n)` / `.input(n)` | Accepted, logged, ignored — channels/inputs are merged (see above) | `midi.channel(0)` |
+
 ## Testing against a real-world sketch corpus
 
 `examples/check_corpus.rs` is a fast conformance-testing harness: it walks a
@@ -176,7 +241,7 @@ hydra-rust is the visual engine of [Sova](https://github.com/Bubobubobubobubo/So
 ## Current limitations
 
 - Max nesting depth of 16
-- Audio reactivity (`a.fft[]`, `a.setBins`/`setCutoff`/`setScale`/`setSmooth`), webcam input (`initCam`), image-URL loading (`initImage`), and MIDI input (`note`/`cc`/`midi.*`) require building with the `audio`/`webcam`/`image_url`/`midi` Cargo features respectively (off by default)
+- Audio reactivity, webcam input, image-URL loading, and MIDI input each require building with their own Cargo feature (off by default) — see [Feature-gated functions](#feature-gated-functions) above
 
 ### Stub functions (accepted, but not yet implemented)
 
