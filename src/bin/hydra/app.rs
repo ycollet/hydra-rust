@@ -32,6 +32,13 @@ struct Session {
     font_size: f32,
     text_opacity: f32,
     current_file: Option<PathBuf>,
+    /// Scene banks (see `Bank`) - `#[serde(default)]` so a session file
+    /// saved before this feature existed still loads (missing field, not
+    /// a parse error).
+    #[serde(default)]
+    banks: Vec<Bank>,
+    #[serde(default)]
+    current_bank: usize,
 }
 
 impl Default for Session {
@@ -42,8 +49,53 @@ impl Default for Session {
             font_size: 20.0,
             text_opacity: 0.55,
             current_file: None,
+            banks: Vec::new(),
+            current_bank: 0,
         }
     }
+}
+
+/// A scene bank: a native port of HYDRACTRL's own 4-bank-x-16-slot scene
+/// storage (github.com/dxviie/HYDRACTRL). Each slot holds a saved Hydra
+/// sketch's source code, `None` when empty - no thumbnail preview (unlike
+/// HYDRACTRL's browser-canvas one), since there's no cheap equivalent here
+/// and it wasn't requested.
+const NUM_BANKS: usize = 4;
+const SLOTS_PER_BANK: usize = 16;
+
+#[derive(Serialize, Deserialize, Clone)]
+struct Bank {
+    #[serde(default = "empty_slots")]
+    slots: Vec<Option<String>>,
+}
+
+impl Default for Bank {
+    fn default() -> Self {
+        Self { slots: empty_slots() }
+    }
+}
+
+fn empty_slots() -> Vec<Option<String>> {
+    vec![None; SLOTS_PER_BANK]
+}
+
+/// The on-disk `.bhr` ("bank hydra rust") export/import format - matches
+/// `Bank`'s own shape plus a version tag for future-proofing (not
+/// otherwise enforced yet).
+#[derive(Serialize, Deserialize)]
+struct BankFile {
+    version: u32,
+    slots: Vec<Option<String>>,
+}
+
+/// The on-disk `.shr` ("slot hydra rust") format: a single saved sketch,
+/// versioned the same way `BankFile` is - `-ss`/`-sl`'s counterpart to
+/// `-bs`/`-bl`, for sharing or backing up one sketch rather than a whole
+/// bank. Not tied to any particular slot index (portable on its own).
+#[derive(Serialize, Deserialize)]
+struct SlotFile {
+    version: u32,
+    code: String,
 }
 
 fn session_path() -> PathBuf {
@@ -89,6 +141,14 @@ pub struct HydraApp {
     /// with no confirmation beyond the OS's one-time, blanket camera
     /// permission. Cleared the first time the user explicitly evaluates.
     pending_confirmation: bool,
+    banks: Vec<Bank>,
+    current_bank: usize,
+    /// The last slot recalled or saved to, for the sidebar's highlight -
+    /// purely a UI cue, not otherwise load-bearing.
+    active_slot: Option<usize>,
+    /// Set from `-bs/--bank-save`; when present, `Alt+X` writes straight
+    /// here instead of prompting a save dialog.
+    bank_export_path: Option<PathBuf>,
     #[cfg(feature = "webcam")]
     source_manager: SourceManager,
     #[cfg(feature = "audio")]
@@ -100,10 +160,23 @@ pub struct HydraApp {
 }
 
 impl HydraApp {
-    pub fn new(cc: &eframe::CreationContext, file_arg: Option<PathBuf>) -> Self {
+    pub fn new(
+        cc: &eframe::CreationContext,
+        file_arg: Option<PathBuf>,
+        bank_save: Option<PathBuf>,
+        bank_load: Option<PathBuf>,
+        slot_save: Option<PathBuf>,
+        slot_load: Option<PathBuf>,
+    ) -> Self {
         cc.egui_ctx.set_theme(egui::ThemePreference::Dark);
 
-        let session = Session::load();
+        let mut session = Session::load();
+        if session.banks.len() != NUM_BANKS {
+            session.banks = vec![Bank::default(); NUM_BANKS];
+        }
+        if session.current_bank >= NUM_BANKS {
+            session.current_bank = 0;
+        }
         let mut app = Self {
             code: session.code,
             renderer: cc.gl.clone().map(ShaderRenderer::new),
@@ -118,6 +191,10 @@ impl HydraApp {
             sidebar_open: false,
             current_file: session.current_file,
             pending_confirmation: false,
+            banks: session.banks,
+            current_bank: session.current_bank,
+            active_slot: None,
+            bank_export_path: bank_save,
             #[cfg(feature = "webcam")]
             source_manager: SourceManager::new(),
             #[cfg(feature = "audio")]
@@ -128,7 +205,29 @@ impl HydraApp {
             midi_manager: MidiManager::new(),
         };
 
+        if let Some(path) = bank_load {
+            match std::fs::read_to_string(&path).map(|s| serde_json::from_str::<BankFile>(&s)) {
+                Ok(Ok(file)) => app.banks[app.current_bank].slots = file.slots,
+                Ok(Err(e)) => log::warn!("failed to parse bank {}: {e}", path.display()),
+                Err(e) => log::warn!("failed to read bank {}: {e}", path.display()),
+            }
+        }
+
         let mut loaded_from_file = false;
+        if let Some(path) = slot_load {
+            match std::fs::read_to_string(&path).map(|s| serde_json::from_str::<SlotFile>(&s)) {
+                Ok(Ok(file)) => {
+                    app.code = file.code;
+                    // Not a `.hydra` file - `Ctrl+S` shouldn't silently
+                    // overwrite the `.shr` JSON with plain code text, so
+                    // leave `current_file` unset (prompts for a new path).
+                    app.current_file = None;
+                    loaded_from_file = true;
+                }
+                Ok(Err(e)) => log::warn!("failed to parse slot {}: {e}", path.display()),
+                Err(e) => log::warn!("failed to read slot {}: {e}", path.display()),
+            }
+        }
         if let Some(path) = file_arg {
             match std::fs::read_to_string(&path) {
                 Ok(contents) => {
@@ -150,6 +249,19 @@ impl HydraApp {
         } else if !app.code.is_empty() {
             app.evaluate();
         }
+
+        // `-ss/--slot-save`: snapshot whatever code the app is starting
+        // with (restored session, `-sl`, or `-i` - in that increasing
+        // order of precedence) out to this path once, right at launch.
+        // There's no per-slot keybinding to defer to the way `-bs` defers
+        // to `Alt+X`, so this just happens immediately instead.
+        if let Some(path) = slot_save {
+            let file = SlotFile { version: 1, code: app.code.clone() };
+            if let Ok(json) = serde_json::to_string_pretty(&file) {
+                let _ = std::fs::write(&path, json);
+            }
+        }
+
         app
     }
 
@@ -160,6 +272,60 @@ impl HydraApp {
             font_size: self.font_size,
             text_opacity: self.text_opacity,
             current_file: self.current_file.clone(),
+            banks: self.banks.clone(),
+            current_bank: self.current_bank,
+        }
+    }
+
+    /// Loads slot `index`'s saved code (if any) into the editor and
+    /// evaluates it immediately - as explicit a user action as `Ctrl+O`'s
+    /// `load_file` (which also auto-evaluates with no confirmation gate).
+    fn recall_slot(&mut self, index: usize) {
+        if let Some(code) = self.banks[self.current_bank].slots[index].clone() {
+            self.code = code;
+            self.current_file = None;
+            self.active_slot = Some(index);
+            self.evaluate();
+        }
+    }
+
+    /// Saves the editor's current code into slot `index` of the active bank.
+    fn save_slot(&mut self, index: usize) {
+        self.banks[self.current_bank].slots[index] = Some(self.code.clone());
+        self.active_slot = Some(index);
+    }
+
+    fn cycle_bank(&mut self, delta: i32) {
+        self.current_bank = wrap_bank_index(self.current_bank, delta, self.banks.len());
+        self.active_slot = None;
+    }
+
+    /// Exports the active bank's 16 slots as a `.bhr` file - to
+    /// `bank_export_path` (set via `-bs/--bank-save`) if given, otherwise
+    /// via an interactive save dialog, mirroring `save_file`.
+    fn export_bank(&mut self) {
+        let path = self.bank_export_path.clone().or_else(|| {
+            rfd::FileDialog::new()
+                .add_filter("Hydra Bank", &["bhr"])
+                .set_file_name("bank.bhr")
+                .save_file()
+        });
+        if let Some(p) = path {
+            let file = BankFile { version: 1, slots: self.banks[self.current_bank].slots.clone() };
+            if let Ok(json) = serde_json::to_string_pretty(&file) {
+                let _ = std::fs::write(&p, json);
+            }
+        }
+    }
+
+    /// Imports a `.bhr` file into the active bank, replacing its 16 slots -
+    /// mirrors `load_file`.
+    fn import_bank(&mut self) {
+        if let Some(p) = rfd::FileDialog::new().add_filter("Hydra Bank", &["bhr"]).pick_file()
+            && let Ok(contents) = std::fs::read_to_string(&p)
+            && let Ok(file) = serde_json::from_str::<BankFile>(&contents)
+        {
+            self.banks[self.current_bank].slots = file.slots;
         }
     }
 
@@ -431,6 +597,32 @@ impl HydraApp {
 
                 ui.add_space(12.0);
                 ui.separator();
+                ui.add_space(4.0);
+                ui.label(format!("Bank {} / {NUM_BANKS}", self.current_bank + 1));
+                ui.horizontal_wrapped(|ui| {
+                    let slots = self.banks[self.current_bank].slots.clone();
+                    for (i, slot) in slots.iter().enumerate() {
+                        let label = format!("{i:X}");
+                        let filled = slot.is_some();
+                        let active = self.active_slot == Some(i);
+                        let color = if active {
+                            Color32::from_rgb(255, 255, 255)
+                        } else if filled {
+                            Color32::from_rgb(255, 0, 200)
+                        } else {
+                            Color32::from_gray(90)
+                        };
+                        if ui
+                            .add(egui::Button::new(egui::RichText::new(label).color(color)).small())
+                            .clicked()
+                        {
+                            self.recall_slot(i);
+                        }
+                    }
+                });
+
+                ui.add_space(12.0);
+                ui.separator();
                 if let Some(ref p) = self.current_file {
                     ui.small(p.file_name().unwrap_or_default().to_string_lossy().to_string());
                 }
@@ -440,6 +632,10 @@ impl HydraApp {
                 ui.small("Ctrl+Shift+H — toggle editor");
                 ui.small("Ctrl+S — save");
                 ui.small("Ctrl+O — open");
+                ui.small("Alt+0-9/A-F — recall slot");
+                ui.small("Alt+Shift+0-9/A-F — save slot");
+                ui.small("Alt+←/→ — cycle bank");
+                ui.small("Alt+X / Alt+I — export/import bank");
             });
     }
 
@@ -573,6 +769,54 @@ impl eframe::App for HydraApp {
             self.sidebar_open = !self.sidebar_open;
         }
 
+        // Scene-bank shortcuts (ported from HYDRACTRL's own bank system,
+        // github.com/dxviie/HYDRACTRL): Alt+0-9/A-F recalls slot 0-F (hex)
+        // in the active bank, Alt+Shift+<same> saves the current code into
+        // it instead, Alt+Left/Right cycles between the 4 banks, and
+        // Alt+X/Alt+I export/import the active bank as a `.bhr` file.
+        if ctx.input(|i| i.modifiers.alt) {
+            const HEX_KEYS: [(egui::Key, usize); 16] = [
+                (egui::Key::Num0, 0),
+                (egui::Key::Num1, 1),
+                (egui::Key::Num2, 2),
+                (egui::Key::Num3, 3),
+                (egui::Key::Num4, 4),
+                (egui::Key::Num5, 5),
+                (egui::Key::Num6, 6),
+                (egui::Key::Num7, 7),
+                (egui::Key::Num8, 8),
+                (egui::Key::Num9, 9),
+                (egui::Key::A, 10),
+                (egui::Key::B, 11),
+                (egui::Key::C, 12),
+                (egui::Key::D, 13),
+                (egui::Key::E, 14),
+                (egui::Key::F, 15),
+            ];
+            for (key, idx) in HEX_KEYS {
+                let (pressed, shift) = ctx.input(|i| (i.key_pressed(key), i.modifiers.shift));
+                if pressed {
+                    if shift {
+                        self.save_slot(idx);
+                    } else {
+                        self.recall_slot(idx);
+                    }
+                }
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::ArrowLeft)) {
+                self.cycle_bank(-1);
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::ArrowRight)) {
+                self.cycle_bank(1);
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::X)) {
+                self.export_bank();
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::I)) {
+                self.import_bank();
+            }
+        }
+
         self.editor_opacity = if self.editor_visible { 1.0 } else { 0.0 };
 
         if self.sidebar_open {
@@ -588,5 +832,80 @@ impl eframe::App for HydraApp {
         #[cfg(feature = "webcam")]
         self.source_manager.stop_all();
         self.session().save();
+    }
+}
+
+/// Wraps `current + delta` into `0..n`, in either direction - `-1` from `0`
+/// lands on `n - 1`, matching how `Alt+Left`/`Alt+Right` should cycle
+/// through the (fixed-size) bank list.
+fn wrap_bank_index(current: usize, delta: i32, n: usize) -> usize {
+    (current as i32 + delta).rem_euclid(n as i32) as usize
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wrap_bank_index_moves_forward_and_back() {
+        assert_eq!(wrap_bank_index(0, 1, 4), 1);
+        assert_eq!(wrap_bank_index(1, -1, 4), 0);
+    }
+
+    #[test]
+    fn wrap_bank_index_wraps_at_both_ends() {
+        assert_eq!(wrap_bank_index(0, -1, 4), 3);
+        assert_eq!(wrap_bank_index(3, 1, 4), 0);
+    }
+
+    #[test]
+    fn bank_file_round_trips_through_json() {
+        let file = BankFile {
+            version: 1,
+            slots: vec![Some("osc(60).out()".to_string()), None, None],
+        };
+        let json = serde_json::to_string(&file).unwrap();
+        let parsed: BankFile = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.version, 1);
+        assert_eq!(parsed.slots, file.slots);
+    }
+
+    #[test]
+    fn slot_file_round_trips_through_json() {
+        let file = SlotFile { version: 1, code: "osc(60).out()".to_string() };
+        let json = serde_json::to_string(&file).unwrap();
+        let parsed: SlotFile = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.version, 1);
+        assert_eq!(parsed.code, file.code);
+    }
+
+    #[test]
+    fn bank_defaults_to_sixteen_empty_slots() {
+        let bank = Bank::default();
+        assert_eq!(bank.slots.len(), SLOTS_PER_BANK);
+        assert!(bank.slots.iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn session_without_bank_fields_still_deserializes() {
+        // a session file saved before this feature existed has neither
+        // `banks` nor `current_bank` - `#[serde(default)]` must keep it
+        // loading instead of failing outright.
+        let old_json = r#"{
+            "code": "osc(60).out()",
+            "tempo": 120.0,
+            "font_size": 20.0,
+            "text_opacity": 0.55,
+            "current_file": null
+        }"#;
+        let session: Session = serde_json::from_str(old_json).unwrap();
+        assert!(session.banks.is_empty());
+        assert_eq!(session.current_bank, 0);
+    }
+
+    #[test]
+    fn bank_with_missing_slots_field_defaults_to_empty() {
+        let bank: Bank = serde_json::from_str("{}").unwrap();
+        assert_eq!(bank.slots.len(), SLOTS_PER_BANK);
     }
 }

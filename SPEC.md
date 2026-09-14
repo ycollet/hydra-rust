@@ -687,6 +687,37 @@ of those should run just because the file was opened. The restored
 previous session (the user's own, already-run code) is exempt and still
 auto-evaluates as before.
 
+### 10.1 Scene banks
+
+A native port of [HYDRACTRL](https://github.com/dxviie/HYDRACTRL)'s own
+scene-bank system (`Bank`/`BankFile` in `src/bin/hydra/app.rs`): 4 banks
+(`NUM_BANKS`) x 16 slots (`SLOTS_PER_BANK`), each slot holding a saved
+sketch's source only (no thumbnail - no cheap equivalent in a native GL
+app). `Alt+0-9/A-F` recalls a slot (loads + evaluates immediately, no
+`pending_confirmation` gate - as explicit a user action as `Ctrl+O`'s
+`load_file`, which behaves the same way); `Alt+Shift+0-9/A-F` saves the
+editor's current code into a slot; `Alt+Left/Right` cycles between banks
+(always - unlike HYDRACTRL, there's no MIDI program-change-driven bank
+switch to defer to here); `Alt+X`/`Alt+I` export/import the *active*
+bank's 16 slots as a `.bhr` (JSON) file, mirroring `save_file`/`load_file`
+exactly. Banks are otherwise part of the regular session file
+(`~/.hydra-rust.json`, `#[serde(default)]` on the new fields so an older
+session file without them still loads). Five CLI flags parsed by
+`main.rs`'s own small hand-rolled parser (no new dependency):
+`-i/--input` (a named alternative to the historical bare positional
+argument), `-bl/--bank-load <path>` (preloads a `.bhr` into the active
+bank at startup), `-bs/--bank-save <path>` (pre-fills `Alt+X`'s export
+target, skipping the save dialog), and `-sl/--slot-load <path>` /
+`-ss/--slot-save <path>` - the single-sketch counterparts, reading/writing
+a `.shr` ("slot hydra rust") file (`SlotFile { version, code }`, versus
+`BankFile`'s `{ version, slots }`). `-sl` behaves like `-i` (sets the
+starting editor code, going through the same `pending_confirmation` gate),
+just JSON-wrapped; `-ss` has no keybinding to pre-fill a target for the
+way `-bs` does, so it snapshots the starting code to that path immediately
+at launch instead. `.shr` is mostly a convenience/consistency format - a
+plain `.hydra` file already covers "one saved sketch" - but shares
+`.bhr`'s versioned-JSON envelope.
+
 ## 11. Adding a missing function
 
 Most "missing function" corpus failures (§4's methodology) turn out to be

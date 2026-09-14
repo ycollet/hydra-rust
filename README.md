@@ -32,6 +32,7 @@ See [SPEC.md](SPEC.md) for the full language specification (reactive values, fun
 - Session persistence
 - Options sidebar (tempo, font size, text opacity)
 - Toggle editor visibility with `Tab` or `Ctrl+Shift+H`
+- Scene banks — 4 banks x 16 slots for instant scene recall, see [below](#scene-banks)
 
 ### Library
 
@@ -48,6 +49,33 @@ cargo run            # standalone binary
 cargo test           # tests
 cargo clippy         # lint
 ```
+
+## Scene banks
+
+A native port of [HYDRACTRL](https://github.com/dxviie/HYDRACTRL)'s own scene-bank system: **4 banks x 16 slots** (64 scenes total) for instant recall during a live-coding performance. Each slot holds a saved sketch's source code (no thumbnail preview, unlike HYDRACTRL's browser-canvas one — there's no cheap equivalent in a native GL app). Banks persist across restarts as part of the usual session file (`~/.hydra-rust.json`); a single bank (16 slots) can also be exported/imported as its own portable `.bhr` ("bank hydra rust") JSON file.
+
+| Shortcut | Action |
+|----------|--------|
+| `Alt + 0`-`9` / `A`-`F` | Recall slot `0`-`F` (hex) in the active bank — loads and immediately evaluates its saved code |
+| `Alt + Shift + 0`-`9` / `A`-`F` | Save the editor's current code into that slot |
+| `Alt + ←` / `→` | Cycle to the previous/next bank (always available — unlike HYDRACTRL, there's no MIDI-controller bank-switch mapping to defer to) |
+| `Alt + X` | Export the active bank (16 slots) as a `.bhr` file |
+| `Alt + I` | Import a `.bhr` file into the active bank, replacing its 16 slots |
+
+Slots can also be clicked directly in the sidebar (`Tab` to show it) — the current bank number and a `0`-`F` slot grid are displayed there (white = the last slot you touched, magenta = filled, gray = empty).
+
+Five CLI flags round out the workflow (in addition to the existing bare positional argument, e.g. `hydra some.hydra`, which still works):
+
+```bash
+hydra -i mysketch.hydra           # --input: load a sketch at startup (same as the bare positional arg)
+hydra -bl mybank.bhr              # --bank-load: preload a .bhr file into the active bank at startup
+hydra -bs mybank.bhr              # --bank-save: Alt+X writes straight to this path instead of prompting
+hydra -bl mybank.bhr -bs mybank.bhr  # load and keep exporting to the same file
+hydra -sl mysketch.shr             # --slot-load: load a .shr file's code at startup (like -i, JSON-wrapped)
+hydra -ss mysketch.shr             # --slot-save: snapshot the starting code out to this path once, at launch
+```
+
+`.shr` ("slot hydra rust") is the single-sketch counterpart to `.bhr`: just `{"version": 1, "code": "..."}`, versus `.bhr`'s 16-element `slots` array. It's mostly a convenience/consistency format — a plain `.hydra` file already does the "one saved sketch" job just fine — but it shares `.bhr`'s versioned-JSON envelope (useful if either format ever needs extra metadata later) and gives `-ss`/`-sl` a natural single-sketch analogue to `-bs`/`-bl`. Unlike `-bs` (which pre-fills `Alt+X`'s target for later), `-ss` has no keybinding to defer to, so it writes immediately at launch instead.
 
 ## Feature-gated functions
 
