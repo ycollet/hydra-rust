@@ -17,6 +17,10 @@ use hydra_rust::source::NUM_SOURCES;
 use hydra_rust::audio::AudioManager;
 #[cfg(feature = "image_url")]
 use hydra_rust::imageload::ImageManager;
+#[cfg(feature = "midi")]
+use hydra_rust::eval::MidiRequest;
+#[cfg(feature = "midi")]
+use hydra_rust::midi::MidiManager;
 use serde::{Deserialize, Serialize};
 
 use crate::highlight::HydraHighlighter;
@@ -91,6 +95,8 @@ pub struct HydraApp {
     audio_manager: AudioManager,
     #[cfg(feature = "image_url")]
     image_manager: ImageManager,
+    #[cfg(feature = "midi")]
+    midi_manager: MidiManager,
 }
 
 impl HydraApp {
@@ -118,6 +124,8 @@ impl HydraApp {
             audio_manager: AudioManager::new(),
             #[cfg(feature = "image_url")]
             image_manager: ImageManager::new(),
+            #[cfg(feature = "midi")]
+            midi_manager: MidiManager::new(),
         };
 
         let mut loaded_from_file = false;
@@ -210,6 +218,23 @@ impl HydraApp {
                         }
                     }
                 }
+                // Unlike audio (which lazily starts on inferred usage - see
+                // above), real hydra-midi requires an explicit
+                // `midi.start()` call before anything works, so `Start` is
+                // just another queued request here, no heuristic needed.
+                #[cfg(feature = "midi")]
+                for req in &result.midi_requests {
+                    match req {
+                        MidiRequest::Start => self.midi_manager.ensure_started(),
+                        MidiRequest::Pause => self.midi_manager.pause(),
+                        MidiRequest::SetCcSmooth { index, factor } => {
+                            self.midi_manager.set_cc_smooth(*index, *factor);
+                        }
+                        MidiRequest::AdsrSlot { slot, note, a, d, s, r } => {
+                            self.midi_manager.set_adsr_slot(*slot, *note, *a, *d, *s, *r);
+                        }
+                    }
+                }
                 if compile_errors.is_empty() {
                     self.error = None;
                 } else {
@@ -294,6 +319,26 @@ impl HydraApp {
         #[cfg(not(feature = "audio"))]
         let fft = [0.0; hydra_rust::audio::NUM_FFT_BINS];
 
+        #[cfg(feature = "midi")]
+        let midi_frame = self.midi_manager.poll();
+        #[cfg(not(feature = "midi"))]
+        let midi_frame = {
+            struct EmptyMidiFrame {
+                note: [f32; hydra_rust::midi::NUM_MIDI_NOTES],
+                velocity: [f32; hydra_rust::midi::NUM_MIDI_NOTES],
+                cc: [f32; hydra_rust::midi::NUM_MIDI_CC],
+                cc_smoothed: [f32; hydra_rust::midi::NUM_MIDI_CC],
+                envelope: [f32; hydra_rust::midi::NUM_MIDI_ENVELOPES],
+            }
+            EmptyMidiFrame {
+                note: [0.0; hydra_rust::midi::NUM_MIDI_NOTES],
+                velocity: [0.0; hydra_rust::midi::NUM_MIDI_NOTES],
+                cc: [0.0; hydra_rust::midi::NUM_MIDI_CC],
+                cc_smoothed: [0.0; hydra_rust::midi::NUM_MIDI_CC],
+                envelope: [0.0; hydra_rust::midi::NUM_MIDI_ENVELOPES],
+            }
+        };
+
         let snap = renderer.snapshot();
         let ping = renderer.ping().clone();
         let uniforms = RenderUniforms {
@@ -304,6 +349,11 @@ impl HydraApp {
             tempo: self.tempo,
             phase: 0.0,
             fft,
+            midi_note: midi_frame.note,
+            midi_velocity: midi_frame.velocity,
+            midi_cc: midi_frame.cc,
+            midi_cc_smoothed: midi_frame.cc_smoothed,
+            midi_envelope: midi_frame.envelope,
         };
 
         let cb = eframe::egui_glow::CallbackFn::new(move |_info, painter| {

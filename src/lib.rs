@@ -1,6 +1,7 @@
 pub mod audio;
 pub mod eval;
 pub mod imageload;
+pub mod midi;
 pub mod renderer;
 pub mod shader;
 pub mod source;
@@ -32,10 +33,14 @@ pub use eval::{eval, preprocess, EvalResult, RenderMode};
 pub use eval::SourceRequest;
 #[cfg(feature = "audio")]
 pub use eval::AudioRequest;
+#[cfg(feature = "midi")]
+pub use eval::MidiRequest;
 pub use renderer::{render_multipass, RenderSnapshot, RenderUniforms, ShaderRenderer};
 pub use source::SourceFrame;
 #[cfg(feature = "webcam")]
 pub use source::{CameraInfo, CameraStatus, SourceManager};
 #[cfg(feature = "audio")]
 pub use audio::AudioManager;
+#[cfg(feature = "midi")]
+pub use midi::MidiManager;
 pub use text::TextData;

@@ -173,6 +173,56 @@ fn source_slot_init_with_a_dom_element_config_is_a_harmless_no_op() {
 }
 
 #[test]
+#[cfg(feature = "midi")]
+fn midi_note_and_cc_compile_to_the_expected_uniform_references() {
+    // ported real-world hydra-midi API: note()/cc() and their chain
+    // methods (.velocity()/.adsr()/.range()/.scale()/.smooth()), plus the
+    // plain _note()/_cc()/_noteVelocity() forms used inside a stripped
+    // `()=>` wrapper.
+    let glsl = ok_shader0(
+        "osc(60, note(\"C4\").velocity(), cc(1).range(0,1)).luma(_note(60)*0.5).out()",
+    );
+    assert!(glsl.contains("iMidiVelocity[60]"), "{glsl}");
+    assert!(glsl.contains("iMidiCC[1]"), "{glsl}");
+    assert!(glsl.contains("iMidiNote[60]"), "{glsl}");
+}
+
+#[test]
+#[cfg(feature = "midi")]
+fn midi_adsr_and_smooth_register_a_request_and_reference_their_own_slot() {
+    use hydra_rust::eval::MidiRequest;
+    let result = eval("solid(1, 0, note(60).adsr(50,100,0.7,300)).diff(osc(cc(1).smooth(0.2))).out()").unwrap();
+    let glsl = result.shaders[0].as_ref().unwrap();
+    assert!(glsl.contains("iMidiEnvelope[0]"), "{glsl}");
+    assert!(glsl.contains("iMidiCCSmoothed[1]"), "{glsl}");
+    assert!(
+        result.midi_requests.iter().any(|r| matches!(r, MidiRequest::AdsrSlot { slot: 0, note: 60, .. })),
+        "{:?}",
+        result.midi_requests
+    );
+    assert!(
+        result
+            .midi_requests
+            .iter()
+            .any(|r| matches!(r, MidiRequest::SetCcSmooth { index: 1, .. })),
+        "{:?}",
+        result.midi_requests
+    );
+}
+
+#[test]
+#[cfg(feature = "midi")]
+fn midi_start_requires_no_other_setup_to_evaluate() {
+    // real hydra-midi requires an explicit `midi.start()` before anything
+    // works; eval() itself never touches real MIDI hardware either way -
+    // it only records the request (see midi.rs's MidiManager, wired up in
+    // app.rs), so this is safe to run offline/in CI.
+    use hydra_rust::eval::MidiRequest;
+    let result = eval("midi.start().show()\nmidi.channel(0)\nosc(60).out()").unwrap();
+    assert!(result.midi_requests.iter().any(|r| matches!(r, MidiRequest::Start)));
+}
+
+#[test]
 fn ranged_random_and_mixed_numeric_math_calls_are_accepted() {
     // real JS's Math.random()/Math.pow() etc. tolerate any argument types
     // real hydra.js sketches occasionally pass (Math.random() takes none

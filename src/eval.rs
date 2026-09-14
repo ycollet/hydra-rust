@@ -24,6 +24,8 @@ use crate::text::{self, TextData};
 use crate::whitespace;
 #[cfg(feature = "audio")]
 use crate::audio::NUM_FFT_BINS;
+#[cfg(feature = "midi")]
+use crate::midi::{NUM_MIDI_CC, NUM_MIDI_ENVELOPES, NUM_MIDI_NOTES};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub enum RenderMode {
@@ -51,6 +53,15 @@ pub enum AudioRequest {
     SetSmooth(f32),
 }
 
+#[cfg(feature = "midi")]
+#[derive(Debug, Clone, Copy)]
+pub enum MidiRequest {
+    Start,
+    Pause,
+    SetCcSmooth { index: usize, factor: f32 },
+    AdsrSlot { slot: usize, note: i64, a: f32, d: f32, s: f32, r: f32 },
+}
+
 pub struct EvalResult {
     pub shaders: [Option<String>; 4],
     pub render_mode: RenderMode,
@@ -59,6 +70,8 @@ pub struct EvalResult {
     pub source_requests: Vec<SourceRequest>,
     #[cfg(feature = "audio")]
     pub audio_requests: Vec<AudioRequest>,
+    #[cfg(feature = "midi")]
+    pub midi_requests: Vec<MidiRequest>,
 }
 
 /// The `a` audio object (`a.fft[i]`, `a.setBins(...)`, ...).
@@ -70,6 +83,27 @@ struct Audio;
 #[cfg(feature = "audio")]
 #[derive(Debug, Clone, Copy)]
 struct AudioFft;
+
+/// The `midi` object (`midi.start()`, `.pause()`, `.channel(n)`, ...).
+#[cfg(feature = "midi")]
+#[derive(Debug, Clone, Copy)]
+struct Midi;
+
+/// Returned by `note(...)`: a chainable gate (1 while held, 0 otherwise).
+/// Also accepted directly wherever a `GlslExpr` is (see `as_arg`), so a bare
+/// `note(60)` is usable as any hydra numeric argument.
+#[cfg(feature = "midi")]
+#[derive(Debug, Clone, Copy)]
+struct MidiNote {
+    note: i64,
+}
+
+/// Returned by `cc(...)`: a chainable, normalized (0-1) CC value.
+#[cfg(feature = "midi")]
+#[derive(Debug, Clone, Copy)]
+struct MidiCc {
+    index: i64,
+}
 
 /// The `mouse` object (`mouse.x`, `mouse.y`), matching real hydra.js.
 #[derive(Debug, Clone, Copy)]
@@ -365,8 +399,105 @@ fn as_arg(d: Dynamic) -> Arg {
     } else if d.is_array() {
         Arg::Expr(Pattern::from_array(d.into_array().unwrap()).to_glsl())
     } else {
+        #[cfg(feature = "midi")]
+        if d.is::<MidiNote>() {
+            return Arg::Expr(midi_note_glsl(d.cast::<MidiNote>().note));
+        } else if d.is::<MidiCc>() {
+            return Arg::Expr(midi_cc_glsl(d.cast::<MidiCc>().index));
+        }
         Arg::Lit(0.0)
     }
+}
+
+#[cfg(feature = "midi")]
+fn midi_clamp(i: i64, len: usize) -> usize {
+    i.clamp(0, len as i64 - 1) as usize
+}
+
+#[cfg(feature = "midi")]
+fn midi_note_glsl(note: i64) -> String {
+    format!("iMidiNote[{}]", midi_clamp(note, NUM_MIDI_NOTES))
+}
+
+#[cfg(feature = "midi")]
+fn midi_velocity_glsl(note: i64) -> String {
+    format!("iMidiVelocity[{}]", midi_clamp(note, NUM_MIDI_NOTES))
+}
+
+#[cfg(feature = "midi")]
+fn midi_cc_glsl(index: i64) -> String {
+    format!("iMidiCC[{}]", midi_clamp(index, NUM_MIDI_CC))
+}
+
+#[cfg(feature = "midi")]
+fn midi_cc_smoothed_glsl(index: i64) -> String {
+    format!("iMidiCCSmoothed[{}]", midi_clamp(index, NUM_MIDI_CC))
+}
+
+#[cfg(feature = "midi")]
+fn midi_envelope_glsl(slot: usize) -> String {
+    format!("iMidiEnvelope[{slot}]")
+}
+
+/// Real hydra-midi's `range(min=0, max=1)`: linearly remaps a value already
+/// assumed to be in `[0, 1]` (every reactive value this module produces is)
+/// into `[min, max]`.
+#[cfg(feature = "midi")]
+fn midi_range(expr: String, lo: Dynamic, hi: Dynamic) -> GlslExpr {
+    let lo = fmt_f(dyn_to_f64(lo));
+    let hi = fmt_f(dyn_to_f64(hi));
+    GlslExpr(format!("(({expr}) * ({hi} - {lo}) + {lo})"))
+}
+
+/// Real hydra-midi's `scale(factor)`: multiplies the upstream value.
+#[cfg(feature = "midi")]
+fn midi_scale(expr: String, factor: Dynamic) -> GlslExpr {
+    GlslExpr(format!("(({expr}) * {})", fmt_f(dyn_to_f64(factor))))
+}
+
+/// Real hydra-midi's `note(nameOrNumber)`: a plain number passes through
+/// unchanged, a name like `"C4"` is parsed via standard scientific-pitch-
+/// notation/General-MIDI numbering (`"C4"` -> 60, middle C) - ported from
+/// `utils/getNoteNumber.ts`'s actual formula, `offset + (octave + 1) * 12`.
+/// (Its own doc comment claims `"C3"` is middle C instead, but that
+/// contradicts its own code - `"C3"` -> 48 by this formula, not 60 - so
+/// this port follows the code, not the comment.)
+#[cfg(feature = "midi")]
+fn note_number_from_dynamic(d: Dynamic) -> i64 {
+    if d.is::<ImmutableString>() {
+        let s = d.cast::<ImmutableString>();
+        note_name_to_number(&s).unwrap_or_else(|| {
+            log::warn!("note(\"{s}\"): note name not recognized");
+            0
+        })
+    } else {
+        dyn_to_f64(d) as i64
+    }
+}
+
+#[cfg(feature = "midi")]
+fn note_name_to_number(name: &str) -> Option<i64> {
+    if name.len() < 2 {
+        return None;
+    }
+    let (letter, octave) = name.split_at(name.len() - 1);
+    let octave: i64 = octave.parse().ok()?;
+    let offset = match letter.to_lowercase().as_str() {
+        "c" => 0,
+        "c#" | "db" => 1,
+        "d" => 2,
+        "d#" | "eb" => 3,
+        "e" => 4,
+        "f" => 5,
+        "f#" | "gb" => 6,
+        "g" => 7,
+        "g#" | "ab" => 8,
+        "a" => 9,
+        "a#" | "bb" => 10,
+        "b" => 11,
+        _ => return None,
+    };
+    Some(offset + (octave + 1) * 12)
 }
 
 // s0-s3 constants are 100-103; indices below 100 are internal buffers.
@@ -578,6 +709,10 @@ struct PatchState {
     source_requests: Vec<SourceRequest>,
     #[cfg(feature = "audio")]
     audio_requests: Vec<AudioRequest>,
+    #[cfg(feature = "midi")]
+    midi_requests: Vec<MidiRequest>,
+    #[cfg(feature = "midi")]
+    next_midi_envelope_slot: usize,
 }
 
 fn register_functions(engine: &mut Engine) {
@@ -907,6 +1042,10 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
         source_requests: Vec::new(),
         #[cfg(feature = "audio")]
         audio_requests: Vec::new(),
+        #[cfg(feature = "midi")]
+        midi_requests: Vec::new(),
+        #[cfg(feature = "midi")]
+        next_midi_envelope_slot: 0,
     }));
 
     let mut engine = Engine::new();
@@ -1054,6 +1193,145 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
         // no-ops kept only so sketches calling them still evaluate.
         engine.register_fn("show", |_a: Audio| {});
         engine.register_fn("hide", |_a: Audio| {});
+    }
+
+    // Real-world `hydra-midi` community extension (loadScript-loaded in
+    // real hydra.js; no MIDI support exists in hydra-synth's own core at
+    // all), ported natively - see src/midi.rs's module doc comment for the
+    // faithfulness notes and deliberate scope reductions (merged channels/
+    // inputs, no aftertouch, `.value(fn)` unsupported).
+    #[cfg(feature = "midi")]
+    {
+        engine.register_fn("note", |n: Dynamic| -> MidiNote {
+            MidiNote { note: note_number_from_dynamic(n) }
+        });
+        engine.register_fn("note", |n: Dynamic, _channel: Dynamic| -> MidiNote {
+            MidiNote { note: note_number_from_dynamic(n) }
+        });
+        engine.register_fn("note", |n: Dynamic, _channel: Dynamic, _input: Dynamic| -> MidiNote {
+            MidiNote { note: note_number_from_dynamic(n) }
+        });
+        engine.register_fn("_note", |n: Dynamic| -> GlslExpr {
+            GlslExpr(midi_note_glsl(note_number_from_dynamic(n)))
+        });
+        engine.register_fn("_note", |n: Dynamic, _channel: Dynamic| -> GlslExpr {
+            GlslExpr(midi_note_glsl(note_number_from_dynamic(n)))
+        });
+        engine.register_fn("_noteVelocity", |n: Dynamic| -> GlslExpr {
+            GlslExpr(midi_velocity_glsl(note_number_from_dynamic(n)))
+        });
+        engine.register_fn("_noteVelocity", |n: Dynamic, _channel: Dynamic| -> GlslExpr {
+            GlslExpr(midi_velocity_glsl(note_number_from_dynamic(n)))
+        });
+        engine.register_fn("velocity", |n: MidiNote| -> GlslExpr {
+            GlslExpr(midi_velocity_glsl(n.note))
+        });
+        {
+            let s = state.clone();
+            engine.register_fn(
+                "adsr",
+                move |n: MidiNote, a: Dynamic, d: Dynamic, sus: Dynamic, r: Dynamic| -> GlslExpr {
+                    let mut st = s.lock().unwrap();
+                    let slot = st.next_midi_envelope_slot;
+                    st.next_midi_envelope_slot = (slot + 1) % NUM_MIDI_ENVELOPES;
+                    st.midi_requests.push(MidiRequest::AdsrSlot {
+                        slot,
+                        note: n.note,
+                        a: dyn_to_f64(a) as f32,
+                        d: dyn_to_f64(d) as f32,
+                        s: dyn_to_f64(sus) as f32,
+                        r: dyn_to_f64(r) as f32,
+                    });
+                    GlslExpr(midi_envelope_glsl(slot))
+                },
+            );
+        }
+
+        engine.register_fn("cc", |i: Dynamic| -> MidiCc { MidiCc { index: dyn_to_f64(i) as i64 } });
+        engine.register_fn("cc", |i: Dynamic, _channel: Dynamic| -> MidiCc {
+            MidiCc { index: dyn_to_f64(i) as i64 }
+        });
+        engine.register_fn("cc", |i: Dynamic, _channel: Dynamic, _input: Dynamic| -> MidiCc {
+            MidiCc { index: dyn_to_f64(i) as i64 }
+        });
+        engine.register_fn("_cc", |i: Dynamic| -> GlslExpr {
+            GlslExpr(midi_cc_glsl(dyn_to_f64(i) as i64))
+        });
+        engine.register_fn("_cc", |i: Dynamic, _channel: Dynamic| -> GlslExpr {
+            GlslExpr(midi_cc_glsl(dyn_to_f64(i) as i64))
+        });
+        {
+            let s = state.clone();
+            engine.register_fn("smooth", move |c: MidiCc| -> GlslExpr {
+                s.lock().unwrap().midi_requests.push(MidiRequest::SetCcSmooth {
+                    index: c.index as usize,
+                    factor: crate::midi::DEFAULT_CC_SMOOTH,
+                });
+                GlslExpr(midi_cc_smoothed_glsl(c.index))
+            });
+        }
+        {
+            let s = state.clone();
+            engine.register_fn("smooth", move |c: MidiCc, factor: Dynamic| -> GlslExpr {
+                s.lock().unwrap().midi_requests.push(MidiRequest::SetCcSmooth {
+                    index: c.index as usize,
+                    factor: dyn_to_f64(factor) as f32,
+                });
+                GlslExpr(midi_cc_smoothed_glsl(c.index))
+            });
+        }
+
+        // .range(lo,hi)/.scale(factor): a generic linear remap/multiply,
+        // registered for every reactive-value type this module can hand
+        // back, matching real hydra-midi's own `range`/`scale` transforms
+        // (which apply the same way regardless of what's upstream in the
+        // chain).
+        engine.register_fn("range", |e: GlslExpr, lo: Dynamic, hi: Dynamic| -> GlslExpr {
+            midi_range(e.0, lo, hi)
+        });
+        engine.register_fn("range", |n: MidiNote, lo: Dynamic, hi: Dynamic| -> GlslExpr {
+            midi_range(midi_note_glsl(n.note), lo, hi)
+        });
+        engine.register_fn("range", |c: MidiCc, lo: Dynamic, hi: Dynamic| -> GlslExpr {
+            midi_range(midi_cc_glsl(c.index), lo, hi)
+        });
+        engine.register_fn("scale", |e: GlslExpr, factor: Dynamic| -> GlslExpr {
+            midi_scale(e.0, factor)
+        });
+        engine.register_fn("scale", |n: MidiNote, factor: Dynamic| -> GlslExpr {
+            midi_scale(midi_note_glsl(n.note), factor)
+        });
+        engine.register_fn("scale", |c: MidiCc, factor: Dynamic| -> GlslExpr {
+            midi_scale(midi_cc_glsl(c.index), factor)
+        });
+
+        {
+            let s = state.clone();
+            // Real hydra-midi's start() returns a promise with its own
+            // `.show()` (`await midi.start().show()` is the documented
+            // idiom); there's no promise/async model here, so this just
+            // returns `Midi` again so the same chaining still works,
+            // dispatching straight to the no-op `show(Midi)` below.
+            engine.register_fn("start", move |_m: Midi| -> Midi {
+                s.lock().unwrap().midi_requests.push(MidiRequest::Start);
+                Midi
+            });
+        }
+        {
+            let s = state.clone();
+            engine.register_fn("pause", move |_m: Midi| {
+                s.lock().unwrap().midi_requests.push(MidiRequest::Pause);
+            });
+        }
+        // Real hydra-midi's midi.show()/.hide() toggle an on-screen MIDI
+        // monitor overlay; no such overlay exists here, so these are
+        // no-ops. `.channel(n)`/`.input(n)` set script-wide defaults for
+        // per-channel/per-input filtering, which this port doesn't do
+        // faithfully (see the module doc comment) - accepted and ignored.
+        engine.register_fn("show", |_m: Midi| {});
+        engine.register_fn("hide", |_m: Midi| {});
+        engine.register_fn("channel", |_m: Midi, _n: Dynamic| {});
+        engine.register_fn("input", |_m: Midi, _n: Dynamic| {});
     }
 
     // initVideo/initScreen/initGif (external video/GIF/display capture) and
@@ -1248,6 +1526,8 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
     // dispatches as one even though the registered fns take `Audio` by value.
     #[cfg(feature = "audio")]
     scope.push("a", Audio);
+    #[cfg(feature = "midi")]
+    scope.push("midi", Midi);
 
     let result = engine
         .eval_with_scope::<Dynamic>(&mut scope, code)
@@ -1274,6 +1554,8 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
         source_requests: std::mem::take(&mut patch.source_requests),
         #[cfg(feature = "audio")]
         audio_requests: std::mem::take(&mut patch.audio_requests),
+        #[cfg(feature = "midi")]
+        midi_requests: std::mem::take(&mut patch.midi_requests),
     })
 }
 
@@ -1811,5 +2093,49 @@ mod tests {
         let too_deep = make_deep_chain(20);
         let err = compile_node(&too_deep).unwrap_err();
         assert!(err.contains("nesting too deep"), "{err}");
+    }
+
+    // --- note_name_to_number (MIDI note names) ---
+
+    #[test]
+    #[cfg(feature = "midi")]
+    fn note_name_to_number_matches_general_midi_numbering() {
+        // C4 = 60 = middle C, standard scientific-pitch-notation/General-
+        // MIDI numbering - see note_number_from_dynamic's doc comment for
+        // why this (not real hydra-midi's own doc comment, which
+        // contradicts its own code) is the source of truth.
+        assert_eq!(note_name_to_number("C4"), Some(60));
+        assert_eq!(note_name_to_number("A4"), Some(69));
+        assert_eq!(note_name_to_number("C0"), Some(12));
+    }
+
+    #[test]
+    #[cfg(feature = "midi")]
+    fn note_name_to_number_handles_sharps_and_flats() {
+        assert_eq!(note_name_to_number("C#4"), Some(61));
+        assert_eq!(note_name_to_number("Db4"), Some(61));
+        assert_eq!(note_name_to_number("Gb3"), Some(54));
+    }
+
+    #[test]
+    #[cfg(feature = "midi")]
+    fn note_name_to_number_is_case_insensitive() {
+        assert_eq!(note_name_to_number("c4"), Some(60));
+        assert_eq!(note_name_to_number("a#4"), Some(70));
+    }
+
+    #[test]
+    #[cfg(feature = "midi")]
+    fn note_name_to_number_rejects_unrecognized_names() {
+        assert_eq!(note_name_to_number("H4"), None);
+        assert_eq!(note_name_to_number(""), None);
+        assert_eq!(note_name_to_number("C"), None);
+    }
+
+    #[test]
+    #[cfg(feature = "midi")]
+    fn note_number_from_dynamic_passes_bare_numbers_through() {
+        assert_eq!(note_number_from_dynamic(Dynamic::from_int(60)), 60);
+        assert_eq!(note_number_from_dynamic(Dynamic::from_float(60.0)), 60);
     }
 }

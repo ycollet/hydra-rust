@@ -176,7 +176,7 @@ hydra-rust is the visual engine of [Sova](https://github.com/Bubobubobubobubo/So
 ## Current limitations
 
 - Max nesting depth of 16
-- Audio reactivity (`a.fft[]`, `a.setBins`/`setCutoff`/`setScale`/`setSmooth`), webcam input (`initCam`), and image-URL loading (`initImage`) require building with the `audio`/`webcam`/`image_url` Cargo features respectively (off by default)
+- Audio reactivity (`a.fft[]`, `a.setBins`/`setCutoff`/`setScale`/`setSmooth`), webcam input (`initCam`), image-URL loading (`initImage`), and MIDI input (`note`/`cc`/`midi.*`) require building with the `audio`/`webcam`/`image_url`/`midi` Cargo features respectively (off by default)
 
 ### Stub functions (accepted, but not yet implemented)
 
@@ -195,6 +195,10 @@ These are registered so scripts calling them don't hard-error, but they don't do
 | `setFunction(descriptor)` | No-op — real hydra.js registers a custom GLSL source/color/combine function from a JS descriptor object + GLSL string; no dynamic function-registration or GLSL-embedding pipeline exists here |
 | `Scene(name)` | No-op — not a hydra.js API at all; some external VJ/live-coding integrations use it to switch named cue banks |
 | `a.show()` / `a.hide()` | No-op — no on-screen FFT debug graph to toggle |
+| `.value(fn)` (MIDI `note`/`cc`, `midi` feature) | Not implemented — each chain compiles to a static GLSL expression once, so there's nowhere to run an arbitrary per-frame Rhai closure the way a real per-frame JS callback would; calling it cleanly fails as "Function not found" |
+| `aft(...)` / `_aft(...)` (MIDI aftertouch, `midi` feature) | Not implemented at all — lower real-world usage than notes/CC |
+| `midi.channel(n)` / `.input(n)` | Accepted, logged, ignored — MIDI channels and input devices are all merged into one rather than faithfully filtered (see SPEC.md §6.1) |
+| `midi.show()` / `.hide()` | No-op — no on-screen MIDI monitor overlay to toggle |
 | `ease(name)` (pattern) | Accepted but not faithful — `smooth()` still interpolates linearly regardless of the named curve; no non-linear easing curves are implemented |
 | `screencap()` | No-op — saving/sharing a screenshot isn't supported |
 | `loadScript(url)` | No-op — no dynamic module loading. Some of the most commonly-loaded community extensions' functions are ported natively instead (`spiral`, `turb`, `uturb`, `unoise`, `whitenoise`, `colornoise`, `warp`, `cwarp`, `ncontour`, `pulse`, `pulsetrain`, `hextile`, `concentric`, `brick`, `wave`, `lissa`, `inversion`, `mirrorX`/`mirrorY`/`mirrorX2`/`mirrorY2`/`mirrorWrap`, `colreflect` — see SPEC.md §6); anything else the loaded script would have defined still won't exist |

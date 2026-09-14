@@ -5,6 +5,7 @@ use glow::{HasContext, PixelUnpackData};
 
 use crate::audio::NUM_FFT_BINS;
 use crate::eval::RenderMode;
+use crate::midi::{NUM_MIDI_CC, NUM_MIDI_ENVELOPES, NUM_MIDI_NOTES};
 use crate::shader;
 use crate::source::{SourceFrame, NUM_SOURCES};
 use crate::text::TextData;
@@ -18,6 +19,11 @@ pub struct RenderUniforms {
     pub tempo: f32,
     pub phase: f32,
     pub fft: [f32; NUM_FFT_BINS],
+    pub midi_note: [f32; NUM_MIDI_NOTES],
+    pub midi_velocity: [f32; NUM_MIDI_NOTES],
+    pub midi_cc: [f32; NUM_MIDI_CC],
+    pub midi_cc_smoothed: [f32; NUM_MIDI_CC],
+    pub midi_envelope: [f32; NUM_MIDI_ENVELOPES],
 }
 
 const NUM_BUFFERS: usize = 4;
@@ -32,6 +38,11 @@ struct ProgramState {
     loc_tempo: Option<glow::UniformLocation>,
     loc_phase: Option<glow::UniformLocation>,
     loc_fft: Option<glow::UniformLocation>,
+    loc_midi_note: Option<glow::UniformLocation>,
+    loc_midi_velocity: Option<glow::UniformLocation>,
+    loc_midi_cc: Option<glow::UniformLocation>,
+    loc_midi_cc_smoothed: Option<glow::UniformLocation>,
+    loc_midi_envelope: Option<glow::UniformLocation>,
     loc_buffers: [Option<glow::UniformLocation>; NUM_BUFFERS],
     loc_text0: Option<glow::UniformLocation>,
     loc_sources: [Option<glow::UniformLocation>; NUM_SOURCES],
@@ -290,6 +301,11 @@ fn resolve_program_state(gl: &glow::Context, program: glow::Program) -> ProgramS
             loc_tempo: gl.get_uniform_location(program, "iTempo"),
             loc_phase: gl.get_uniform_location(program, "iPhase"),
             loc_fft: gl.get_uniform_location(program, "iFft"),
+            loc_midi_note: gl.get_uniform_location(program, "iMidiNote"),
+            loc_midi_velocity: gl.get_uniform_location(program, "iMidiVelocity"),
+            loc_midi_cc: gl.get_uniform_location(program, "iMidiCC"),
+            loc_midi_cc_smoothed: gl.get_uniform_location(program, "iMidiCCSmoothed"),
+            loc_midi_envelope: gl.get_uniform_location(program, "iMidiEnvelope"),
             loc_buffers: [
                 gl.get_uniform_location(program, "iBuffer0"),
                 gl.get_uniform_location(program, "iBuffer1"),
@@ -393,6 +409,21 @@ pub fn render_multipass(
             }
             if let Some(ref loc) = p.loc_fft {
                 gl.uniform_1_f32_slice(Some(loc), &u.fft);
+            }
+            if let Some(ref loc) = p.loc_midi_note {
+                gl.uniform_1_f32_slice(Some(loc), &u.midi_note);
+            }
+            if let Some(ref loc) = p.loc_midi_velocity {
+                gl.uniform_1_f32_slice(Some(loc), &u.midi_velocity);
+            }
+            if let Some(ref loc) = p.loc_midi_cc {
+                gl.uniform_1_f32_slice(Some(loc), &u.midi_cc);
+            }
+            if let Some(ref loc) = p.loc_midi_cc_smoothed {
+                gl.uniform_1_f32_slice(Some(loc), &u.midi_cc_smoothed);
+            }
+            if let Some(ref loc) = p.loc_midi_envelope {
+                gl.uniform_1_f32_slice(Some(loc), &u.midi_envelope);
             }
             if let Some(ref loc) = p.loc_resolution {
                 gl.uniform_2_f32(Some(loc), u.resolution[0], u.resolution[1]);

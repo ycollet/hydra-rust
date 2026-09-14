@@ -547,6 +547,57 @@ itself is a permanent no-op, see README.md):
 | `hush()` | Clear all buffers (see §2) |
 | `random()` / `random(...)` | One-shot pseudo-random `f64` in `[0, 1)`, called once at script-eval time (target of `Math.random()`, see §4). Accepts and ignores 0-2 extra arguments, matching real JS's own excess-argument tolerance (real `Math.random()` takes none either) rather than implementing an actual ranged random some sketches seem to expect |
 
+### 6.1 MIDI (`midi` feature)
+
+A native port of the real-world `hydra-midi` community extension
+(github.com/arnoson/hydra-midi, `loadScript()`-loaded in real hydra.js -
+there's no MIDI support in hydra-synth's own core at all), the same
+treatment already given to several other `loadScript()`-loaded functions
+(§6's "Ported community extension functions"). Behind the `midi` feature
+(§8); without it, none of these are registered at all (plain "Function
+not found").
+
+| Function | Description |
+|---|---|
+| `note(nameOrNumber[, channel])` | A chainable gate: `1` while the note is held, `0` otherwise (not velocity). `channel` (and a real hydra-midi `input` argument) is accepted but ignored - see below |
+| `.velocity()` (on `note(...)`) | The note's last velocity, `0`-`1`, `0` once released |
+| `.adsr(a, d, s, r)` (on `note(...)`) | An ADSR envelope (`a`/`d`/`r` in milliseconds, `s` a `0`-`1` sustain level) keyed to that note's on/off events, multiplied by the velocity captured when the note was triggered - ported from `hydra-midi`'s `lib/Envelope.ts`. A small fixed pool of 16 concurrent envelopes (`midi::NUM_MIDI_ENVELOPES`) is available per script |
+| `cc(index[, channel])` | A chainable, raw CC value normalized to `0`-`1` |
+| `.smooth(factor=0.01)` (on `cc(...)`) | Exponential slew (temporal smoothing) of the CC value |
+| `.range(lo, hi)` | Linearly remaps a `0`-`1` value (any of the above) into `[lo, hi]` |
+| `.scale(factor)` | Multiplies a value (any of the above) |
+| `_note(...)` / `_cc(...)` / `_noteVelocity(...)` | The plain (non-chainable) equivalents of `note(...)`, `cc(...)`, and `note(...).velocity()`, for use inside a `()=>` wrapper (stripped by `arrow.rs`, see §4 step 14) |
+| `midi.start()` / `.pause()` | Connects to (or disconnects from) every available MIDI input port - see below. `.start()` returns `midi` again, so `midi.start().show()` (the documented real hydra-midi idiom) still parses |
+| `midi.show()` / `.hide()` | No-op - real hydra-midi's on-screen MIDI monitor overlay doesn't exist here |
+| `midi.channel(n)` / `.input(n)` | Accepted, logged, ignored - see below |
+
+Note names use standard scientific-pitch-notation/General-MIDI numbering
+(`"C4"` -> 60, middle C), ported from `hydra-midi`'s own
+`utils/getNoteNumber.ts` formula (`offset + (octave + 1) * 12`) - notably,
+*not* what that file's own doc comment claims (`"C3"` as middle C); the
+comment contradicts its own code, so this port follows the code.
+
+**Deliberate simplifications**, each a "no worse than a hard error"
+trade-off matching this project's existing precedent for things it can't
+fully implement (e.g. `ease()`, §7):
+- **All MIDI channels and input devices are merged into one.** `channel`/
+  `midi.channel(n)`/`.input(n)` are accepted but ignored, rather than
+  faithfully filtering per real hydra-midi's own wildcard-keyed system -
+  a reasonable trade for a typical one-controller setup.
+- **Aftertouch (`aft`/`_aft`) isn't implemented at all.**
+- **`.value(fn)` isn't implemented.** Each hydra-rust chain compiles to a
+  *static* GLSL expression once, so there's nowhere to run an arbitrary
+  Rhai closure per-frame the way a real per-frame JS callback would;
+  calling `.value(...)` cleanly fails as "Function not found".
+- **`.adsr(...)`'s envelope is multiplied by the velocity captured at
+  trigger time, held through the whole envelope (including release)** -
+  real hydra-midi's own JS instead reads the note's *live* velocity every
+  time, which (as best as this port's author could tell from its minified
+  closure chain) actually drops to 0 the instant the note is released,
+  silencing the release phase entirely. That's very likely an upstream
+  quirk rather than intended behavior; this port implements the
+  musically-obvious interpretation instead.
+
 ## 7. Patterns
 
 An array literal (`[1, 2, 3]`) can be used almost anywhere a plain number
@@ -571,7 +622,7 @@ place and returns nothing).
 
 ## 8. Feature flags
 
-Three Cargo features gate optional hardware/network/dependency-heavy
+Four Cargo features gate optional hardware/network/dependency-heavy
 functionality, all off by default:
 
 | Feature | Deps | Enables |
@@ -579,12 +630,14 @@ functionality, all off by default:
 | `webcam` | `nokhwa` | `initCam(slot[, cameraIndex])`, populating `s0`-`s3` from a physical camera |
 | `audio` | `cpal`, `rustfft` | `a.fft[i]`, `a.setBins(n)`, `a.setCutoff(c)`, `a.setScale(s)`, `a.setSmooth(s)`, `a.show()`/`a.hide()` (no-op) |
 | `image_url` | `image`, `ureq` | `initImage(slot, url)`, fetching and decoding the URL in the background (see `imageload.rs`) and populating `s0`-`s3` from it, the same way `initCam` populates them from a camera |
+| `midi` | `midir` | `note(...)`, `cc(...)`, `_note`/`_cc`/`_noteVelocity`, `midi.*` - a native port of the real-world `hydra-midi` extension, see §6.1 |
 
-Calling `initCam`/`a.fft[]`/etc. in a build without `webcam`/`audio`
-produces a plain "Function not found" error from `eval()` — there is no
-separate "feature not compiled in" error path. `initImage` is the one
-exception: it's *always* registered (see §9), so it never hard-errors
-either way; without `image_url` it's just a no-op instead of a real fetch.
+Calling `initCam`/`a.fft[]`/`note()`/etc. in a build without `webcam`/
+`audio`/`midi` produces a plain "Function not found" error from `eval()`
+— there is no separate "feature not compiled in" error path. `initImage`
+is the one exception: it's *always* registered (see §9), so it never
+hard-errors either way; without `image_url` it's just a no-op instead of
+a real fetch.
 
 Without `image_url`, `initImage`'s network fetch obviously can't happen at
 all - but even *with* it enabled, note that `eval()` itself never touches
