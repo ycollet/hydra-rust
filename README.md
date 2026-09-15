@@ -118,7 +118,7 @@ The microphone is only opened once a script actually uses one of these (calls a 
 | `a.setSmooth(s)` | Exponential smoothing between frames, `0`-`1` (default `0.4`) | `a.setSmooth(0.8)` |
 | `a.show()` / `a.hide()` | No-op — no on-screen FFT debug graph exists here | `a.show()` |
 
-### `image_url` — load an image from a URL
+### `image_url` — load an image or animated GIF from a URL
 
 ```bash
 cargo run --features image_url --bin hydra
@@ -126,7 +126,8 @@ cargo run --features image_url --bin hydra
 
 | Function | Description | Example |
 |----------|-------------|---------|
-| `initImage(slot, url)` | Fetches and decodes an image (PNG/JPEG/GIF/WebP) in the background, uploading it to a source slot once it's ready | `s0.initImage("https://example.com/pic.png").out()` |
+| `initImage(slot, url)` | Fetches and decodes a still image (PNG/JPEG/GIF/WebP) in the background, uploading it to a source slot once it's ready | `s0.initImage("https://example.com/pic.png").out()` |
+| `initGif(slot, url)` | Fetches an animated GIF, decodes every frame up front, and cycles through them by elapsed time once loaded — looping indefinitely, like a real `<img>` GIF | `s0.initGif("https://example.com/anim.gif").out()` |
 
 ### `midi` — MIDI input
 
@@ -169,11 +170,11 @@ python3 scripts/fetch_corpus.py          # downloads into ./sketches
 ```
 
 Then run the harness against it (built with `--release` and every feature,
-so `a.fft[...]`/`initCam(...)`/`initImage(...)`-style sketches don't fail
-just because those functions aren't registered):
+so `a.fft[...]`/`initCam(...)`/`initImage(...)`/`note(...)`-style sketches
+don't fail just because those functions aren't registered):
 
 ```bash
-cargo run --release --features webcam,audio,image_url --example check_corpus -- sketches
+cargo run --release --features webcam,audio,image_url,midi --example check_corpus -- sketches
 ```
 
 This prints an ok/failed count and the top failure buckets, and writes
@@ -288,7 +289,7 @@ These are registered so scripts calling them don't hard-error, but they don't do
 |----------|--------|
 | `initImage(idx, url)` | Real implementation behind the `image_url` feature: fetches the URL and decodes it (PNG/JPEG/GIF/WebP) in the background, then uploads it to the source slot once it's ready, through the same texture path webcam frames use. Without that feature, it's a no-op (returns the source as a chainable value, like real hydra.js) |
 | `initVideo(idx, url)` | No-op (returns the source as a chainable value) — no video file loading pipeline |
-| `initGif(idx, url)` | No-op (returns the source as a chainable value) — no GIF loading pipeline |
+| `initGif(idx, url)` | Real implementation behind the `image_url` feature: fetches the URL, decodes every frame up front, and cycles through them by elapsed time once loaded, looping indefinitely — same texture path webcam frames use. Without that feature, it's a no-op (returns the source as a chainable value) |
 | `initStream(idx, url)` | No-op (returns the source as a chainable value) — no WebRTC/live-stream pipeline |
 | `initScreen(idx[, screen])` | No-op (returns the source as a chainable value) — no screen/display capture |
 | `sN.init({src: ...})` | No-op (returns the slot's source as a chainable value) — not a real hydra.js API at all, but a pattern some external platforms use to feed a p5.js canvas/DOM element into a source slot; no such capture pipeline exists here |

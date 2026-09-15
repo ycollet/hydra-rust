@@ -302,6 +302,25 @@ fn init_image_queues_a_source_request_without_touching_the_network() {
 }
 
 #[test]
+#[cfg(feature = "image_url")]
+fn init_gif_queues_a_source_request_without_touching_the_network() {
+    // same "eval() never touches the network" guarantee as initImage -
+    // the actual fetch+decode happens in imageload.rs's ImageManager,
+    // wired up in app.rs, well after eval() has already returned.
+    use hydra_rust::eval::SourceRequest;
+    let result = eval("s1.initGif(\"https://example.com/anim.gif\").out()").unwrap();
+    assert_eq!(result.source_requests.len(), 1);
+    match &result.source_requests[0] {
+        SourceRequest::InitGif { slot, url } => {
+            assert_eq!(*slot, 1);
+            assert_eq!(url.as_str(), "https://example.com/anim.gif");
+        }
+        #[allow(unreachable_patterns)]
+        other => panic!("unexpected request: {other:?}"),
+    }
+}
+
+#[test]
 fn smooth_and_fit_pattern_calls_compile_to_valid_glsl() {
     // .smooth() interpolates between array entries over time; .fit()
     // remaps the array's own value range - both must compile cleanly

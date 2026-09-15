@@ -381,7 +381,8 @@ errors from `eval()`, surfaced to the caller as `Err(String)`.
   double-buffered (ping-pong) so a buffer can read its own previous frame.
 - **`s0`-`s3`** (Rhai constants `100`-`103`): four external source slots,
   populated by camera capture (`initCam`, behind the `webcam` feature) or a
-  fetched image (`initImage`, behind the `image_url` feature).
+  fetched image/animated GIF (`initImage`/`initGif`, behind the `image_url`
+  feature).
 - **`src(idx)`**: reads a buffer or source as a chain-starting `Node`. `idx <
   100` reads buffer `idx`'s previous frame (`texture(iBufferN, st)`); `idx >=
   100` reads external source slot `idx - 100` (`texture(iSourceN, ...)`,
@@ -418,6 +419,14 @@ errors from `eval()`, surfaced to the caller as `Err(String)`.
   the URL on a background thread and uploads it to that slot once ready,
   through the same `upload_source` path camera frames use. Since a fetched
   image never changes, it's uploaded exactly once, not every frame.
+- **`initGif(slot, url)`**: the animated counterpart to `initImage` -
+  without `image_url`, the same no-op treatment. With it, `imageload.rs`'s
+  `ImageManager` decodes every frame of the GIF up front (GIFs are small,
+  short loops - no streaming decoder needed) and, on each subsequent
+  `poll()`, works out which frame *should* currently be showing from
+  elapsed real time against each frame's own delay (looping the whole
+  sequence once its total duration has elapsed), re-uploading only when
+  that frame actually changes.
 
 ## 6. Function reference
 
@@ -629,7 +638,7 @@ functionality, all off by default:
 |---|---|---|
 | `webcam` | `nokhwa` | `initCam(slot[, cameraIndex])`, populating `s0`-`s3` from a physical camera |
 | `audio` | `cpal`, `rustfft` | `a.fft[i]`, `a.setBins(n)`, `a.setCutoff(c)`, `a.setScale(s)`, `a.setSmooth(s)`, `a.show()`/`a.hide()` (no-op) |
-| `image_url` | `image`, `ureq` | `initImage(slot, url)`, fetching and decoding the URL in the background (see `imageload.rs`) and populating `s0`-`s3` from it, the same way `initCam` populates them from a camera |
+| `image_url` | `image`, `ureq` | `initImage(slot, url)` / `initGif(slot, url)`, fetching and decoding the URL in the background (see `imageload.rs`) and populating `s0`-`s3` from it, the same way `initCam` populates them from a camera |
 | `midi` | `midir` | `note(...)`, `cc(...)`, `_note`/`_cc`/`_noteVelocity`, `midi.*` - a native port of the real-world `hydra-midi` extension, see §6.1 |
 
 Calling `initCam`/`a.fft[]`/`note()`/etc. in a build without `webcam`/
@@ -653,11 +662,11 @@ These are registered (so a script calling them doesn't hard-error) but do
 **not** do anything real; see README.md's stub-function table for the
 full, currently-accurate list (kept there rather than duplicated here, so
 there's one place to update). As of this writing it covers `initVideo`/
-`initGif`/`initScreen` (return a chainable no-op source, see §5; `initImage`
-is a real implementation behind `image_url`, see §8), `setResolution`,
-`screencap`, `a.show()`/`a.hide()`, `ease` (patterns, see §7), `loadScript`
-(see §6 for the community-extension functions ported natively instead), and
-`o0-o3.setNearest()`/`.setLinear()`/`.setMode()`.
+`initScreen` (return a chainable no-op source, see §5; `initImage`/
+`initGif` are real implementations behind `image_url`, see §8),
+`setResolution`, `screencap`, `a.show()`/`a.hide()`, `ease` (patterns, see
+§7), `loadScript` (see §6 for the community-extension functions ported
+natively instead), and `o0-o3.setNearest()`/`.setLinear()`/`.setMode()`.
 
 Not registered at all, and not silently tolerated: `a.settings[i].cutoff =
 ...` (real hydra.js exposes indexable, mutable per-bin audio config; this

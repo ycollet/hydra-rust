@@ -42,6 +42,8 @@ pub enum SourceRequest {
     InitCam { slot: usize, camera_index: u32 },
     #[cfg(feature = "image_url")]
     InitImage { slot: usize, url: String },
+    #[cfg(feature = "image_url")]
+    InitGif { slot: usize, url: String },
 }
 
 #[cfg(feature = "audio")]
@@ -1368,6 +1370,24 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
         log::warn!("initVideo({idx}, \"{url}\") ignored: video sources are not supported");
         idx_to_source(idx)
     });
+    // initGif is a real implementation when `image_url` is enabled - it
+    // reuses that feature's fetch pipeline (see imageload.rs), decoding
+    // every frame up front and cycling through them by elapsed time once
+    // loaded, looping indefinitely like a real animated GIF.
+    #[cfg(feature = "image_url")]
+    {
+        let s = state.clone();
+        engine.register_fn("initGif", move |idx: i64, url: ImmutableString| -> Node {
+            if idx >= 100 {
+                s.lock().unwrap().source_requests.push(SourceRequest::InitGif {
+                    slot: (idx - 100) as usize,
+                    url: url.to_string(),
+                });
+            }
+            idx_to_source(idx)
+        });
+    }
+    #[cfg(not(feature = "image_url"))]
     engine.register_fn("initGif", |idx: i64, url: ImmutableString| -> Node {
         log::warn!("initGif({idx}, \"{url}\") ignored: GIF sources are not supported");
         idx_to_source(idx)

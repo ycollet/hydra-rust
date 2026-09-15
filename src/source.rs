@@ -1,5 +1,6 @@
 pub const NUM_SOURCES: usize = 4;
 
+#[derive(Clone)]
 pub struct SourceFrame {
     pub pixels: Vec<u8>,
     pub width: u32,

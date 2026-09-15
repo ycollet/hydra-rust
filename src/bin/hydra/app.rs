@@ -359,6 +359,10 @@ impl HydraApp {
                         SourceRequest::InitImage { slot, url } => {
                             self.image_manager.init_image(*slot, url.clone());
                         }
+                        #[cfg(feature = "image_url")]
+                        SourceRequest::InitGif { slot, url } => {
+                            self.image_manager.init_gif(*slot, url.clone());
+                        }
                     }
                 }
                 #[cfg(feature = "audio")]
