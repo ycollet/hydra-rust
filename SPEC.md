@@ -696,7 +696,15 @@ sketch's source only (no thumbnail - no cheap equivalent in a native GL
 app). `Alt+0-9/A-F` recalls a slot (loads + evaluates immediately, no
 `pending_confirmation` gate - as explicit a user action as `Ctrl+O`'s
 `load_file`, which behaves the same way); `Alt+Shift+0-9/A-F` saves the
-editor's current code into a slot; `Alt+Left/Right` cycles between banks
+editor's current code into a (possibly different) slot, also making it
+the new `active_slot`. Independent of that shortcut, `update()` re-syncs
+`banks[current_bank].slots[active_slot]` from `self.code` at the top of
+*every* frame whenever `active_slot` is `Some(..)` (a cheap `Option<&str>`
+comparison first, only actually cloning/writing on an real change) - so
+the slot you're currently on is always current, and recalling a different
+slot, cycling banks, `load_file`, or quitting never discards an
+in-progress edit that was never explicitly saved. `Alt+Left/Right` cycles
+between banks
 (always - unlike HYDRACTRL, there's no MIDI program-change-driven bank
 switch to defer to here); `Alt+X`/`Alt+I` export/import the *active*
 bank's 16 slots as a `.bhr` (JSON) file, mirroring `save_file`/`load_file`
@@ -717,6 +725,16 @@ way `-bs` does, so it snapshots the starting code to that path immediately
 at launch instead. `.shr` is mostly a convenience/consistency format - a
 plain `.hydra` file already covers "one saved sketch" - but shares
 `.bhr`'s versioned-JSON envelope.
+
+While `Alt` is held, `update()` also strips every `egui::Event::Text` from
+the frame's input before the editor's `TextEdit` gets a chance to read it
+(`ctx.input_mut(|i| i.events.retain(...))`). Reading a key via
+`ctx.input(|i| i.key_pressed(..))` (as the shortcuts above all do) doesn't
+stop a focused `TextEdit` from *also* consuming the same keystroke; on
+keyboard layouts where `Option`/`Alt` (+Shift) composes a symbol
+(dead-key/accent composition, common on macOS), that composed character
+would otherwise still get typed into the sketch alongside the shortcut
+firing.
 
 ## 11. Adding a missing function
 

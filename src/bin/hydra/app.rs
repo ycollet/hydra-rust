@@ -744,6 +744,19 @@ impl eframe::App for HydraApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.paint_background(ctx);
 
+        // Keep the active slot's persisted content in sync with the
+        // editor's live code every frame - otherwise recalling a
+        // different slot, cycling banks, opening a different file, or
+        // quitting the app would all silently discard an unsaved
+        // in-progress edit, since none of those explicitly save back to
+        // the slot being left. Cheap: only actually clones/writes when
+        // the code has changed since the last frame.
+        if let Some(idx) = self.active_slot
+            && self.banks[self.current_bank].slots[idx].as_deref() != Some(self.code.as_str())
+        {
+            self.banks[self.current_bank].slots[idx] = Some(self.code.clone());
+        }
+
         let is_mac = ctx.os().is_mac();
         let cmd = |i: &egui::InputState, key: egui::Key| {
             i.key_pressed(key) && if is_mac { i.modifiers.mac_cmd } else { i.modifiers.ctrl }
@@ -775,6 +788,14 @@ impl eframe::App for HydraApp {
         // it instead, Alt+Left/Right cycles between the 4 banks, and
         // Alt+X/Alt+I export/import the active bank as a `.bhr` file.
         if ctx.input(|i| i.modifiers.alt) {
+            // Alt/Option is reserved for the bank shortcuts below - on
+            // some keyboard layouts, Option(+Shift)+digit is an OS-level
+            // dead-key/symbol composition (e.g. producing "≠", "»", ...),
+            // which would otherwise also get typed into the code editor
+            // as a stray character. Drop any composed text for as long as
+            // Alt is held so only the shortcut itself fires.
+            ctx.input_mut(|i| i.events.retain(|e| !matches!(e, egui::Event::Text(_))));
+
             const HEX_KEYS: [(egui::Key, usize); 16] = [
                 (egui::Key::Num0, 0),
                 (egui::Key::Num1, 1),
