@@ -22,12 +22,18 @@ rustfft = { version = "6", optional = true }
 image = { version = "0.25", optional = true, default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 ureq = { version = "2", optional = true, features = ["tls"] }
 midir = { version = "0.10", optional = true }
+# `default-features = false`: excludes `download_ffmpeg` deliberately - this
+# project requires a pre-installed `ffmpeg` on PATH rather than silently
+# fetching a large binary off the internet, matching the same "no surprise
+# background network/hardware access" precedent as the other features here.
+ffmpeg-sidecar = { version = "2", optional = true, default-features = false }
 
 [features]
 webcam = ["dep:nokhwa"]
 audio = ["dep:cpal", "dep:rustfft"]
 image_url = ["dep:image", "dep:ureq"]
 midi = ["dep:midir"]
+video = ["dep:ffmpeg-sidecar"]
 
 # Real-time rendering app: thin LTO's cross-crate inlining meaningfully
 # helps the hot per-frame path (renderer.rs) and eval()'s Rhai-engine/

@@ -380,8 +380,9 @@ errors from `eval()`, surfaced to the caller as `Err(String)`.
 - **`o0`-`o3`** (Rhai constants `0`-`3`): the four output buffers, each
   double-buffered (ping-pong) so a buffer can read its own previous frame.
 - **`s0`-`s3`** (Rhai constants `100`-`103`): four external source slots,
-  populated by camera capture (`initCam`, behind the `webcam` feature) or a
+  populated by camera capture (`initCam`, behind the `webcam` feature), a
   fetched image/animated GIF (`initImage`/`initGif`, behind the `image_url`
+  feature), or a decoded video file/URL (`initVideo`, behind the `video`
   feature).
 - **`src(idx)`**: reads a buffer or source as a chain-starting `Node`. `idx <
   100` reads buffer `idx`'s previous frame (`texture(iBufferN, st)`); `idx >=
@@ -427,6 +428,22 @@ errors from `eval()`, surfaced to the caller as `Err(String)`.
   elapsed real time against each frame's own delay (looping the whole
   sequence once its total duration has elapsed), re-uploading only when
   that frame actually changes.
+- **`initVideo(slot, url)`**: without the `video` feature, the same no-op
+  treatment. With it, `video.rs`'s `VideoManager` spawns a standalone
+  `ffmpeg` binary as a subprocess (via the `ffmpeg-sidecar` crate - `ffmpeg`
+  itself is never linked into this binary, only invoked at runtime, so it
+  must be on `PATH`; missing it logs one warning and leaves the slot
+  empty rather than erroring) with `-stream_loop -1 -re -i <url> ... -f
+  rawvideo -pix_fmt rgb24`, decoding it as an unbounded stream rather than
+  up front the way `initGif` does (a video's length isn't bounded the way
+  a short GIF loop's is). A background thread per slot continuously reads
+  decoded frames and keeps only the newest one; `poll()` drains it,
+  uploading through the same path every other source uses. `-re` paces
+  ffmpeg's own output to the video's real playback rate (so frames arrive
+  roughly once per `poll()` rather than all at once), and `-stream_loop
+  -1` loops the file indefinitely without any restart logic needed here.
+  `url` may be a local file path or a remote URL - ffmpeg's own input
+  handling covers both without any extra fetch code.
 
 ## 6. Function reference
 
@@ -631,7 +648,7 @@ place and returns nothing).
 
 ## 8. Feature flags
 
-Four Cargo features gate optional hardware/network/dependency-heavy
+Five Cargo features gate optional hardware/network/dependency-heavy
 functionality, all off by default:
 
 | Feature | Deps | Enables |
@@ -640,13 +657,14 @@ functionality, all off by default:
 | `audio` | `cpal`, `rustfft` | `a.fft[i]`, `a.setBins(n)`, `a.setCutoff(c)`, `a.setScale(s)`, `a.setSmooth(s)`, `a.show()`/`a.hide()` (no-op) |
 | `image_url` | `image`, `ureq` | `initImage(slot, url)` / `initGif(slot, url)`, fetching and decoding the URL in the background (see `imageload.rs`) and populating `s0`-`s3` from it, the same way `initCam` populates them from a camera |
 | `midi` | `midir` | `note(...)`, `cc(...)`, `_note`/`_cc`/`_noteVelocity`, `midi.*` - a native port of the real-world `hydra-midi` extension, see §6.1 |
+| `video` | `ffmpeg-sidecar` | `initVideo(slot, url)`, streaming decoded frames from a local file or URL via a standalone `ffmpeg` subprocess (see `video.rs`) into `s0`-`s3`. Unlike the other deps here, `ffmpeg` itself isn't a Rust crate linked into the binary - it must be a separate executable on `PATH` at *runtime* |
 
 Calling `initCam`/`a.fft[]`/`note()`/etc. in a build without `webcam`/
 `audio`/`midi` produces a plain "Function not found" error from `eval()`
-— there is no separate "feature not compiled in" error path. `initImage`
-is the one exception: it's *always* registered (see §9), so it never
-hard-errors either way; without `image_url` it's just a no-op instead of
-a real fetch.
+— there is no separate "feature not compiled in" error path. `initImage`/
+`initGif`/`initVideo` are the exceptions: they're *always* registered (see
+§9), so they never hard-error either way; without `image_url`/`video`
+they're just no-ops instead of a real fetch/decode.
 
 Without `image_url`, `initImage`'s network fetch obviously can't happen at
 all - but even *with* it enabled, note that `eval()` itself never touches
@@ -661,12 +679,13 @@ network-free, regardless of which features are compiled in.
 These are registered (so a script calling them doesn't hard-error) but do
 **not** do anything real; see README.md's stub-function table for the
 full, currently-accurate list (kept there rather than duplicated here, so
-there's one place to update). As of this writing it covers `initVideo`/
-`initScreen` (return a chainable no-op source, see §5; `initImage`/
-`initGif` are real implementations behind `image_url`, see §8),
-`setResolution`, `screencap`, `a.show()`/`a.hide()`, `ease` (patterns, see
-§7), `loadScript` (see §6 for the community-extension functions ported
-natively instead), and `o0-o3.setNearest()`/`.setLinear()`/`.setMode()`.
+there's one place to update). As of this writing it covers `initScreen`
+(return a chainable no-op source, see §5; `initImage`/`initGif`/
+`initVideo` are real implementations behind `image_url`/`video`
+respectively, see §8), `setResolution`, `screencap`, `a.show()`/`a.hide()`,
+`ease` (patterns, see §7), `loadScript` (see §6 for the community-extension
+functions ported natively instead), and
+`o0-o3.setNearest()`/`.setLinear()`/`.setMode()`.
 
 Not registered at all, and not silently tolerated: `a.settings[i].cutoff =
 ...` (real hydra.js exposes indexable, mutable per-bin audio config; this
@@ -690,11 +709,13 @@ shown in the editor, with a persistent on-screen banner, until the user
 explicitly evaluates it (Ctrl+Enter/Cmd+Enter). This is deliberate: such a
 file may not be one the user wrote themselves (e.g. shared online), and
 could call `initCam()`/reference `a.fft[i]` to access the camera or
-microphone (`webcam`/`audio` features), or call `initImage(...)` to make an
-outbound network request to an arbitrary URL (`image_url` feature) - none
-of those should run just because the file was opened. The restored
-previous session (the user's own, already-run code) is exempt and still
-auto-evaluates as before.
+microphone (`webcam`/`audio` features), call `initImage(...)`/`initGif(...)`
+to make an outbound network request to an arbitrary URL (`image_url`
+feature), or call `initVideo(...)` to spawn an `ffmpeg` subprocess against
+an arbitrary local path or URL (`video` feature) - none of those should
+run just because the file was opened. The restored previous session (the
+user's own, already-run code) is exempt and still auto-evaluates as
+before.
 
 ### 10.1 Scene banks
 

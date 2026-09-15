@@ -35,7 +35,7 @@ pub enum RenderMode {
     All,
 }
 
-#[cfg(any(feature = "webcam", feature = "image_url"))]
+#[cfg(any(feature = "webcam", feature = "image_url", feature = "video"))]
 #[derive(Debug, Clone)]
 pub enum SourceRequest {
     #[cfg(feature = "webcam")]
@@ -44,6 +44,8 @@ pub enum SourceRequest {
     InitImage { slot: usize, url: String },
     #[cfg(feature = "image_url")]
     InitGif { slot: usize, url: String },
+    #[cfg(feature = "video")]
+    InitVideo { slot: usize, url: String },
 }
 
 #[cfg(feature = "audio")]
@@ -68,7 +70,7 @@ pub struct EvalResult {
     pub shaders: [Option<String>; 4],
     pub render_mode: RenderMode,
     pub text_data: Option<TextData>,
-    #[cfg(any(feature = "webcam", feature = "image_url"))]
+    #[cfg(any(feature = "webcam", feature = "image_url", feature = "video"))]
     pub source_requests: Vec<SourceRequest>,
     #[cfg(feature = "audio")]
     pub audio_requests: Vec<AudioRequest>,
@@ -707,7 +709,7 @@ struct PatchState {
     buffers: [Option<Node>; 4],
     render_mode: RenderMode,
     text_data: Option<TextData>,
-    #[cfg(any(feature = "webcam", feature = "image_url"))]
+    #[cfg(any(feature = "webcam", feature = "image_url", feature = "video"))]
     source_requests: Vec<SourceRequest>,
     #[cfg(feature = "audio")]
     audio_requests: Vec<AudioRequest>,
@@ -1040,7 +1042,7 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
         buffers: [None, None, None, None],
         render_mode: RenderMode::default(),
         text_data: None,
-        #[cfg(any(feature = "webcam", feature = "image_url"))]
+        #[cfg(any(feature = "webcam", feature = "image_url", feature = "video"))]
         source_requests: Vec::new(),
         #[cfg(feature = "audio")]
         audio_requests: Vec::new(),
@@ -1366,6 +1368,23 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
         log::warn!("initImage({idx}, \"{url}\") ignored: image sources are not supported");
         idx_to_source(idx)
     });
+    // initVideo is a real implementation when `video` is enabled - it
+    // streams frames from a local file or URL via a standalone `ffmpeg`
+    // subprocess (see video.rs), looping indefinitely.
+    #[cfg(feature = "video")]
+    {
+        let s = state.clone();
+        engine.register_fn("initVideo", move |idx: i64, url: ImmutableString| -> Node {
+            if idx >= 100 {
+                s.lock().unwrap().source_requests.push(SourceRequest::InitVideo {
+                    slot: (idx - 100) as usize,
+                    url: url.to_string(),
+                });
+            }
+            idx_to_source(idx)
+        });
+    }
+    #[cfg(not(feature = "video"))]
     engine.register_fn("initVideo", |idx: i64, url: ImmutableString| -> Node {
         log::warn!("initVideo({idx}, \"{url}\") ignored: video sources are not supported");
         idx_to_source(idx)
@@ -1570,7 +1589,7 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
         shaders,
         render_mode: patch.render_mode,
         text_data: patch.text_data.take(),
-        #[cfg(any(feature = "webcam", feature = "image_url"))]
+        #[cfg(any(feature = "webcam", feature = "image_url", feature = "video"))]
         source_requests: std::mem::take(&mut patch.source_requests),
         #[cfg(feature = "audio")]
         audio_requests: std::mem::take(&mut patch.audio_requests),

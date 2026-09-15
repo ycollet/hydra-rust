@@ -321,6 +321,26 @@ fn init_gif_queues_a_source_request_without_touching_the_network() {
 }
 
 #[test]
+#[cfg(feature = "video")]
+fn init_video_queues_a_source_request_without_touching_ffmpeg() {
+    // same "eval() never touches the network/an external process"
+    // guarantee as initImage/initGif - the actual ffmpeg subprocess is
+    // spawned by video.rs's VideoManager, wired up in app.rs, well after
+    // eval() has already returned.
+    use hydra_rust::eval::SourceRequest;
+    let result = eval("s2.initVideo(\"https://example.com/clip.mp4\").out()").unwrap();
+    assert_eq!(result.source_requests.len(), 1);
+    match &result.source_requests[0] {
+        SourceRequest::InitVideo { slot, url } => {
+            assert_eq!(*slot, 2);
+            assert_eq!(url.as_str(), "https://example.com/clip.mp4");
+        }
+        #[allow(unreachable_patterns)]
+        other => panic!("unexpected request: {other:?}"),
+    }
+}
+
+#[test]
 fn smooth_and_fit_pattern_calls_compile_to_valid_glsl() {
     // .smooth() interpolates between array entries over time; .fit()
     // remaps the array's own value range - both must compile cleanly

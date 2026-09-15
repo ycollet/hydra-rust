@@ -88,7 +88,7 @@ hydra -ss mysketch.shr             # --slot-save: snapshot the starting code out
 
 ## Feature-gated functions
 
-The functions below only exist when the library is built with the matching Cargo feature (`cargo build --features <name>`, or comma-separated for several: `--features webcam,audio,image_url,midi`). Without the feature, calling one of these fails with a plain "Function not found" error. See [SPEC.md](SPEC.md) for the complete function reference, including the ~48 always-available core functions.
+The functions below only exist when the library is built with the matching Cargo feature (`cargo build --features <name>`, or comma-separated for several: `--features webcam,audio,image_url,midi,video`). Without the feature, calling one of these fails with a plain "Function not found" error. See [SPEC.md](SPEC.md) for the complete function reference, including the ~48 always-available core functions.
 
 ### `webcam` — camera input
 
@@ -152,6 +152,18 @@ A native port of the [hydra-midi](https://github.com/arnoson/hydra-midi) communi
 | `midi.show()` / `.hide()` | No-op — no on-screen MIDI monitor exists here | `midi.show()` |
 | `midi.channel(n)` / `.input(n)` | Accepted, logged, ignored — channels/inputs are merged (see above) | `midi.channel(0)` |
 
+### `video` — play a video file or URL as a source
+
+```bash
+cargo run --features video --bin hydra
+```
+
+Requires a standalone `ffmpeg` binary on `PATH` at runtime (`brew install ffmpeg`, `apt install ffmpeg`, ...) — it's spawned as a subprocess via [ffmpeg-sidecar](https://github.com/nathanbabcock/ffmpeg-sidecar), never linked into this binary, so `cargo build` itself never needs FFmpeg's dev libraries. If `ffmpeg` isn't found, `initVideo` logs one warning and leaves the slot empty rather than failing to build or run.
+
+| Function | Description | Example |
+|----------|-------------|---------|
+| `initVideo(slot, url)` | Streams frames from a local video file or a remote URL, looping indefinitely, uploading each new frame to a source slot as it's decoded | `s0.initVideo("/path/to/clip.mp4").out()` |
+
 ## Testing against a real-world sketch corpus
 
 `examples/check_corpus.rs` is a fast conformance-testing harness: it walks a
@@ -174,7 +186,7 @@ so `a.fft[...]`/`initCam(...)`/`initImage(...)`/`note(...)`-style sketches
 don't fail just because those functions aren't registered):
 
 ```bash
-cargo run --release --features webcam,audio,image_url,midi --example check_corpus -- sketches
+cargo run --release --features webcam,audio,image_url,midi,video --example check_corpus -- sketches
 ```
 
 This prints an ok/failed count and the top failure buckets, and writes
@@ -279,7 +291,8 @@ hydra-rust is the visual engine of [Sova](https://github.com/Bubobubobubobubo/So
 ## Current limitations
 
 - Max nesting depth of 16
-- Audio reactivity, webcam input, image-URL loading, and MIDI input each require building with their own Cargo feature (off by default) — see [Feature-gated functions](#feature-gated-functions) above
+- Audio reactivity, webcam input, image-URL loading, MIDI input, and video playback each require building with their own Cargo feature (off by default) — see [Feature-gated functions](#feature-gated-functions) above
+- `initVideo` (the `video` feature) additionally requires a standalone `ffmpeg` binary on `PATH` at runtime — it's spawned as a subprocess, not linked into this binary, so building hydra-rust itself never needs FFmpeg's dev libraries. Missing it just logs a warning rather than failing.
 
 ### Stub functions (accepted, but not yet implemented)
 
@@ -288,7 +301,7 @@ These are registered so scripts calling them don't hard-error, but they don't do
 | Function | Status |
 |----------|--------|
 | `initImage(idx, url)` | Real implementation behind the `image_url` feature: fetches the URL and decodes it (PNG/JPEG/GIF/WebP) in the background, then uploads it to the source slot once it's ready, through the same texture path webcam frames use. Without that feature, it's a no-op (returns the source as a chainable value, like real hydra.js) |
-| `initVideo(idx, url)` | No-op (returns the source as a chainable value) — no video file loading pipeline |
+| `initVideo(idx, url)` | Real implementation behind the `video` feature: streams frames from a local file or URL via a standalone `ffmpeg` subprocess (not linked into this binary — `ffmpeg` must be on `PATH` at runtime; missing it logs one clear warning rather than failing), looping indefinitely. Without that feature, it's a no-op (returns the source as a chainable value) |
 | `initGif(idx, url)` | Real implementation behind the `image_url` feature: fetches the URL, decodes every frame up front, and cycles through them by elapsed time once loaded, looping indefinitely — same texture path webcam frames use. Without that feature, it's a no-op (returns the source as a chainable value) |
 | `initStream(idx, url)` | No-op (returns the source as a chainable value) — no WebRTC/live-stream pipeline |
 | `initScreen(idx[, screen])` | No-op (returns the source as a chainable value) — no screen/display capture |

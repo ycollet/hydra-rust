@@ -4,14 +4,14 @@ use std::time::Instant;
 
 use eframe::egui;
 use egui::{Color32, FontId, TextBuffer};
-#[cfg(any(feature = "webcam", feature = "image_url"))]
+#[cfg(any(feature = "webcam", feature = "image_url", feature = "video"))]
 use hydra_rust::eval::SourceRequest;
 #[cfg(feature = "audio")]
 use hydra_rust::eval::AudioRequest;
 use hydra_rust::renderer::{self, RenderUniforms, ShaderRenderer};
 #[cfg(feature = "webcam")]
 use hydra_rust::source::{CameraStatus, SourceManager, NUM_SOURCES};
-#[cfg(all(feature = "image_url", not(feature = "webcam")))]
+#[cfg(all(any(feature = "image_url", feature = "video"), not(feature = "webcam")))]
 use hydra_rust::source::NUM_SOURCES;
 #[cfg(feature = "audio")]
 use hydra_rust::audio::AudioManager;
@@ -21,6 +21,8 @@ use hydra_rust::imageload::ImageManager;
 use hydra_rust::eval::MidiRequest;
 #[cfg(feature = "midi")]
 use hydra_rust::midi::MidiManager;
+#[cfg(feature = "video")]
+use hydra_rust::video::VideoManager;
 use serde::{Deserialize, Serialize};
 
 use crate::highlight::HydraHighlighter;
@@ -157,6 +159,8 @@ pub struct HydraApp {
     image_manager: ImageManager,
     #[cfg(feature = "midi")]
     midi_manager: MidiManager,
+    #[cfg(feature = "video")]
+    video_manager: VideoManager,
 }
 
 impl HydraApp {
@@ -203,6 +207,8 @@ impl HydraApp {
             image_manager: ImageManager::new(),
             #[cfg(feature = "midi")]
             midi_manager: MidiManager::new(),
+            #[cfg(feature = "video")]
+            video_manager: VideoManager::new(),
         };
 
         if let Some(path) = bank_load {
@@ -348,7 +354,7 @@ impl HydraApp {
                     renderer.upload_text(td);
                 }
                 let compile_errors = renderer.compile_buffers(&result.shaders, result.render_mode);
-                #[cfg(any(feature = "webcam", feature = "image_url"))]
+                #[cfg(any(feature = "webcam", feature = "image_url", feature = "video"))]
                 for req in &result.source_requests {
                     match req {
                         #[cfg(feature = "webcam")]
@@ -362,6 +368,10 @@ impl HydraApp {
                         #[cfg(feature = "image_url")]
                         SourceRequest::InitGif { slot, url } => {
                             self.image_manager.init_gif(*slot, url.clone());
+                        }
+                        #[cfg(feature = "video")]
+                        SourceRequest::InitVideo { slot, url } => {
+                            self.video_manager.init_video(*slot, url.clone());
                         }
                     }
                 }
@@ -480,6 +490,12 @@ impl HydraApp {
         #[cfg(feature = "image_url")]
         for slot in 0..NUM_SOURCES {
             if let Some(frame) = self.image_manager.poll(slot) {
+                renderer.upload_source(slot, &frame);
+            }
+        }
+        #[cfg(feature = "video")]
+        for slot in 0..NUM_SOURCES {
+            if let Some(frame) = self.video_manager.poll(slot) {
                 renderer.upload_source(slot, &frame);
             }
         }
@@ -856,6 +872,8 @@ impl eframe::App for HydraApp {
     fn on_exit(&mut self, _gl: Option<&glow::Context>) {
         #[cfg(feature = "webcam")]
         self.source_manager.stop_all();
+        #[cfg(feature = "video")]
+        self.video_manager.stop_all();
         self.session().save();
     }
 }
