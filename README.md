@@ -116,7 +116,7 @@ The microphone is only opened once a script actually uses one of these (calls a 
 | `a.setCutoff(c)` | Zeroes out bin values below this noise-floor threshold (default `0`) | `a.setCutoff(0.15)` |
 | `a.setScale(s)` | Multiplies every bin's value (default `1`) | `a.setScale(2)` |
 | `a.setSmooth(s)` | Exponential smoothing between frames, `0`-`1` (default `0.4`) | `a.setSmooth(0.8)` |
-| `a.show()` / `a.hide()` | No-op — no on-screen FFT debug graph exists here | `a.show()` |
+| `a.show()` / `a.hide()` | Shows/hides a small on-screen bar-graph overlay of the current FFT bins — an egui overlay standing in for real hydra.js's own on-screen debug graph, since nothing else here draws directly into the GL canvas | `a.show()` |
 
 ### `image_url` — load an image or animated GIF from a URL
 
@@ -149,7 +149,7 @@ A native port of the [hydra-midi](https://github.com/arnoson/hydra-midi) communi
 | `_note(...)` / `_cc(...)` / `_noteVelocity(...)` | Plain (non-chainable) equivalents, for use inside a `()=>` wrapper | `osc(1, 1, _note(60) * 0.5).out()` |
 | `midi.start()` | Connects to every available MIDI input device (required before any of the above reacts to anything) | `midi.start()` |
 | `midi.pause()` | Disconnects from all MIDI input devices | `midi.pause()` |
-| `midi.show()` / `.hide()` | No-op — no on-screen MIDI monitor exists here | `midi.show()` |
+| `midi.show()` / `.hide()` | Shows/hides an on-screen overlay listing currently-held notes (with velocity) and non-zero CC values — a "current state" snapshot rather than real hydra-midi's own scrolling raw-message log, simpler to implement and just as useful for confirming a controller is connected | `midi.show()` |
 | `midi.channel(n)` / `.input(n)` | Accepted, logged, ignored — channels/inputs are merged (see above) | `midi.channel(0)` |
 
 ### `video` — play a video file or URL as a source
@@ -310,11 +310,9 @@ These are registered so scripts calling them don't hard-error, but they don't do
 | `P5(...)` / `new P5(...)` | Returns a plain settable map (like `hydraText`) rather than hard-erroring, so an assignment (`let p1 = P5(...)`) and later property reads/writes on it still work — p5.js is a whole separate creative-coding framework with no Rust equivalent here. A handful of its most commonly-called instance methods (`hide`, `show`, `textSize`, `fill`) are additionally registered as no-ops on that map; the rest of its (large) API isn't |
 | `setFunction(descriptor)` | No-op — real hydra.js registers a custom GLSL source/color/combine function from a JS descriptor object + GLSL string; no dynamic function-registration or GLSL-embedding pipeline exists here |
 | `Scene(name)` | No-op — not a hydra.js API at all; some external VJ/live-coding integrations use it to switch named cue banks |
-| `a.show()` / `a.hide()` | No-op — no on-screen FFT debug graph to toggle |
 | `.value(fn)` (MIDI `note`/`cc`, `midi` feature) | Not implemented — each chain compiles to a static GLSL expression once, so there's nowhere to run an arbitrary per-frame Rhai closure the way a real per-frame JS callback would; calling it cleanly fails as "Function not found" |
 | `aft(...)` / `_aft(...)` (MIDI aftertouch, `midi` feature) | Not implemented at all — lower real-world usage than notes/CC |
 | `midi.channel(n)` / `.input(n)` | Accepted, logged, ignored — MIDI channels and input devices are all merged into one rather than faithfully filtered (see SPEC.md §6.1) |
-| `midi.show()` / `.hide()` | No-op — no on-screen MIDI monitor overlay to toggle |
 | `ease(name)` (pattern) | Accepted but not faithful — `smooth()` still interpolates linearly regardless of the named curve; no non-linear easing curves are implemented |
 | `screencap()` | No-op — saving/sharing a screenshot isn't supported |
 | `loadScript(url)` | No-op — no dynamic module loading. Some of the most commonly-loaded community extensions' functions are ported natively instead (`spiral`, `turb`, `uturb`, `unoise`, `whitenoise`, `colornoise`, `warp`, `cwarp`, `ncontour`, `pulse`, `pulsetrain`, `hextile`, `concentric`, `brick`, `wave`, `lissa`, `inversion`, `mirrorX`/`mirrorY`/`mirrorX2`/`mirrorY2`/`mirrorWrap`, `colreflect` — see SPEC.md §6); anything else the loaded script would have defined still won't exist |

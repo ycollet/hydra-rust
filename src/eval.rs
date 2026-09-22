@@ -55,6 +55,13 @@ pub enum AudioRequest {
     SetCutoff(f32),
     SetScale(f32),
     SetSmooth(f32),
+    /// `a.show()`/`a.hide()` - toggles the host's on-screen FFT-bins
+    /// overlay (see `HydraApp::show_audio_overlay`). Real hydra.js's own
+    /// debug graph is drawn on the same canvas the visuals render to;
+    /// here it's a separate egui overlay instead, since nothing else
+    /// draws directly into the GL output.
+    Show,
+    Hide,
 }
 
 #[cfg(feature = "midi")]
@@ -64,6 +71,14 @@ pub enum MidiRequest {
     Pause,
     SetCcSmooth { index: usize, factor: f32 },
     AdsrSlot { slot: usize, note: i64, a: f32, d: f32, s: f32, r: f32 },
+    /// `midi.show()`/`midi.hide()` - toggles the host's on-screen MIDI
+    /// monitor overlay (see `HydraApp::show_midi_overlay`). Shows the
+    /// currently-held notes/velocities and non-zero CC values rather than
+    /// real hydra-midi's own scrolling raw-message log - a "current
+    /// state" snapshot is simpler to implement and just as useful for
+    /// confirming a controller is connected and being read correctly.
+    Show,
+    Hide,
 }
 
 pub struct EvalResult {
@@ -1193,10 +1208,21 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
             });
         }
         // Real hydra.js's a.show()/a.hide() toggle an on-screen debug graph
-        // of the FFT bins; hydra-rust has no such overlay, so these are
-        // no-ops kept only so sketches calling them still evaluate.
-        engine.register_fn("show", |_a: Audio| {});
-        engine.register_fn("hide", |_a: Audio| {});
+        // of the FFT bins - here they toggle the host's own egui overlay
+        // (see `AudioRequest::Show`/`Hide`) instead of drawing into the GL
+        // canvas itself.
+        {
+            let s = state.clone();
+            engine.register_fn("show", move |_a: Audio| {
+                s.lock().unwrap().audio_requests.push(AudioRequest::Show);
+            });
+        }
+        {
+            let s = state.clone();
+            engine.register_fn("hide", move |_a: Audio| {
+                s.lock().unwrap().audio_requests.push(AudioRequest::Hide);
+            });
+        }
     }
 
     // Real-world `hydra-midi` community extension (loadScript-loaded in
@@ -1328,12 +1354,23 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
             });
         }
         // Real hydra-midi's midi.show()/.hide() toggle an on-screen MIDI
-        // monitor overlay; no such overlay exists here, so these are
-        // no-ops. `.channel(n)`/`.input(n)` set script-wide defaults for
-        // per-channel/per-input filtering, which this port doesn't do
-        // faithfully (see the module doc comment) - accepted and ignored.
-        engine.register_fn("show", |_m: Midi| {});
-        engine.register_fn("hide", |_m: Midi| {});
+        // monitor overlay - here they toggle the host's own egui overlay
+        // (see `MidiRequest::Show`/`Hide`) instead. `.channel(n)`/
+        // `.input(n)` set script-wide defaults for per-channel/per-input
+        // filtering, which this port doesn't do faithfully (see the
+        // module doc comment) - accepted and ignored.
+        {
+            let s = state.clone();
+            engine.register_fn("show", move |_m: Midi| {
+                s.lock().unwrap().midi_requests.push(MidiRequest::Show);
+            });
+        }
+        {
+            let s = state.clone();
+            engine.register_fn("hide", move |_m: Midi| {
+                s.lock().unwrap().midi_requests.push(MidiRequest::Hide);
+            });
+        }
         engine.register_fn("channel", |_m: Midi, _n: Dynamic| {});
         engine.register_fn("input", |_m: Midi, _n: Dynamic| {});
     }

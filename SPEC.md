@@ -594,7 +594,7 @@ not found").
 | `.scale(factor)` | Multiplies a value (any of the above) |
 | `_note(...)` / `_cc(...)` / `_noteVelocity(...)` | The plain (non-chainable) equivalents of `note(...)`, `cc(...)`, and `note(...).velocity()`, for use inside a `()=>` wrapper (stripped by `arrow.rs`, see §4 step 14) |
 | `midi.start()` / `.pause()` | Connects to (or disconnects from) every available MIDI input port - see below. `.start()` returns `midi` again, so `midi.start().show()` (the documented real hydra-midi idiom) still parses |
-| `midi.show()` / `.hide()` | No-op - real hydra-midi's on-screen MIDI monitor overlay doesn't exist here |
+| `midi.show()` / `.hide()` | Shows/hides an egui overlay (`HydraApp::show_midi_overlay`) listing currently-held notes (with velocity) and non-zero CC values - a "current state" snapshot rather than real hydra-midi's own scrolling raw-message log (see below) |
 | `midi.channel(n)` / `.input(n)` | Accepted, logged, ignored - see below |
 
 Note names use standard scientific-pitch-notation/General-MIDI numbering
@@ -611,6 +611,12 @@ fully implement (e.g. `ease()`, §7):
   faithfully filtering per real hydra-midi's own wildcard-keyed system -
   a reasonable trade for a typical one-controller setup.
 - **Aftertouch (`aft`/`_aft`) isn't implemented at all.**
+- **`midi.show()`'s overlay is a state snapshot, not a message log.** Real
+  hydra-midi's monitor scrolls raw incoming MIDI messages as they arrive;
+  this shows the currently-held notes and non-zero CC values instead
+  (`MidiFrame`'s own per-frame snapshot, already computed for the GLSL
+  uniforms), which is simpler to implement and just as useful for
+  confirming a controller is connected and being read correctly.
 - **`.value(fn)` isn't implemented.** Each hydra-rust chain compiles to a
   *static* GLSL expression once, so there's nowhere to run an arbitrary
   Rhai closure per-frame the way a real per-frame JS callback would;
@@ -654,7 +660,7 @@ functionality, all off by default:
 | Feature | Deps | Enables |
 |---|---|---|
 | `webcam` | `nokhwa` | `initCam(slot[, cameraIndex])`, populating `s0`-`s3` from a physical camera |
-| `audio` | `cpal`, `rustfft` | `a.fft[i]`, `a.setBins(n)`, `a.setCutoff(c)`, `a.setScale(s)`, `a.setSmooth(s)`, `a.show()`/`a.hide()` (no-op) |
+| `audio` | `cpal`, `rustfft` | `a.fft[i]`, `a.setBins(n)`, `a.setCutoff(c)`, `a.setScale(s)`, `a.setSmooth(s)`, `a.show()`/`a.hide()` (toggles an on-screen FFT-bins overlay) |
 | `image_url` | `image`, `ureq` | `initImage(slot, url)` / `initGif(slot, url)`, fetching and decoding the URL in the background (see `imageload.rs`) and populating `s0`-`s3` from it, the same way `initCam` populates them from a camera |
 | `midi` | `midir` | `note(...)`, `cc(...)`, `_note`/`_cc`/`_noteVelocity`, `midi.*` - a native port of the real-world `hydra-midi` extension, see §6.1 |
 | `video` | `ffmpeg-sidecar` | `initVideo(slot, url)`, streaming decoded frames from a local file or URL via a standalone `ffmpeg` subprocess (see `video.rs`) into `s0`-`s3`. Unlike the other deps here, `ffmpeg` itself isn't a Rust crate linked into the binary - it must be a separate executable on `PATH` at *runtime* |
@@ -682,7 +688,7 @@ full, currently-accurate list (kept there rather than duplicated here, so
 there's one place to update). As of this writing it covers `initScreen`
 (return a chainable no-op source, see §5; `initImage`/`initGif`/
 `initVideo` are real implementations behind `image_url`/`video`
-respectively, see §8), `setResolution`, `screencap`, `a.show()`/`a.hide()`,
+respectively, see §8), `setResolution`, `screencap`,
 `ease` (patterns, see §7), `loadScript` (see §6 for the community-extension
 functions ported natively instead), and
 `o0-o3.setNearest()`/`.setLinear()`/`.setMode()`.

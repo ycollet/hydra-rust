@@ -220,6 +220,31 @@ fn midi_start_requires_no_other_setup_to_evaluate() {
     use hydra_rust::eval::MidiRequest;
     let result = eval("midi.start().show()\nmidi.channel(0)\nosc(60).out()").unwrap();
     assert!(result.midi_requests.iter().any(|r| matches!(r, MidiRequest::Start)));
+    assert!(result.midi_requests.iter().any(|r| matches!(r, MidiRequest::Show)));
+}
+
+#[test]
+#[cfg(feature = "midi")]
+fn midi_show_and_hide_queue_requests_without_touching_real_midi() {
+    use hydra_rust::eval::MidiRequest;
+    let result = eval("midi.hide()\nosc(60).out()").unwrap();
+    assert!(result.midi_requests.iter().any(|r| matches!(r, MidiRequest::Hide)));
+    assert!(!result.midi_requests.iter().any(|r| matches!(r, MidiRequest::Show)));
+}
+
+#[test]
+#[cfg(feature = "audio")]
+fn audio_show_and_hide_queue_requests_without_touching_the_microphone() {
+    // eval() never opens the microphone itself either way (see
+    // audio.rs's AudioManager::ensure_started, only called from app.rs) -
+    // a.show()/a.hide() just toggle the host's FFT overlay, recorded here
+    // the same way the a.set*() setters already are.
+    use hydra_rust::eval::AudioRequest;
+    let result = eval("a.show()\nosc(60, 0.1, a.fft[0]).out()").unwrap();
+    assert!(result.audio_requests.iter().any(|r| matches!(r, AudioRequest::Show)));
+
+    let result = eval("a.hide()\nosc(60).out()").unwrap();
+    assert!(result.audio_requests.iter().any(|r| matches!(r, AudioRequest::Hide)));
 }
 
 #[test]

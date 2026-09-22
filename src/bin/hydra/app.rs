@@ -155,10 +155,27 @@ pub struct HydraApp {
     source_manager: SourceManager,
     #[cfg(feature = "audio")]
     audio_manager: AudioManager,
+    /// Toggled by a script's `a.show()`/`a.hide()` - see `show_audio_overlay`.
+    #[cfg(feature = "audio")]
+    audio_overlay_visible: bool,
+    /// This frame's FFT bins, cached from `paint_background`'s own poll so
+    /// `show_audio_overlay` (called later, from `update()`) doesn't need to
+    /// poll `audio_manager` a second time.
+    #[cfg(feature = "audio")]
+    last_fft: [f32; hydra_rust::audio::NUM_FFT_BINS],
     #[cfg(feature = "image_url")]
     image_manager: ImageManager,
     #[cfg(feature = "midi")]
     midi_manager: MidiManager,
+    /// Toggled by a script's `midi.show()`/`midi.hide()` - see `show_midi_overlay`.
+    #[cfg(feature = "midi")]
+    midi_overlay_visible: bool,
+    /// This frame's per-note velocity and per-CC value, cached from
+    /// `paint_background`'s own poll - same reasoning as `last_fft`.
+    #[cfg(feature = "midi")]
+    last_midi_velocity: [f32; hydra_rust::midi::NUM_MIDI_NOTES],
+    #[cfg(feature = "midi")]
+    last_midi_cc: [f32; hydra_rust::midi::NUM_MIDI_CC],
     #[cfg(feature = "video")]
     video_manager: VideoManager,
 }
@@ -203,10 +220,20 @@ impl HydraApp {
             source_manager: SourceManager::new(),
             #[cfg(feature = "audio")]
             audio_manager: AudioManager::new(),
+            #[cfg(feature = "audio")]
+            audio_overlay_visible: false,
+            #[cfg(feature = "audio")]
+            last_fft: [0.0; hydra_rust::audio::NUM_FFT_BINS],
             #[cfg(feature = "image_url")]
             image_manager: ImageManager::new(),
             #[cfg(feature = "midi")]
             midi_manager: MidiManager::new(),
+            #[cfg(feature = "midi")]
+            midi_overlay_visible: false,
+            #[cfg(feature = "midi")]
+            last_midi_velocity: [0.0; hydra_rust::midi::NUM_MIDI_NOTES],
+            #[cfg(feature = "midi")]
+            last_midi_cc: [0.0; hydra_rust::midi::NUM_MIDI_CC],
             #[cfg(feature = "video")]
             video_manager: VideoManager::new(),
         };
@@ -395,6 +422,8 @@ impl HydraApp {
                             AudioRequest::SetCutoff(c) => self.audio_manager.set_cutoff(*c),
                             AudioRequest::SetScale(s) => self.audio_manager.set_scale(*s),
                             AudioRequest::SetSmooth(s) => self.audio_manager.set_smooth(*s),
+                            AudioRequest::Show => self.audio_overlay_visible = true,
+                            AudioRequest::Hide => self.audio_overlay_visible = false,
                         }
                     }
                 }
@@ -413,6 +442,8 @@ impl HydraApp {
                         MidiRequest::AdsrSlot { slot, note, a, d, s, r } => {
                             self.midi_manager.set_adsr_slot(*slot, *note, *a, *d, *s, *r);
                         }
+                        MidiRequest::Show => self.midi_overlay_visible = true,
+                        MidiRequest::Hide => self.midi_overlay_visible = false,
                     }
                 }
                 if compile_errors.is_empty() {
@@ -504,9 +535,18 @@ impl HydraApp {
         let fft = self.audio_manager.poll();
         #[cfg(not(feature = "audio"))]
         let fft = [0.0; hydra_rust::audio::NUM_FFT_BINS];
+        #[cfg(feature = "audio")]
+        {
+            self.last_fft = fft;
+        }
 
         #[cfg(feature = "midi")]
         let midi_frame = self.midi_manager.poll();
+        #[cfg(feature = "midi")]
+        {
+            self.last_midi_velocity = midi_frame.velocity;
+            self.last_midi_cc = midi_frame.cc;
+        }
         #[cfg(not(feature = "midi"))]
         let midi_frame = {
             struct EmptyMidiFrame {
@@ -681,6 +721,91 @@ impl HydraApp {
                             .color(Color32::from_rgb(255, 200, 100))
                             .monospace(),
                         );
+                    });
+            });
+    }
+
+    /// A script's `a.show()`/`a.hide()` toggle this - a small bar-graph
+    /// overlay of the current FFT bins, standing in for real hydra.js's own
+    /// on-screen debug graph (which draws directly onto the canvas the
+    /// visuals render to; nothing else here draws into the GL output, so
+    /// this is a separate egui overlay instead).
+    #[cfg(feature = "audio")]
+    fn show_audio_overlay(&self, ctx: &egui::Context) {
+        if !self.audio_overlay_visible {
+            return;
+        }
+        egui::Area::new(egui::Id::new("audio_fft_overlay"))
+            .anchor(egui::Align2::LEFT_BOTTOM, [20.0, -20.0])
+            .interactable(false)
+            .show(ctx, |ui| {
+                egui::Frame::NONE
+                    .fill(Color32::from_rgba_unmultiplied(0, 0, 0, 160))
+                    .inner_margin(egui::Margin::symmetric(8, 6))
+                    .show(ui, |ui| {
+                        ui.label(
+                            egui::RichText::new("a.fft")
+                                .small()
+                                .color(Color32::from_gray(200)),
+                        );
+                        let n = hydra_rust::audio::NUM_FFT_BINS;
+                        let (rect, _) =
+                            ui.allocate_exact_size(egui::vec2(8.0 * n as f32 * 2.0, 40.0), egui::Sense::hover());
+                        let painter = ui.painter();
+                        let bar_w = rect.width() / n as f32;
+                        for (i, v) in self.last_fft.iter().enumerate() {
+                            let h = v.clamp(0.0, 1.0) * rect.height();
+                            let x0 = rect.left() + i as f32 * bar_w;
+                            let bar = egui::Rect::from_min_max(
+                                egui::pos2(x0 + 1.0, rect.bottom() - h),
+                                egui::pos2(x0 + bar_w - 1.0, rect.bottom()),
+                            );
+                            painter.rect_filled(bar, 0.0, Color32::from_rgb(80, 220, 255));
+                        }
+                    });
+            });
+    }
+
+    /// A script's `midi.show()`/`midi.hide()` toggle this - lists
+    /// currently-held notes (with velocity) and non-zero CC values. Real
+    /// hydra-midi's own monitor is a scrolling log of raw incoming
+    /// messages; this shows the current state instead, which is simpler to
+    /// implement and just as useful for confirming a controller is
+    /// connected and being read correctly.
+    #[cfg(feature = "midi")]
+    fn show_midi_overlay(&self, ctx: &egui::Context) {
+        if !self.midi_overlay_visible {
+            return;
+        }
+        egui::Area::new(egui::Id::new("midi_monitor_overlay"))
+            .anchor(egui::Align2::RIGHT_BOTTOM, [-20.0, -20.0])
+            .interactable(false)
+            .show(ctx, |ui| {
+                egui::Frame::NONE
+                    .fill(Color32::from_rgba_unmultiplied(0, 0, 0, 160))
+                    .inner_margin(egui::Margin::symmetric(8, 6))
+                    .show(ui, |ui| {
+                        ui.label(
+                            egui::RichText::new("MIDI")
+                                .small()
+                                .color(Color32::from_gray(200)),
+                        );
+                        let mut any = false;
+                        for (note, v) in self.last_midi_velocity.iter().enumerate() {
+                            if *v > 0.0 {
+                                any = true;
+                                ui.small(format!("note {note}: {v:.2}"));
+                            }
+                        }
+                        for (idx, v) in self.last_midi_cc.iter().enumerate() {
+                            if *v > 0.0 {
+                                any = true;
+                                ui.small(format!("cc {idx}: {v:.2}"));
+                            }
+                        }
+                        if !any {
+                            ui.small("(no input yet)");
+                        }
                     });
             });
     }
@@ -867,6 +992,10 @@ impl eframe::App for HydraApp {
         self.show_editor(ctx);
         self.show_error_toast(ctx);
         self.show_pending_confirmation_banner(ctx);
+        #[cfg(feature = "audio")]
+        self.show_audio_overlay(ctx);
+        #[cfg(feature = "midi")]
+        self.show_midi_overlay(ctx);
     }
 
     fn on_exit(&mut self, _gl: Option<&glow::Context>) {

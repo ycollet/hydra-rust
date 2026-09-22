@@ -275,7 +275,7 @@ The microphone only opens once a script actually uses one of these (a setter, or
 | `a.setCutoff(c)` | Zeroes out bin values below this noise-floor threshold (default `0`) | `a.setCutoff(0.15)` |
 | `a.setScale(s)` | Multiplies every bin's value (default `1`) | `a.setScale(2)` |
 | `a.setSmooth(s)` | Exponential smoothing between frames, `0`-`1` (default `0.4`) | `a.setSmooth(0.8)` |
-| `a.show()` / `a.hide()` | No-op — no on-screen FFT debug graph exists here | `a.show()` |
+| `a.show()` / `a.hide()` | Shows/hides a small on-screen bar-graph overlay of the current FFT bins | `a.show()` |
 
 ## Feature: `image_url`
 
@@ -316,7 +316,7 @@ and input devices are merged into one rather than filtered separately.
 | `_noteVelocity(nameOrNumber[, channel])` | Plain (non-chainable) equivalent of `note(...).velocity()` | `osc(1, 1, _noteVelocity(60)).out()` |
 | `midi.start()` | Connects to every available MIDI input device — required before anything above reacts to input. Returns `midi` again, so `midi.start().show()` still parses | `midi.start()` |
 | `midi.pause()` | Disconnects from all MIDI input devices | `midi.pause()` |
-| `midi.show()` / `.hide()` | No-op — no on-screen MIDI monitor exists here | `midi.show()` |
+| `midi.show()` / `.hide()` | Shows/hides an on-screen overlay listing currently-held notes (with velocity) and non-zero CC values — a "current state" snapshot rather than real hydra-midi's own scrolling raw-message log | `midi.show()` |
 | `midi.channel(n)` / `.input(n)` | Accepted, logged, ignored — channels/inputs are merged (see above) | `midi.channel(0)` |
 
 ## Feature: `video`
