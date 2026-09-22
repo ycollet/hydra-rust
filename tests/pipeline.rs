@@ -383,3 +383,34 @@ fn hydratext_config_assignments_are_harmless_no_ops() {
     let src = "hydraText.font = \"serif\";\nhydraText.lineWidth = \"2%\";\nosc(60).out()";
     assert!(eval(src).is_ok());
 }
+
+#[test]
+fn set_resolution_with_static_args_sets_a_render_resolution_override() {
+    let result = eval("setResolution(320, 240)\nosc(60).out()").unwrap();
+    assert_eq!(result.render_resolution, Some((320, 240)));
+}
+
+#[test]
+fn set_resolution_with_a_reactive_arg_is_treated_as_no_override() {
+    // window.innerWidth/innerHeight compile to a reactive GLSL expression,
+    // not a plain number - there's no per-frame callback to re-evaluate it
+    // against, so this must NOT be mistaken for a real (0, 0) override.
+    let result = eval("setResolution(window.innerWidth, window.innerHeight)\nosc(60).out()").unwrap();
+    assert!(result.render_resolution.is_none());
+}
+
+#[test]
+fn set_nearest_and_set_mode_record_the_requested_buffer_filter() {
+    use hydra_rust::eval::BufferFilter;
+    let result = eval("o0.setNearest()\no1.setMode(\"nearest\")\nosc(60).out()").unwrap();
+    assert_eq!(result.buffer_filter[0], Some(BufferFilter::Nearest));
+    assert_eq!(result.buffer_filter[1], Some(BufferFilter::Nearest));
+    assert_eq!(result.buffer_filter[2], None);
+    assert_eq!(result.buffer_filter[3], None);
+}
+
+#[test]
+fn set_mode_with_an_unrecognized_string_is_ignored_not_a_hard_error() {
+    let result = eval("o0.setMode(\"blah\")\nosc(60).out()").unwrap();
+    assert!(result.buffer_filter[0].is_none());
+}

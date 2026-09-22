@@ -4,7 +4,7 @@ use std::sync::Arc;
 use glow::{HasContext, PixelUnpackData};
 
 use crate::audio::NUM_FFT_BINS;
-use crate::eval::RenderMode;
+use crate::eval::{BufferFilter, RenderMode};
 use crate::midi::{NUM_MIDI_CC, NUM_MIDI_ENVELOPES, NUM_MIDI_NOTES};
 use crate::shader;
 use crate::source::{SourceFrame, NUM_SOURCES};
@@ -167,6 +167,30 @@ impl ShaderRenderer {
                         PixelUnpackData::Slice(None),
                     );
                 }
+            }
+            self.gl.bind_texture(glow::TEXTURE_2D, None);
+        }
+    }
+
+    /// `o0-o3.setNearest()`/`.setLinear()`/`.setMode(...)` - sets a
+    /// buffer's texture sampling mode. Applies to both of that buffer's
+    /// ping-pong textures (`texture[0]`/`[1]`, sampled interchangeably
+    /// frame-to-frame). A texture's filter parameter is independent of
+    /// its image data, so this survives later `ensure_resolution` resizes
+    /// without needing to be reapplied there.
+    pub fn set_buffer_filter(&mut self, buf: usize, mode: BufferFilter) {
+        if buf >= NUM_BUFFERS {
+            return;
+        }
+        let f = match mode {
+            BufferFilter::Linear => glow::LINEAR,
+            BufferFilter::Nearest => glow::NEAREST,
+        } as i32;
+        unsafe {
+            for tex in self.snapshot.targets[buf].texture {
+                self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                self.gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, f);
+                self.gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, f);
             }
             self.gl.bind_texture(glow::TEXTURE_2D, None);
         }

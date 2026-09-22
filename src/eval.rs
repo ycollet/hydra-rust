@@ -35,6 +35,18 @@ pub enum RenderMode {
     All,
 }
 
+/// `o0-o3.setNearest()`/`.setLinear()`/`.setMode(...)` - a buffer's texture
+/// sampling mode. Unlike `RenderMode` (which genuinely resets every
+/// evaluation), this is meant to be sticky: real hydra.js's WebGL texture
+/// object isn't recreated on a re-eval either, so not calling
+/// `setNearest()`/etc. again on a later re-eval should leave whatever was
+/// last set alone - see `PatchState::buffer_filter`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BufferFilter {
+    Linear,
+    Nearest,
+}
+
 #[cfg(any(feature = "webcam", feature = "image_url", feature = "video"))]
 #[derive(Debug, Clone)]
 pub enum SourceRequest {
@@ -85,6 +97,15 @@ pub struct EvalResult {
     pub shaders: [Option<String>; 4],
     pub render_mode: RenderMode,
     pub text_data: Option<TextData>,
+    /// Set only if *this* evaluation's script called `setResolution` with
+    /// two statically-known numeric arguments - `None` (including for a
+    /// reactive-argument call like `setResolution(window.innerWidth,
+    /// window.innerHeight)`) means "no override, track the window size."
+    pub render_resolution: Option<(u32, u32)>,
+    /// Set only for buffers *this* evaluation's script actually called
+    /// `setNearest`/`setLinear`/`setMode` on - see `BufferFilter`'s own
+    /// doc comment for why this doesn't reset like `render_mode` does.
+    pub buffer_filter: [Option<BufferFilter>; 4],
     #[cfg(any(feature = "webcam", feature = "image_url", feature = "video"))]
     pub source_requests: Vec<SourceRequest>,
     #[cfg(feature = "audio")]
@@ -555,6 +576,19 @@ fn dyn_to_f64(d: Dynamic) -> f64 {
     d.as_float().unwrap_or_else(|_| d.as_int().map(|i| i as f64).unwrap_or(0.0))
 }
 
+/// Like `dyn_to_f64`, but returns `None` for anything that isn't a plain
+/// number - deliberately *not* falling back to `0.0` for a reactive
+/// `GlslExpr` (e.g. `window.innerWidth`) or anything else, since a caller
+/// treating that as a real, statically-known value would be wrong (see
+/// `setResolution`'s registration for why this matters).
+fn dyn_as_static_u32(d: &Dynamic) -> Option<u32> {
+    if let Ok(v) = d.as_int() {
+        Some(v.max(0) as u32)
+    } else {
+        d.as_float().ok().map(|v| v.max(0.0) as u32)
+    }
+}
+
 fn fmt_f(v: f64) -> String {
     if v.fract() == 0.0 { format!("{v:.1}") } else { format!("{v}") }
 }
@@ -724,6 +758,8 @@ struct PatchState {
     buffers: [Option<Node>; 4],
     render_mode: RenderMode,
     text_data: Option<TextData>,
+    render_resolution: Option<(u32, u32)>,
+    buffer_filter: [Option<BufferFilter>; 4],
     #[cfg(any(feature = "webcam", feature = "image_url", feature = "video"))]
     source_requests: Vec<SourceRequest>,
     #[cfg(feature = "audio")]
@@ -1057,6 +1093,8 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
         buffers: [None, None, None, None],
         render_mode: RenderMode::default(),
         text_data: None,
+        render_resolution: None,
+        buffer_filter: [None; 4],
         #[cfg(any(feature = "webcam", feature = "image_url", feature = "video"))]
         source_requests: Vec::new(),
         #[cfg(feature = "audio")]
@@ -1462,30 +1500,67 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
     });
     // Real sketches often call this with reactive values (e.g.
     // `setResolution(window.innerWidth, window.innerHeight)`), not just
-    // plain numbers - accept `Dynamic` so those don't hard-fail with
-    // "Function not found" on top of this being an already-documented no-op.
-    engine.register_fn("setResolution", |w: Dynamic, h: Dynamic| {
-        log::warn!(
-            "setResolution({}, {}) ignored: script-driven resize is not supported",
-            dyn_to_f64(w),
-            dyn_to_f64(h)
-        );
-    });
+    // plain numbers - accept `Dynamic`. Only a *statically* known width/
+    // height (see `dyn_as_static_u32`) sets a real override; a reactive
+    // argument is deliberately treated the same as "not called" (i.e.
+    // keep tracking the window size), since that's already the correct
+    // behavior for the `window.innerWidth`/`innerHeight` idiom - there's
+    // no per-frame callback here to re-evaluate a reactive expression
+    // against, the same fundamental limit already documented for MIDI's
+    // `.value(fn)`. Clamped to a sane ceiling as a light guard against a
+    // copy-pasted/untrusted script requesting an enormous GPU allocation.
+    {
+        let s = state.clone();
+        engine.register_fn("setResolution", move |w: Dynamic, h: Dynamic| {
+            if let (Some(w), Some(h)) = (dyn_as_static_u32(&w), dyn_as_static_u32(&h)) {
+                s.lock().unwrap().render_resolution =
+                    Some((w.clamp(1, 4096), h.clamp(1, 4096)));
+            }
+        });
+    }
     // A widely-copy-pasted community extension adds o0-o3.setNearest()/
-    // .setLinear()/.setMode("nearest"|"linear") to toggle a buffer's texture
-    // filtering. hydra-rust always samples buffers with linear filtering
-    // (see renderer.rs) and has no per-buffer sampler state to switch, so
-    // these are no-ops kept only so sketches calling them still evaluate
-    // their other effects instead of hard erroring at this line.
-    engine.register_fn("setNearest", |buf: i64| {
-        log::warn!("o{buf}.setNearest() ignored: per-buffer texture filtering is not supported");
-    });
-    engine.register_fn("setLinear", |buf: i64| {
-        log::warn!("o{buf}.setLinear() ignored: per-buffer texture filtering is not supported");
-    });
-    engine.register_fn("setMode", |buf: i64, mode: ImmutableString| {
-        log::warn!("o{buf}.setMode(\"{mode}\") ignored: per-buffer texture filtering is not supported");
-    });
+    // .setLinear()/.setMode("nearest"|"linear") to toggle a buffer's
+    // texture filtering (see `BufferFilter`, applied in renderer.rs).
+    {
+        let s = state.clone();
+        engine.register_fn("setNearest", move |buf: i64| {
+            if (0..4).contains(&buf) {
+                s.lock().unwrap().buffer_filter[buf as usize] = Some(BufferFilter::Nearest);
+            } else {
+                log::warn!("o{buf}.setNearest() ignored: buffer index must be 0-3");
+            }
+        });
+    }
+    {
+        let s = state.clone();
+        engine.register_fn("setLinear", move |buf: i64| {
+            if (0..4).contains(&buf) {
+                s.lock().unwrap().buffer_filter[buf as usize] = Some(BufferFilter::Linear);
+            } else {
+                log::warn!("o{buf}.setLinear() ignored: buffer index must be 0-3");
+            }
+        });
+    }
+    {
+        let s = state.clone();
+        engine.register_fn("setMode", move |buf: i64, mode: ImmutableString| {
+            let parsed = match mode.to_lowercase().as_str() {
+                "nearest" => Some(BufferFilter::Nearest),
+                "linear" => Some(BufferFilter::Linear),
+                _ => {
+                    log::warn!("o{buf}.setMode(\"{mode}\") ignored: expected \"nearest\" or \"linear\"");
+                    None
+                }
+            };
+            if let Some(mode) = parsed {
+                if (0..4).contains(&buf) {
+                    s.lock().unwrap().buffer_filter[buf as usize] = Some(mode);
+                } else {
+                    log::warn!("o{buf}.setMode(\"{mode:?}\") ignored: buffer index must be 0-3");
+                }
+            }
+        });
+    }
     engine.register_fn("screencap", || {
         log::warn!("screencap() ignored: saving a screenshot is not supported");
     });
@@ -1626,6 +1701,8 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
         shaders,
         render_mode: patch.render_mode,
         text_data: patch.text_data.take(),
+        render_resolution: patch.render_resolution,
+        buffer_filter: patch.buffer_filter,
         #[cfg(any(feature = "webcam", feature = "image_url", feature = "video"))]
         source_requests: std::mem::take(&mut patch.source_requests),
         #[cfg(feature = "audio")]
@@ -1851,6 +1928,19 @@ mod tests {
         assert_eq!(fmt_f(0.1), "0.1");
         assert_eq!(fmt_f(-0.5), "-0.5");
         assert_eq!(fmt_f(60.25), "60.25");
+    }
+
+    // --- dyn_as_static_u32 ---
+
+    #[test]
+    fn dyn_as_static_u32_accepts_plain_numbers() {
+        assert_eq!(dyn_as_static_u32(&Dynamic::from(320_i64)), Some(320));
+        assert_eq!(dyn_as_static_u32(&Dynamic::from(240.0_f64)), Some(240));
+    }
+
+    #[test]
+    fn dyn_as_static_u32_rejects_a_reactive_expression() {
+        assert_eq!(dyn_as_static_u32(&Dynamic::from(GlslExpr("iResolution.x".into()))), None);
     }
 
     // --- fill_args ---

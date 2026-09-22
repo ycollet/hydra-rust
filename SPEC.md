@@ -572,6 +572,8 @@ itself is a permanent no-op, see README.md):
 | `render()` / `render(bufIdx)` | Display mode (see §2) |
 | `hush()` | Clear all buffers (see §2) |
 | `random()` / `random(...)` | One-shot pseudo-random `f64` in `[0, 1)`, called once at script-eval time (target of `Math.random()`, see §4). Accepts and ignores 0-2 extra arguments, matching real JS's own excess-argument tolerance (real `Math.random()` takes none either) rather than implementing an actual ranged random some sketches seem to expect |
+| `setResolution(w, h)` | Overrides the render buffers' own resolution, independent of the actual window size - the final display is still stretched to fill the window regardless (the classic hydra.js low-res/pixelation trick). Only applies when `w`/`h` are *statically* known numbers (clamped to `1..=4096`); a reactive argument (e.g. `setResolution(window.innerWidth, window.innerHeight)`, a common real-sketch idiom) is treated as "no override" instead, since there's no per-frame callback here to re-evaluate a reactive expression against - the same limitation as MIDI's `.value(fn)` (§6.1). Sticky: an evaluation that doesn't call `setResolution` at all leaves a previous override in place, rather than reverting to the window size |
+| `o0-o3.setNearest()` / `.setLinear()` / `.setMode("nearest"\|"linear")` | Sets that buffer's texture sampling mode (both its ping-pong textures). Sticky like `setResolution`, unlike `render_mode` (§2) - matches real hydra.js, where the WebGL texture object isn't recreated on a re-eval either, so not calling these again on a later evaluation leaves whatever was last set alone. An unrecognized `setMode(...)` string is logged and ignored, not a hard error |
 
 ### 6.1 MIDI (`midi` feature)
 
@@ -688,10 +690,10 @@ full, currently-accurate list (kept there rather than duplicated here, so
 there's one place to update). As of this writing it covers `initScreen`
 (return a chainable no-op source, see §5; `initImage`/`initGif`/
 `initVideo` are real implementations behind `image_url`/`video`
-respectively, see §8), `setResolution`, `screencap`,
-`ease` (patterns, see §7), `loadScript` (see §6 for the community-extension
-functions ported natively instead), and
-`o0-o3.setNearest()`/`.setLinear()`/`.setMode()`.
+respectively, see §8; `setResolution`/`o0-o3.setNearest()`/`.setLinear()`/
+`.setMode()` are real too, see §6), `screencap`,
+`ease` (patterns, see §7), and `loadScript` (see §6 for the community-extension
+functions ported natively instead).
 
 Not registered at all, and not silently tolerated: `a.settings[i].cutoff =
 ...` (real hydra.js exposes indexable, mutable per-bin audio config; this

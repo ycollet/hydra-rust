@@ -193,6 +193,10 @@ Use another chain's color output to distort a chain's coordinates. Same `other` 
 | `render` | *(none)* or `bufIdx` | Sets the display mode: all 4 buffers in a 2x2 grid, or just buffer `bufIdx` | `osc().out(); render()` |
 | `hush` | *(none)* | Clears all four buffers and resets `o0` to solid black | `hush()` |
 | `random` | *(none)*, or 0-2 ignored extra args | A one-shot pseudo-random `f64` in `[0, 1)`, computed once at script-eval time (not per-frame) — the target of `Math.random()` | `osc(random() * 100, 0.1, 0).out()` |
+| `setResolution` | `w, h` (must be static numbers, clamped to `1..=4096`) | Overrides the render buffers' own resolution, independent of the window size — the display still stretches to fill the window (the classic low-res/pixelation trick). A reactive argument (e.g. `window.innerWidth`) is treated as "no override" instead, since there's no per-frame callback to re-evaluate it against. Sticky — persists across evaluations that don't call it again | `setResolution(320, 240)` |
+| `o0`-`o3`.`setNearest()` | *(none)* | Sets that buffer's texture sampling to nearest-neighbor (blocky) instead of linear. Sticky, like `setResolution` | `o0.setNearest()` |
+| `o0`-`o3`.`setLinear()` | *(none)* | Sets that buffer's texture sampling back to linear (the default) | `o0.setLinear()` |
+| `o0`-`o3`.`setMode(name)` | `name: "nearest"` or `"linear"` | Same as `setNearest`/`setLinear`, chosen by string. An unrecognized name is logged and ignored | `o0.setMode("nearest")` |
 
 ## Reactive values
 
@@ -376,7 +380,7 @@ detail on the `.bhr`/`.shr` formats.
 
 A handful of functions are registered (so a script calling them doesn't hard-error) but don't
 do anything real, or only partially implement real hydra.js/community-extension behavior —
-`initStream`, `initScreen`, `setResolution`, `P5(...)`, `setFunction`, `Scene(...)`,
+`initStream`, `initScreen`, `P5(...)`, `setFunction`, `Scene(...)`,
 `loadScript`, `ease` (non-linear curves), MIDI aftertouch, `.value(fn)`, and a few others. See
 [README.md's stub-function table](README.md#stub-functions-accepted-but-not-yet-implemented)
 for the complete, currently-accurate list with rationale for each, and SPEC.md §9 for the

@@ -151,6 +151,10 @@ pub struct HydraApp {
     /// Set from `-bs/--bank-save`; when present, `Alt+X` writes straight
     /// here instead of prompting a save dialog.
     bank_export_path: Option<PathBuf>,
+    /// Set by a script's `setResolution(w, h)` (static numeric args only -
+    /// see `dyn_as_static_u32` in eval.rs) - `None` means "no override,
+    /// track the window size" (`paint_background`'s existing behavior).
+    render_resolution_override: Option<(u32, u32)>,
     #[cfg(feature = "webcam")]
     source_manager: SourceManager,
     #[cfg(feature = "audio")]
@@ -216,6 +220,7 @@ impl HydraApp {
             current_bank: session.current_bank,
             active_slot: None,
             bank_export_path: bank_save,
+            render_resolution_override: None,
             #[cfg(feature = "webcam")]
             source_manager: SourceManager::new(),
             #[cfg(feature = "audio")]
@@ -381,6 +386,12 @@ impl HydraApp {
                     renderer.upload_text(td);
                 }
                 let compile_errors = renderer.compile_buffers(&result.shaders, result.render_mode);
+                self.render_resolution_override = result.render_resolution;
+                for (i, filter) in result.buffer_filter.iter().enumerate() {
+                    if let Some(mode) = filter {
+                        renderer.set_buffer_filter(i, *mode);
+                    }
+                }
                 #[cfg(any(feature = "webcam", feature = "image_url", feature = "video"))]
                 for req in &result.source_requests {
                     match req {
@@ -500,6 +511,12 @@ impl HydraApp {
         let ppp = ctx.pixels_per_point();
         let res_w = (rect.width() * ppp) as u32;
         let res_h = (rect.height() * ppp) as u32;
+        // A script's `setResolution(w, h)` overrides the *buffers'* own
+        // render resolution, independent of the window's actual size -
+        // the final display quad below still blits into the real window
+        // viewport regardless, so this naturally upscales/downscales like
+        // real hydra.js's own low-res/pixelation trick.
+        let (buf_w, buf_h) = self.render_resolution_override.unwrap_or((res_w, res_h));
 
         let mouse = ctx.input(|i| {
             i.pointer.hover_pos().map_or([0.0, 0.0], |pos| {
@@ -510,7 +527,7 @@ impl HydraApp {
             })
         });
 
-        renderer.ensure_resolution(res_w, res_h);
+        renderer.ensure_resolution(buf_w, buf_h);
 
         #[cfg(feature = "webcam")]
         for slot in 0..NUM_SOURCES {
@@ -569,7 +586,7 @@ impl HydraApp {
         let ping = renderer.ping().clone();
         let uniforms = RenderUniforms {
             time,
-            resolution: [res_w as f32, res_h as f32],
+            resolution: [buf_w as f32, buf_h as f32],
             mouse,
             beat: time * (self.tempo / 60.0),
             tempo: self.tempo,
