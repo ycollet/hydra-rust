@@ -88,7 +88,7 @@ hydra -ss mysketch.shr             # --slot-save: snapshot the starting code out
 
 ## Feature-gated functions
 
-The functions below only exist when the library is built with the matching Cargo feature (`cargo build --features <name>`, or comma-separated for several: `--features webcam,audio,image_url,midi,video`). Without the feature, calling one of these fails with a plain "Function not found" error. See [SPEC.md](SPEC.md) for the complete function reference, including the ~48 always-available core functions.
+The functions below only exist when the library is built with the matching Cargo feature (`cargo build --features <name>`, or comma-separated for several: `--features webcam,audio,image_url,midi,video,stream`). Without the feature, calling one of these fails with a plain "Function not found" error. See [SPEC.md](SPEC.md) for the complete function reference, including the ~48 always-available core functions.
 
 ### `webcam` — camera input
 
@@ -164,6 +164,30 @@ Requires a standalone `ffmpeg` binary on `PATH` at runtime (`brew install ffmpeg
 |----------|-------------|---------|
 | `initVideo(slot, url)` | Streams frames from a local video file or a remote URL, looping indefinitely, uploading each new frame to a source slot as it's decoded | `s0.initVideo("/path/to/clip.mp4").out()` |
 
+### `stream` — receive a video stream from another hydra-rust instance
+
+```bash
+cargo run --features stream --bin hydra
+```
+
+**Not** real hydra.js's own `initStream`/`pb.setName()` — that feature is itself currently broken in the live hydra.js editor (its signaling server hasn't been touched since 2024), and its wire protocol is bespoke and undocumented. This is a **hydra-rust-to-hydra-rust** feature instead: one instance runs the companion `examples/webrtc_broadcast.rs` tool, the other calls `initStream` to receive it. Connects directly by IP:port — no relay server, no STUN/TURN (deliberately; see `src/stream.rs`'s module doc comment) — so it's built for two instances on the same LAN/room, not across separate NATs on the open internet. Requires `ffmpeg` on `PATH` at runtime, same as `video` (also spawned as a subprocess, also never linked in).
+
+| Function | Description | Example |
+|----------|-------------|---------|
+| `initStream(slot, "host:port")` | Connects to a `webrtc_broadcast` instance listening at that address and streams its video into a source slot | `s0.initStream("192.168.1.20:9000").out()` |
+
+To try it:
+```bash
+# On the broadcasting machine (a synthetic test pattern needs no webcam):
+cargo run --features stream --example webrtc_broadcast -- 9000
+# Or broadcast a real webcam/file: --format avfoundation --input 0  (macOS)
+#                                   --format v4l2 --input /dev/video0  (Linux)
+#                                   --input clip.mp4  (any file)
+
+# On the receiving machine, in a .hydra script:
+# s0.initStream("<broadcaster's-ip>:9000").out()
+```
+
 ## Testing against a real-world sketch corpus
 
 `examples/check_corpus.rs` is a fast conformance-testing harness: it walks a
@@ -186,7 +210,7 @@ so `a.fft[...]`/`initCam(...)`/`initImage(...)`/`note(...)`-style sketches
 don't fail just because those functions aren't registered):
 
 ```bash
-cargo run --release --features webcam,audio,image_url,midi,video --example check_corpus -- sketches
+cargo run --release --features webcam,audio,image_url,midi,video,stream --example check_corpus -- sketches
 ```
 
 This prints an ok/failed count and the top failure buckets, and writes
@@ -291,8 +315,9 @@ hydra-rust is the visual engine of [Sova](https://github.com/Bubobubobubobubo/So
 ## Current limitations
 
 - Max nesting depth of 16
-- Audio reactivity, webcam input, image-URL loading, MIDI input, and video playback each require building with their own Cargo feature (off by default) — see [Feature-gated functions](#feature-gated-functions) above
-- `initVideo` (the `video` feature) additionally requires a standalone `ffmpeg` binary on `PATH` at runtime — it's spawned as a subprocess, not linked into this binary, so building hydra-rust itself never needs FFmpeg's dev libraries. Missing it just logs a warning rather than failing.
+- Audio reactivity, webcam input, image-URL loading, MIDI input, video playback, and WebRTC streaming each require building with their own Cargo feature (off by default) — see [Feature-gated functions](#feature-gated-functions) above
+- `initVideo` (the `video` feature) additionally requires a standalone `ffmpeg` binary on `PATH` at runtime — it's spawned as a subprocess, not linked into this binary, so building hydra-rust itself never needs FFmpeg's dev libraries. Missing it just logs a warning rather than failing. `initStream` (the `stream` feature) shares this same `ffmpeg` requirement.
+- `initStream` is hydra-rust-to-hydra-rust only — not interoperable with real hydra.js's own (currently broken) `initStream`/`pb.setName()` — and connects directly by IP:port with no NAT traversal, so both instances need to be reachable from each other directly (typically the same LAN).
 
 ### Stub functions (accepted, but not yet implemented)
 
@@ -303,7 +328,7 @@ These are registered so scripts calling them don't hard-error, but they don't do
 | `initImage(idx, url)` | Real implementation behind the `image_url` feature: fetches the URL and decodes it (PNG/JPEG/GIF/WebP) in the background, then uploads it to the source slot once it's ready, through the same texture path webcam frames use. Without that feature, it's a no-op (returns the source as a chainable value, like real hydra.js) |
 | `initVideo(idx, url)` | Real implementation behind the `video` feature: streams frames from a local file or URL via a standalone `ffmpeg` subprocess (not linked into this binary — `ffmpeg` must be on `PATH` at runtime; missing it logs one clear warning rather than failing), looping indefinitely. Without that feature, it's a no-op (returns the source as a chainable value) |
 | `initGif(idx, url)` | Real implementation behind the `image_url` feature: fetches the URL, decodes every frame up front, and cycles through them by elapsed time once loaded, looping indefinitely — same texture path webcam frames use. Without that feature, it's a no-op (returns the source as a chainable value) |
-| `initStream(idx, url)` | No-op (returns the source as a chainable value) — no WebRTC/live-stream pipeline |
+| `initStream(idx, url)` | Real implementation behind the `stream` feature: connects to another hydra-rust instance over WebRTC (see the `stream` section above) — not real hydra.js's own (currently broken) `initStream`. Without that feature, it's a no-op (returns the source as a chainable value) |
 | `initScreen(idx[, screen])` | No-op (returns the source as a chainable value) — no screen/display capture |
 | `sN.init({src: ...})` | No-op (returns the slot's source as a chainable value) — not a real hydra.js API at all, but a pattern some external platforms use to feed a p5.js canvas/DOM element into a source slot; no such capture pipeline exists here |
 | `P5(...)` / `new P5(...)` | Returns a plain settable map (like `hydraText`) rather than hard-erroring, so an assignment (`let p1 = P5(...)`) and later property reads/writes on it still work — p5.js is a whole separate creative-coding framework with no Rust equivalent here. A handful of its most commonly-called instance methods (`hide`, `show`, `textSize`, `fill`) are additionally registered as no-ops on that map; the rest of its (large) API isn't |

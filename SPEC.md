@@ -382,8 +382,9 @@ errors from `eval()`, surfaced to the caller as `Err(String)`.
 - **`s0`-`s3`** (Rhai constants `100`-`103`): four external source slots,
   populated by camera capture (`initCam`, behind the `webcam` feature), a
   fetched image/animated GIF (`initImage`/`initGif`, behind the `image_url`
-  feature), or a decoded video file/URL (`initVideo`, behind the `video`
-  feature).
+  feature), a decoded video file/URL (`initVideo`, behind the `video`
+  feature), or a WebRTC video stream from another hydra-rust instance
+  (`initStream`, behind the `stream` feature).
 - **`src(idx)`**: reads a buffer or source as a chain-starting `Node`. `idx <
   100` reads buffer `idx`'s previous frame (`texture(iBufferN, st)`); `idx >=
   100` reads external source slot `idx - 100` (`texture(iSourceN, ...)`,
@@ -444,6 +445,19 @@ errors from `eval()`, surfaced to the caller as `Err(String)`.
   -1` loops the file indefinitely without any restart logic needed here.
   `url` may be a local file path or a remote URL - ffmpeg's own input
   handling covers both without any extra fetch code.
+- **`initStream(slot, "host:port")`**: without the `stream` feature, the
+  same no-op treatment (`url` accepted but ignored). With it, `stream.rs`'s
+  `StreamManager` connects directly to another hydra-rust instance running
+  the companion `examples/webrtc_broadcast.rs` tool, over WebRTC - **not**
+  real hydra.js's own `initStream`/`pb.setName()`, which uses a bespoke,
+  currently-broken browser signaling protocol with nothing to interoperate
+  with (see `stream.rs`'s module doc comment for the full rationale). A
+  single direct TCP connection to `addr` carries one SDP offer/answer
+  exchange (no relay server, no STUN/TURN - host candidates only, since
+  both instances are expected to be directly reachable, typically on the
+  same LAN); once connected, incoming RTP is relayed to a standalone
+  `ffmpeg` subprocess for VP8 decoding, the same "spawn `ffmpeg`, never
+  link a codec library" treatment `initVideo` already gets.
 
 ## 6. Function reference
 
@@ -656,7 +670,7 @@ place and returns nothing).
 
 ## 8. Feature flags
 
-Five Cargo features gate optional hardware/network/dependency-heavy
+Six Cargo features gate optional hardware/network/dependency-heavy
 functionality, all off by default:
 
 | Feature | Deps | Enables |
@@ -666,13 +680,15 @@ functionality, all off by default:
 | `image_url` | `image`, `ureq` | `initImage(slot, url)` / `initGif(slot, url)`, fetching and decoding the URL in the background (see `imageload.rs`) and populating `s0`-`s3` from it, the same way `initCam` populates them from a camera |
 | `midi` | `midir` | `note(...)`, `cc(...)`, `_note`/`_cc`/`_noteVelocity`, `midi.*` - a native port of the real-world `hydra-midi` extension, see §6.1 |
 | `video` | `ffmpeg-sidecar` | `initVideo(slot, url)`, streaming decoded frames from a local file or URL via a standalone `ffmpeg` subprocess (see `video.rs`) into `s0`-`s3`. Unlike the other deps here, `ffmpeg` itself isn't a Rust crate linked into the binary - it must be a separate executable on `PATH` at *runtime* |
+| `stream` | `webrtc`, `rtc`, `tokio`, `bytes`, `async-trait` (+ `video`, for its `ffmpeg-sidecar`) | `initStream(slot, "host:port")`, receiving a WebRTC video stream from another hydra-rust instance (see `stream.rs`, §5) into `s0`-`s3`. The first async dependency in this project - confined entirely to `stream.rs`'s own background thread (`webrtc::runtime::default_runtime().block_on(...)`), nothing else here is async |
 
 Calling `initCam`/`a.fft[]`/`note()`/etc. in a build without `webcam`/
 `audio`/`midi` produces a plain "Function not found" error from `eval()`
 — there is no separate "feature not compiled in" error path. `initImage`/
-`initGif`/`initVideo` are the exceptions: they're *always* registered (see
-§9), so they never hard-error either way; without `image_url`/`video`
-they're just no-ops instead of a real fetch/decode.
+`initGif`/`initVideo`/`initStream` are the exceptions: they're *always*
+registered (see §9), so they never hard-error either way; without
+`image_url`/`video`/`stream` they're just no-ops instead of a real
+fetch/decode/connect.
 
 Without `image_url`, `initImage`'s network fetch obviously can't happen at
 all - but even *with* it enabled, note that `eval()` itself never touches
@@ -689,9 +705,9 @@ These are registered (so a script calling them doesn't hard-error) but do
 full, currently-accurate list (kept there rather than duplicated here, so
 there's one place to update). As of this writing it covers `initScreen`
 (return a chainable no-op source, see §5; `initImage`/`initGif`/
-`initVideo` are real implementations behind `image_url`/`video`
-respectively, see §8; `setResolution`/`o0-o3.setNearest()`/`.setLinear()`/
-`.setMode()` are real too, see §6), `screencap`,
+`initVideo`/`initStream` are real implementations behind `image_url`/
+`video`/`stream` respectively, see §8; `setResolution`/`o0-o3.setNearest()`/
+`.setLinear()`/`.setMode()` are real too, see §6), `screencap`,
 `ease` (patterns, see §7), and `loadScript` (see §6 for the community-extension
 functions ported natively instead).
 
@@ -719,9 +735,11 @@ file may not be one the user wrote themselves (e.g. shared online), and
 could call `initCam()`/reference `a.fft[i]` to access the camera or
 microphone (`webcam`/`audio` features), call `initImage(...)`/`initGif(...)`
 to make an outbound network request to an arbitrary URL (`image_url`
-feature), or call `initVideo(...)` to spawn an `ffmpeg` subprocess against
-an arbitrary local path or URL (`video` feature) - none of those should
-run just because the file was opened. The restored previous session (the
+feature), call `initVideo(...)` to spawn an `ffmpeg` subprocess against
+an arbitrary local path or URL (`video` feature), or call `initStream(...)`
+to open a network connection to an arbitrary address (`stream` feature) -
+none of those should run just because the file was opened. The restored
+previous session (the
 user's own, already-run code) is exempt and still auto-evaluates as
 before.
 

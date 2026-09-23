@@ -385,6 +385,26 @@ fn hydratext_config_assignments_are_harmless_no_ops() {
 }
 
 #[test]
+#[cfg(feature = "stream")]
+fn init_stream_queues_a_source_request_without_touching_the_network() {
+    // same "eval() never touches the network/an external process" guarantee
+    // as initImage/initGif/initVideo - the actual WebRTC connection is
+    // established by stream.rs's StreamManager, wired up in app.rs, well
+    // after eval() has already returned.
+    use hydra_rust::eval::SourceRequest;
+    let result = eval("s1.initStream(\"127.0.0.1:9000\").out()").unwrap();
+    assert_eq!(result.source_requests.len(), 1);
+    match &result.source_requests[0] {
+        SourceRequest::InitStream { slot, addr } => {
+            assert_eq!(*slot, 1);
+            assert_eq!(addr.as_str(), "127.0.0.1:9000");
+        }
+        #[allow(unreachable_patterns)]
+        other => panic!("unexpected request: {other:?}"),
+    }
+}
+
+#[test]
 fn set_resolution_with_static_args_sets_a_render_resolution_override() {
     let result = eval("setResolution(320, 240)\nosc(60).out()").unwrap();
     assert_eq!(result.render_resolution, Some((320, 240)));

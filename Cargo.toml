@@ -27,6 +27,25 @@ midir = { version = "0.10", optional = true }
 # fetching a large binary off the internet, matching the same "no surprise
 # background network/hardware access" precedent as the other features here.
 ffmpeg-sidecar = { version = "2", optional = true, default-features = false }
+# `webrtc` handles ICE/DTLS/SRTP transport and RTP relaying only - it does
+# NOT decode video to pixels (confirmed against its own examples). Decoding
+# and encoding are both done by spawning `ffmpeg` instead (the same
+# already-depended-on `ffmpeg-sidecar` `video` uses), so this feature adds
+# no second video-codec library on top of the one hydra-rust already needs.
+# `rtc` (the sans-I/O core `webrtc` wraps) is a private dependency of
+# `webrtc` itself, so it must be added directly here too to name its types
+# (`MediaEngine`, `RTCConfigurationBuilder`, ...) - versions are kept in
+# lockstep with `webrtc` deliberately, and Cargo's feature unification means
+# `webrtc`'s own default `crypto-ring` feature already covers this edge.
+webrtc = { version = "0.21", optional = true }
+rtc = { version = "0.21", optional = true }
+# Only `sync` is needed directly (a `oneshot` channel to tell a stream's
+# background thread to stop) - `webrtc`'s own default `runtime-tokio`
+# feature already pulls in everything needed to actually drive the async
+# WebRTC stack, via `webrtc::runtime::default_runtime()`.
+tokio = { version = "1", optional = true, default-features = false, features = ["sync"] }
+bytes = { version = "1", optional = true }
+async-trait = { version = "0.1", optional = true }
 
 [features]
 webcam = ["dep:nokhwa"]
@@ -34,6 +53,7 @@ audio = ["dep:cpal", "dep:rustfft"]
 image_url = ["dep:image", "dep:ureq"]
 midi = ["dep:midir"]
 video = ["dep:ffmpeg-sidecar"]
+stream = ["dep:webrtc", "dep:rtc", "dep:tokio", "dep:bytes", "dep:async-trait", "video"]
 
 # Real-time rendering app: thin LTO's cross-crate inlining meaningfully
 # helps the hot per-frame path (renderer.rs) and eval()'s Rhai-engine/

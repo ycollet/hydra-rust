@@ -47,7 +47,7 @@ pub enum BufferFilter {
     Nearest,
 }
 
-#[cfg(any(feature = "webcam", feature = "image_url", feature = "video"))]
+#[cfg(any(feature = "webcam", feature = "image_url", feature = "video", feature = "stream"))]
 #[derive(Debug, Clone)]
 pub enum SourceRequest {
     #[cfg(feature = "webcam")]
@@ -58,6 +58,11 @@ pub enum SourceRequest {
     InitGif { slot: usize, url: String },
     #[cfg(feature = "video")]
     InitVideo { slot: usize, url: String },
+    /// `addr` is a `"host:port"` to connect to directly - see `stream.rs`'s
+    /// module doc comment for why this is hydra-rust-to-hydra-rust only,
+    /// not real hydra.js's own (currently broken) `initStream`.
+    #[cfg(feature = "stream")]
+    InitStream { slot: usize, addr: String },
 }
 
 #[cfg(feature = "audio")]
@@ -106,7 +111,7 @@ pub struct EvalResult {
     /// `setNearest`/`setLinear`/`setMode` on - see `BufferFilter`'s own
     /// doc comment for why this doesn't reset like `render_mode` does.
     pub buffer_filter: [Option<BufferFilter>; 4],
-    #[cfg(any(feature = "webcam", feature = "image_url", feature = "video"))]
+    #[cfg(any(feature = "webcam", feature = "image_url", feature = "video", feature = "stream"))]
     pub source_requests: Vec<SourceRequest>,
     #[cfg(feature = "audio")]
     pub audio_requests: Vec<AudioRequest>,
@@ -760,7 +765,7 @@ struct PatchState {
     text_data: Option<TextData>,
     render_resolution: Option<(u32, u32)>,
     buffer_filter: [Option<BufferFilter>; 4],
-    #[cfg(any(feature = "webcam", feature = "image_url", feature = "video"))]
+    #[cfg(any(feature = "webcam", feature = "image_url", feature = "video", feature = "stream"))]
     source_requests: Vec<SourceRequest>,
     #[cfg(feature = "audio")]
     audio_requests: Vec<AudioRequest>,
@@ -1095,7 +1100,7 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
         text_data: None,
         render_resolution: None,
         buffer_filter: [None; 4],
-        #[cfg(any(feature = "webcam", feature = "image_url", feature = "video"))]
+        #[cfg(any(feature = "webcam", feature = "image_url", feature = "video", feature = "stream"))]
         source_requests: Vec::new(),
         #[cfg(feature = "audio")]
         audio_requests: Vec::new(),
@@ -1486,6 +1491,26 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
         log::warn!("initGif({idx}, \"{url}\") ignored: GIF sources are not supported");
         idx_to_source(idx)
     });
+    // initStream is a real implementation when `stream` is enabled - it
+    // connects to another hydra-rust instance's `examples/webrtc_broadcast`
+    // over WebRTC (see stream.rs). `url` is reinterpreted as `"host:port"`
+    // rather than real hydra.js's session-name argument - this is a
+    // hydra-rust-to-hydra-rust feature, not interoperable with (currently
+    // broken) real hydra.js sessions, see stream.rs's module doc comment.
+    #[cfg(feature = "stream")]
+    {
+        let s = state.clone();
+        engine.register_fn("initStream", move |idx: i64, url: ImmutableString| -> Node {
+            if idx >= 100 {
+                s.lock().unwrap().source_requests.push(SourceRequest::InitStream {
+                    slot: (idx - 100) as usize,
+                    addr: url.to_string(),
+                });
+            }
+            idx_to_source(idx)
+        });
+    }
+    #[cfg(not(feature = "stream"))]
     engine.register_fn("initStream", |idx: i64, url: ImmutableString| -> Node {
         log::warn!("initStream({idx}, \"{url}\") ignored: WebRTC/live-stream sources are not supported");
         idx_to_source(idx)
@@ -1703,7 +1728,7 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
         text_data: patch.text_data.take(),
         render_resolution: patch.render_resolution,
         buffer_filter: patch.buffer_filter,
-        #[cfg(any(feature = "webcam", feature = "image_url", feature = "video"))]
+        #[cfg(any(feature = "webcam", feature = "image_url", feature = "video", feature = "stream"))]
         source_requests: std::mem::take(&mut patch.source_requests),
         #[cfg(feature = "audio")]
         audio_requests: std::mem::take(&mut patch.audio_requests),

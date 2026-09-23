@@ -32,6 +32,7 @@ directly. Most omit `.out()` where a bare terminating source/chain would implici
 - [Feature: `image_url`](#feature-image_url)
 - [Feature: `midi`](#feature-midi)
 - [Feature: `video`](#feature-video)
+- [Feature: `stream`](#feature-stream)
 - [Scene banks (standalone binary)](#scene-banks-standalone-binary)
 - [Known gaps and stub functions](#known-gaps-and-stub-functions)
 
@@ -342,6 +343,39 @@ binary, so `cargo build` itself never needs FFmpeg's dev libraries. If `ffmpeg` 
 Without this feature, `initVideo` is a no-op (logged once) that still returns the slot's
 source node for chaining.
 
+## Feature: `stream`
+
+```bash
+cargo run --features stream --bin hydra
+```
+
+Receives a WebRTC video stream from **another hydra-rust instance** — not real hydra.js's own
+`initStream`/`pb.setName()`, which is itself currently broken in the live hydra.js editor (its
+signaling server hasn't been touched since 2024) and uses a bespoke, undocumented protocol with
+nothing to interoperate with. This is a hydra-rust-to-hydra-rust feature instead: one instance
+runs the companion `examples/webrtc_broadcast.rs` tool (not a Rhai function), the other calls
+`initStream` to receive it.
+
+Connects directly by IP:port — a single TCP connection carries one SDP offer/answer exchange, no
+relay server, no STUN/TURN. This means no NAT traversal: both instances need to be directly
+reachable from each other, which typically means the same LAN or the same machine. Requires a
+standalone `ffmpeg` binary on `PATH` at runtime, same as `video` — it decodes the incoming VP8
+video (`webrtc-rs`, the WebRTC crate used here, only handles transport/RTP relaying, never codec
+decoding itself).
+
+| Function | Description | Example |
+|---|---|---|
+| `initStream(slot, "host:port")` | Connects to a `webrtc_broadcast` instance listening at that address and streams its video into a source slot | `s0.initStream("192.168.1.20:9000").out()` |
+
+To try it, on the broadcasting machine (a synthetic test pattern needs no webcam):
+```bash
+cargo run --features stream --example webrtc_broadcast -- 9000
+```
+then, in a hydra-rust script on the receiving machine: `s0.initStream("<broadcaster-ip>:9000").out()`.
+
+Without this feature, `initStream` is a no-op (logged once) that still returns the slot's source
+node for chaining.
+
 ## Scene banks (standalone binary)
 
 Not a scripting-language feature — a `hydra` binary UI/workflow feature for live performance,
@@ -380,7 +414,7 @@ detail on the `.bhr`/`.shr` formats.
 
 A handful of functions are registered (so a script calling them doesn't hard-error) but don't
 do anything real, or only partially implement real hydra.js/community-extension behavior —
-`initStream`, `initScreen`, `P5(...)`, `setFunction`, `Scene(...)`,
+`initScreen`, `P5(...)`, `setFunction`, `Scene(...)`,
 `loadScript`, `ease` (non-linear curves), MIDI aftertouch, `.value(fn)`, and a few others. See
 [README.md's stub-function table](README.md#stub-functions-accepted-but-not-yet-implemented)
 for the complete, currently-accurate list with rationale for each, and SPEC.md §9 for the

@@ -5,6 +5,7 @@ pub mod midi;
 pub mod renderer;
 pub mod shader;
 pub mod source;
+pub mod stream;
 pub mod video;
 mod argtrunc;
 mod arrow;
@@ -30,7 +31,7 @@ mod text;
 mod whitespace;
 
 pub use eval::{eval, preprocess, EvalResult, RenderMode};
-#[cfg(any(feature = "webcam", feature = "image_url", feature = "video"))]
+#[cfg(any(feature = "webcam", feature = "image_url", feature = "video", feature = "stream"))]
 pub use eval::SourceRequest;
 #[cfg(feature = "audio")]
 pub use eval::AudioRequest;
@@ -46,4 +47,6 @@ pub use audio::AudioManager;
 pub use midi::MidiManager;
 #[cfg(feature = "video")]
 pub use video::VideoManager;
+#[cfg(feature = "stream")]
+pub use stream::StreamManager;
 pub use text::TextData;
