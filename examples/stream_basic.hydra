@@ -1,0 +1,9 @@
+// Minimal initStream usage - receives a video stream from another
+// hydra-rust instance running `examples/webrtc_broadcast.rs` and displays
+// it directly. See README.md's "stream" section / DOCUMENTATION.md for
+// how to start a broadcaster.
+//
+// Run: cargo run --features stream --bin hydra -- examples/stream_basic.hydra
+// (edit the address below to match your broadcaster's IP:port first)
+
+s0.initStream("127.0.0.1:9000").out()

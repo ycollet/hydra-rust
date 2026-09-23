@@ -176,16 +176,21 @@ cargo run --features stream --bin hydra
 |----------|-------------|---------|
 | `initStream(slot, "host:port")` | Connects to a `webrtc_broadcast` instance listening at that address and streams its video into a source slot | `s0.initStream("192.168.1.20:9000").out()` |
 
-To try it:
+Two companion CLI examples let you try (and debug) this without the full GUI app — a "server" that broadcasts, and a "client" that receives:
 ```bash
-# On the broadcasting machine (a synthetic test pattern needs no webcam):
+# Server, on the broadcasting machine (a synthetic test pattern needs no webcam):
 cargo run --features stream --example webrtc_broadcast -- 9000
 # Or broadcast a real webcam/file: --format avfoundation --input 0  (macOS)
 #                                   --format v4l2 --input /dev/video0  (Linux)
 #                                   --input clip.mp4  (any file)
 
-# On the receiving machine, in a .hydra script:
-# s0.initStream("<broadcaster's-ip>:9000").out()
+# Client, on the receiving machine - prints frame stats and can save one as a viewable image:
+cargo run --features stream --example webrtc_receive -- <broadcaster's-ip>:9000 --save frame.ppm
+
+# Or use it for real, in a .hydra script - two runnable examples included
+# (edit the address in each first):
+cargo run --features stream --bin hydra -- examples/stream_basic.hydra   # bare initStream().out()
+cargo run --features stream --bin hydra -- examples/stream_vj.hydra      # kaleid/modulate/layer on top of it
 ```
 
 ## Testing against a real-world sketch corpus

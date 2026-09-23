@@ -1,0 +1,14 @@
+// A more realistic VJ-style use of initStream: a collaborator's stream
+// (received live over WebRTC) run through the same chain/blend/modulate
+// operations as any other source - kaleidoscoped, warped by noise, tinted,
+// then layered under a simple animated overlay.
+//
+// Run: cargo run --features stream --bin hydra -- examples/stream_vj.hydra
+// (edit the address below to match your broadcaster's IP:port first)
+
+s0.initStream("127.0.0.1:9000")
+  .kaleid(4)
+  .modulate(noise(3, 0.1), 0.02)
+  .color(1, 0.8, 1)
+  .layer(osc(30, 0.1, 0).luma(0.5, 0.1))
+  .out()

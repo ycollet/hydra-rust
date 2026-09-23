@@ -367,11 +367,19 @@ decoding itself).
 |---|---|---|
 | `initStream(slot, "host:port")` | Connects to a `webrtc_broadcast` instance listening at that address and streams its video into a source slot | `s0.initStream("192.168.1.20:9000").out()` |
 
-To try it, on the broadcasting machine (a synthetic test pattern needs no webcam):
+To try it — a "server" example that broadcasts, and a "client" example that receives, plus two
+runnable `.hydra` scripts:
 ```bash
+# Server, on the broadcasting machine (a synthetic test pattern needs no webcam):
 cargo run --features stream --example webrtc_broadcast -- 9000
+
+# Client, on the receiving machine - no GUI needed, just prints frame stats:
+cargo run --features stream --example webrtc_receive -- <broadcaster-ip>:9000 --save frame.ppm
+
+# Or for real, in the full app - edit the address in each file first:
+cargo run --features stream --bin hydra -- examples/stream_basic.hydra  # bare initStream().out()
+cargo run --features stream --bin hydra -- examples/stream_vj.hydra     # kaleid/modulate/layer on top
 ```
-then, in a hydra-rust script on the receiving machine: `s0.initStream("<broadcaster-ip>:9000").out()`.
 
 Without this feature, `initStream` is a no-op (logged once) that still returns the slot's source
 node for chaining.
