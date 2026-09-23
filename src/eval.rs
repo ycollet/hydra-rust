@@ -98,6 +98,15 @@ pub enum MidiRequest {
     Hide,
 }
 
+/// `broadcastStream(port)`/`stopBroadcast()` - see `BroadcastManager`
+/// (`broadcast.rs`). Mirrors `MidiRequest::Start`/`Pause`'s shape.
+#[cfg(feature = "stream")]
+#[derive(Debug, Clone, Copy)]
+pub enum BroadcastRequest {
+    Start(u16),
+    Stop,
+}
+
 pub struct EvalResult {
     pub shaders: [Option<String>; 4],
     pub render_mode: RenderMode,
@@ -117,6 +126,12 @@ pub struct EvalResult {
     pub audio_requests: Vec<AudioRequest>,
     #[cfg(feature = "midi")]
     pub midi_requests: Vec<MidiRequest>,
+    /// Set only if *this* evaluation's script called `broadcastStream`/
+    /// `stopBroadcast` - `None` if it didn't call either this time (the
+    /// app-level `BroadcastManager` itself is what's actually sticky, same
+    /// split as `render_resolution`).
+    #[cfg(feature = "stream")]
+    pub broadcast_request: Option<BroadcastRequest>,
 }
 
 /// The `a` audio object (`a.fft[i]`, `a.setBins(...)`, ...).
@@ -773,6 +788,8 @@ struct PatchState {
     midi_requests: Vec<MidiRequest>,
     #[cfg(feature = "midi")]
     next_midi_envelope_slot: usize,
+    #[cfg(feature = "stream")]
+    broadcast_request: Option<BroadcastRequest>,
 }
 
 fn register_functions(engine: &mut Engine) {
@@ -1108,6 +1125,8 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
         midi_requests: Vec::new(),
         #[cfg(feature = "midi")]
         next_midi_envelope_slot: 0,
+        #[cfg(feature = "stream")]
+        broadcast_request: None,
     }));
 
     let mut engine = Engine::new();
@@ -1515,6 +1534,23 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
         log::warn!("initStream({idx}, \"{url}\") ignored: WebRTC/live-stream sources are not supported");
         idx_to_source(idx)
     });
+    // broadcastStream/stopBroadcast are hydra-rust-specific - not real
+    // hydra.js functions (unlike initStream, which mirrors one), so unlike
+    // the exceptions listed in SPEC.md §8 there's no reason to register a
+    // no-op fallback without `stream`: a script calling them without the
+    // feature enabled just gets the ordinary "Function not found," the same
+    // treatment `note()`/`cc()`/`midi.*` get without `midi`.
+    #[cfg(feature = "stream")]
+    {
+        let s = state.clone();
+        engine.register_fn("broadcastStream", move |port: i64| {
+            s.lock().unwrap().broadcast_request = Some(BroadcastRequest::Start(port.clamp(1, 65535) as u16));
+        });
+        let s = state.clone();
+        engine.register_fn("stopBroadcast", move || {
+            s.lock().unwrap().broadcast_request = Some(BroadcastRequest::Stop);
+        });
+    }
     engine.register_fn("initScreen", |idx: i64| -> Node {
         log::warn!("initScreen({idx}) ignored: screen capture is not supported");
         idx_to_source(idx)
@@ -1734,6 +1770,8 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
         audio_requests: std::mem::take(&mut patch.audio_requests),
         #[cfg(feature = "midi")]
         midi_requests: std::mem::take(&mut patch.midi_requests),
+        #[cfg(feature = "stream")]
+        broadcast_request: patch.broadcast_request,
     })
 }
 

@@ -349,40 +349,47 @@ source node for chaining.
 cargo run --features stream --bin hydra
 ```
 
-Receives a WebRTC video stream from **another hydra-rust instance** — not real hydra.js's own
+Streams video between **hydra-rust instances** over WebRTC — not real hydra.js's own
 `initStream`/`pb.setName()`, which is itself currently broken in the live hydra.js editor (its
 signaling server hasn't been touched since 2024) and uses a bespoke, undocumented protocol with
-nothing to interoperate with. This is a hydra-rust-to-hydra-rust feature instead: one instance
-runs the companion `examples/webrtc_broadcast.rs` tool (not a Rhai function), the other calls
-`initStream` to receive it.
+nothing to interoperate with. `initStream` receives; `broadcastStream` sends this sketch's own
+rendered output (whatever `render()` currently displays) to the next thing that connects.
 
 Connects directly by IP:port — a single TCP connection carries one SDP offer/answer exchange, no
 relay server, no STUN/TURN. This means no NAT traversal: both instances need to be directly
 reachable from each other, which typically means the same LAN or the same machine. Requires a
-standalone `ffmpeg` binary on `PATH` at runtime, same as `video` — it decodes the incoming VP8
-video (`webrtc-rs`, the WebRTC crate used here, only handles transport/RTP relaying, never codec
-decoding itself).
+standalone `ffmpeg` binary on `PATH` at runtime, same as `video` — it does the actual VP8
+encode/decode in both directions (`webrtc-rs`, the WebRTC crate used here, only handles
+transport/RTP relaying, never codec work itself). A broadcast frame wider than 1280px is
+downscaled before encoding — found necessary via real end-to-end testing: a Retina display's
+actual framebuffer resolution is far more pixels than realtime software VP8 encoding can keep up
+with otherwise.
 
 | Function | Description | Example |
 |---|---|---|
-| `initStream(slot, "host:port")` | Connects to a `webrtc_broadcast` instance listening at that address and streams its video into a source slot | `s0.initStream("192.168.1.20:9000").out()` |
+| `s0.initStream("host:port")` | Connects to a broadcaster listening at that address and streams its video into a source slot | `s0.initStream("192.168.1.20:9000").out()` |
+| `broadcastStream(port)` | Broadcasts this sketch's own rendered output to the next `initStream` connection on `port`. One viewer at a time; a no-op if already broadcasting | `broadcastStream(9000)` |
+| `stopBroadcast()` | Stops broadcasting | `stopBroadcast()` |
 
-To try it — a "server" example that broadcasts, and a "client" example that receives, plus two
-runnable `.hydra` scripts:
+The simplest way to try it is two runnable `.hydra` scripts talking to each other directly (edit
+the address in the receiving one first):
 ```bash
-# Server, on the broadcasting machine (a synthetic test pattern needs no webcam):
+cargo run --features stream --bin hydra -- examples/stream_broadcast.hydra  # broadcasts on :9000
+cargo run --features stream --bin hydra -- examples/stream_basic.hydra      # bare initStream().out()
+cargo run --features stream --bin hydra -- examples/stream_vj.hydra         # kaleid/modulate/layer on top
+```
+
+Two companion CLI examples are also available for testing/debugging without a full GUI app — a
+"server" that broadcasts a webcam/file/test pattern (not a live sketch), and a "client" that
+receives and reports frame stats headlessly:
+```bash
 cargo run --features stream --example webrtc_broadcast -- 9000
-
-# Client, on the receiving machine - no GUI needed, just prints frame stats:
 cargo run --features stream --example webrtc_receive -- <broadcaster-ip>:9000 --save frame.ppm
-
-# Or for real, in the full app - edit the address in each file first:
-cargo run --features stream --bin hydra -- examples/stream_basic.hydra  # bare initStream().out()
-cargo run --features stream --bin hydra -- examples/stream_vj.hydra     # kaleid/modulate/layer on top
 ```
 
 Without this feature, `initStream` is a no-op (logged once) that still returns the slot's source
-node for chaining.
+node for chaining; `broadcastStream`/`stopBroadcast` aren't real hydra.js functions, so without
+`stream` they're simply not registered at all (a plain "Function not found").
 
 ## Scene banks (standalone binary)
 

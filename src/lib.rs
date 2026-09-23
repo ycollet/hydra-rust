@@ -1,4 +1,5 @@
 pub mod audio;
+pub mod broadcast;
 pub mod eval;
 pub mod imageload;
 pub mod midi;
@@ -37,6 +38,8 @@ pub use eval::SourceRequest;
 pub use eval::AudioRequest;
 #[cfg(feature = "midi")]
 pub use eval::MidiRequest;
+#[cfg(feature = "stream")]
+pub use eval::BroadcastRequest;
 pub use renderer::{render_multipass, RenderSnapshot, RenderUniforms, ShaderRenderer};
 pub use source::SourceFrame;
 #[cfg(feature = "webcam")]
@@ -49,4 +52,6 @@ pub use midi::MidiManager;
 pub use video::VideoManager;
 #[cfg(feature = "stream")]
 pub use stream::StreamManager;
+#[cfg(feature = "stream")]
+pub use broadcast::BroadcastManager;
 pub use text::TextData;

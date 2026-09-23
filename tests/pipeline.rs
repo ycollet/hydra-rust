@@ -405,6 +405,25 @@ fn init_stream_queues_a_source_request_without_touching_the_network() {
 }
 
 #[test]
+#[cfg(feature = "stream")]
+fn broadcast_stream_and_stop_broadcast_queue_requests() {
+    // same "eval() never touches the network" guarantee - the actual TCP
+    // listen/WebRTC connection is established by broadcast.rs's
+    // BroadcastManager, wired up in app.rs, well after eval() returns.
+    use hydra_rust::eval::BroadcastRequest;
+    let result = eval("broadcastStream(9000)\nosc(60).out()").unwrap();
+    assert!(matches!(result.broadcast_request, Some(BroadcastRequest::Start(9000))));
+
+    let result = eval("stopBroadcast()\nosc(60).out()").unwrap();
+    assert!(matches!(result.broadcast_request, Some(BroadcastRequest::Stop)));
+
+    // a script that calls neither leaves it None, not a leftover value from
+    // some previous evaluation - PatchState is fresh every eval() call.
+    let result = eval("osc(60).out()").unwrap();
+    assert!(result.broadcast_request.is_none());
+}
+
+#[test]
 fn set_resolution_with_static_args_sets_a_render_resolution_override() {
     let result = eval("setResolution(320, 240)\nosc(60).out()").unwrap();
     assert_eq!(result.render_resolution, Some((320, 240)));

@@ -1,0 +1,14 @@
+// Broadcasts this sketch's own rendered output over WebRTC, so another
+// hydra-rust instance can receive it with initStream (see
+// examples/stream_basic.hydra / examples/stream_vj.hydra) - or use
+// examples/webrtc_receive.rs for a headless check. No separate CLI
+// broadcaster tool needed for this.
+//
+// Run: cargo run --features stream --bin hydra -- examples/stream_broadcast.hydra
+
+broadcastStream(9000)
+
+osc(60, 0.1, time * 0.2)
+  .kaleid(5)
+  .color(1, 0.6, 0.9)
+  .out()

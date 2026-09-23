@@ -25,6 +25,10 @@ use hydra_rust::midi::MidiManager;
 use hydra_rust::video::VideoManager;
 #[cfg(feature = "stream")]
 use hydra_rust::stream::StreamManager;
+#[cfg(feature = "stream")]
+use hydra_rust::broadcast::{push_captured_frame, BroadcastManager};
+#[cfg(feature = "stream")]
+use hydra_rust::eval::BroadcastRequest;
 use serde::{Deserialize, Serialize};
 
 use crate::highlight::HydraHighlighter;
@@ -186,6 +190,13 @@ pub struct HydraApp {
     video_manager: VideoManager,
     #[cfg(feature = "stream")]
     stream_manager: StreamManager,
+    #[cfg(feature = "stream")]
+    broadcast_manager: BroadcastManager,
+    /// Throttles how often `paint_background` reads the framebuffer back
+    /// for `broadcast_manager` - a GPU readback is a real cost, not worth
+    /// paying every render frame for a ~25fps encode target.
+    #[cfg(feature = "stream")]
+    last_broadcast_capture: Option<Instant>,
 }
 
 impl HydraApp {
@@ -247,6 +258,10 @@ impl HydraApp {
             video_manager: VideoManager::new(),
             #[cfg(feature = "stream")]
             stream_manager: StreamManager::new(),
+            #[cfg(feature = "stream")]
+            broadcast_manager: BroadcastManager::new(),
+            #[cfg(feature = "stream")]
+            last_broadcast_capture: None,
         };
 
         if let Some(path) = bank_load {
@@ -397,6 +412,12 @@ impl HydraApp {
                     if let Some(mode) = filter {
                         renderer.set_buffer_filter(i, *mode);
                     }
+                }
+                #[cfg(feature = "stream")]
+                match result.broadcast_request {
+                    Some(BroadcastRequest::Start(port)) => self.broadcast_manager.start(port),
+                    Some(BroadcastRequest::Stop) => self.broadcast_manager.stop(),
+                    None => {}
                 }
                 #[cfg(any(feature = "webcam", feature = "image_url", feature = "video", feature = "stream"))]
                 for req in &result.source_requests {
@@ -598,6 +619,24 @@ impl HydraApp {
             }
         };
 
+        // A script's broadcastStream(port) reads the just-rendered frame
+        // back off the GPU, at the real window resolution (not buf_w/buf_h -
+        // matches real hydra.js's own canvas.captureStream(), which
+        // captures the displayed canvas regardless of any internal render
+        // scale). Throttled to ~25fps (the encoder's own target rate, see
+        // broadcast.rs) since read_pixels is a real GPU-CPU sync cost, not
+        // worth paying every render frame just to immediately drop most of
+        // the results.
+        #[cfg(feature = "stream")]
+        let broadcast_sink = if self.broadcast_manager.is_active()
+            && self.last_broadcast_capture.is_none_or(|t| t.elapsed() >= std::time::Duration::from_millis(40))
+        {
+            self.last_broadcast_capture = Some(Instant::now());
+            self.broadcast_manager.frame_sink()
+        } else {
+            None
+        };
+
         let snap = renderer.snapshot();
         let ping = renderer.ping().clone();
         let uniforms = RenderUniforms {
@@ -617,6 +656,28 @@ impl HydraApp {
 
         let cb = eframe::egui_glow::CallbackFn::new(move |_info, painter| {
             renderer::render_multipass(painter.gl(), &snap, &ping, uniforms);
+            #[cfg(feature = "stream")]
+            if let Some(sink) = &broadcast_sink {
+                // render_multipass leaves the real window framebuffer bound
+                // (it restores whatever egui had bound before this
+                // callback ran) - read_pixels here reads exactly what was
+                // just drawn to the screen, respecting render()'s mode.
+                use glow::HasContext;
+                let gl = painter.gl();
+                let mut buf = vec![0u8; (res_w * res_h * 3) as usize];
+                unsafe {
+                    gl.read_pixels(
+                        0,
+                        0,
+                        res_w as i32,
+                        res_h as i32,
+                        glow::RGB,
+                        glow::UNSIGNED_BYTE,
+                        glow::PixelPackData::Slice(Some(&mut buf)),
+                    );
+                }
+                push_captured_frame(sink, res_w, res_h, &buf);
+            }
         });
 
         let painter = ctx.layer_painter(egui::LayerId::background());
@@ -1038,6 +1099,8 @@ impl eframe::App for HydraApp {
         self.video_manager.stop_all();
         #[cfg(feature = "stream")]
         self.stream_manager.stop_all();
+        #[cfg(feature = "stream")]
+        self.broadcast_manager.stop();
         self.session().save();
     }
 }

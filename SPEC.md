@@ -447,17 +447,18 @@ errors from `eval()`, surfaced to the caller as `Err(String)`.
   handling covers both without any extra fetch code.
 - **`initStream(slot, "host:port")`**: without the `stream` feature, the
   same no-op treatment (`url` accepted but ignored). With it, `stream.rs`'s
-  `StreamManager` connects directly to another hydra-rust instance running
-  the companion `examples/webrtc_broadcast.rs` tool, over WebRTC - **not**
-  real hydra.js's own `initStream`/`pb.setName()`, which uses a bespoke,
-  currently-broken browser signaling protocol with nothing to interoperate
-  with (see `stream.rs`'s module doc comment for the full rationale). A
-  single direct TCP connection to `addr` carries one SDP offer/answer
-  exchange (no relay server, no STUN/TURN - host candidates only, since
-  both instances are expected to be directly reachable, typically on the
-  same LAN); once connected, incoming RTP is relayed to a standalone
-  `ffmpeg` subprocess for VP8 decoding, the same "spawn `ffmpeg`, never
-  link a codec library" treatment `initVideo` already gets.
+  `StreamManager` connects directly to another hydra-rust instance - either
+  the companion `examples/webrtc_broadcast.rs` tool, or a script calling
+  `broadcastStream(port)` (see §6) - over WebRTC. **Not** real hydra.js's
+  own `initStream`/`pb.setName()`, which uses a bespoke, currently-broken
+  browser signaling protocol with nothing to interoperate with (see
+  `stream.rs`'s module doc comment for the full rationale). A single direct
+  TCP connection to `addr` carries one SDP offer/answer exchange (no relay
+  server, no STUN/TURN - host candidates only, since both instances are
+  expected to be directly reachable, typically on the same LAN); once
+  connected, incoming RTP is relayed to a standalone `ffmpeg` subprocess
+  for VP8 decoding, the same "spawn `ffmpeg`, never link a codec library"
+  treatment `initVideo` already gets.
 
 ## 6. Function reference
 
@@ -588,6 +589,8 @@ itself is a permanent no-op, see README.md):
 | `random()` / `random(...)` | One-shot pseudo-random `f64` in `[0, 1)`, called once at script-eval time (target of `Math.random()`, see §4). Accepts and ignores 0-2 extra arguments, matching real JS's own excess-argument tolerance (real `Math.random()` takes none either) rather than implementing an actual ranged random some sketches seem to expect |
 | `setResolution(w, h)` | Overrides the render buffers' own resolution, independent of the actual window size - the final display is still stretched to fill the window regardless (the classic hydra.js low-res/pixelation trick). Only applies when `w`/`h` are *statically* known numbers (clamped to `1..=4096`); a reactive argument (e.g. `setResolution(window.innerWidth, window.innerHeight)`, a common real-sketch idiom) is treated as "no override" instead, since there's no per-frame callback here to re-evaluate a reactive expression against - the same limitation as MIDI's `.value(fn)` (§6.1). Sticky: an evaluation that doesn't call `setResolution` at all leaves a previous override in place, rather than reverting to the window size |
 | `o0-o3.setNearest()` / `.setLinear()` / `.setMode("nearest"\|"linear")` | Sets that buffer's texture sampling mode (both its ping-pong textures). Sticky like `setResolution`, unlike `render_mode` (§2) - matches real hydra.js, where the WebGL texture object isn't recreated on a re-eval either, so not calling these again on a later evaluation leaves whatever was last set alone. An unrecognized `setMode(...)` string is logged and ignored, not a hard error |
+| `broadcastStream(port)` (`stream` feature) | Broadcasts this sketch's own rendered output - whatever `render()` (§2) currently displays, at the real window resolution - to the next `initStream` (§5) connection on `port`, over WebRTC. Not a real hydra.js function (unlike `initStream`, which mirrors one) - registered only behind `stream`, a plain "Function not found" without it, same as `note()`/`midi.*`. One viewer at a time; a second call while already broadcasting is a no-op (call `stopBroadcast()` first to change ports). See `broadcast.rs` |
+| `stopBroadcast()` (`stream` feature) | Stops broadcasting |
 
 ### 6.1 MIDI (`midi` feature)
 
@@ -680,7 +683,7 @@ functionality, all off by default:
 | `image_url` | `image`, `ureq` | `initImage(slot, url)` / `initGif(slot, url)`, fetching and decoding the URL in the background (see `imageload.rs`) and populating `s0`-`s3` from it, the same way `initCam` populates them from a camera |
 | `midi` | `midir` | `note(...)`, `cc(...)`, `_note`/`_cc`/`_noteVelocity`, `midi.*` - a native port of the real-world `hydra-midi` extension, see §6.1 |
 | `video` | `ffmpeg-sidecar` | `initVideo(slot, url)`, streaming decoded frames from a local file or URL via a standalone `ffmpeg` subprocess (see `video.rs`) into `s0`-`s3`. Unlike the other deps here, `ffmpeg` itself isn't a Rust crate linked into the binary - it must be a separate executable on `PATH` at *runtime* |
-| `stream` | `webrtc`, `rtc`, `tokio`, `bytes`, `async-trait` (+ `video`, for its `ffmpeg-sidecar`) | `initStream(slot, "host:port")`, receiving a WebRTC video stream from another hydra-rust instance (see `stream.rs`, §5) into `s0`-`s3`. The first async dependency in this project - confined entirely to `stream.rs`'s own background thread (`webrtc::runtime::default_runtime().block_on(...)`), nothing else here is async |
+| `stream` | `webrtc`, `rtc`, `tokio`, `bytes`, `async-trait` (+ `video`, for its `ffmpeg-sidecar`) | `initStream(slot, "host:port")`, receiving a WebRTC video stream from another hydra-rust instance (see `stream.rs`, §5) into `s0`-`s3`, and `broadcastStream(port)`/`stopBroadcast()`, sending this sketch's own rendered output the other way (see `broadcast.rs`, §6). The first async dependency in this project - confined entirely to `stream.rs`'s/`broadcast.rs`'s own background threads (`webrtc::runtime::default_runtime().block_on(...)`), nothing else here is async |
 
 Calling `initCam`/`a.fft[]`/`note()`/etc. in a build without `webcam`/
 `audio`/`midi` produces a plain "Function not found" error from `eval()`
@@ -736,10 +739,12 @@ could call `initCam()`/reference `a.fft[i]` to access the camera or
 microphone (`webcam`/`audio` features), call `initImage(...)`/`initGif(...)`
 to make an outbound network request to an arbitrary URL (`image_url`
 feature), call `initVideo(...)` to spawn an `ffmpeg` subprocess against
-an arbitrary local path or URL (`video` feature), or call `initStream(...)`
-to open a network connection to an arbitrary address (`stream` feature) -
-none of those should run just because the file was opened. The restored
-previous session (the
+an arbitrary local path or URL (`video` feature), call `initStream(...)`
+to open a network connection to an arbitrary address, or call
+`broadcastStream(...)` to open a network *listening* socket and stream
+this app's own rendered output to whoever connects to it (`stream`
+feature) - none of those should run just because the file was opened. The
+restored previous session (the
 user's own, already-run code) is exempt and still auto-evaluates as
 before.
 

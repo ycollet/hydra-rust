@@ -164,33 +164,35 @@ Requires a standalone `ffmpeg` binary on `PATH` at runtime (`brew install ffmpeg
 |----------|-------------|---------|
 | `initVideo(slot, url)` | Streams frames from a local video file or a remote URL, looping indefinitely, uploading each new frame to a source slot as it's decoded | `s0.initVideo("/path/to/clip.mp4").out()` |
 
-### `stream` — receive a video stream from another hydra-rust instance
+### `stream` — stream video between hydra-rust instances over WebRTC
 
 ```bash
 cargo run --features stream --bin hydra
 ```
 
-**Not** real hydra.js's own `initStream`/`pb.setName()` — that feature is itself currently broken in the live hydra.js editor (its signaling server hasn't been touched since 2024), and its wire protocol is bespoke and undocumented. This is a **hydra-rust-to-hydra-rust** feature instead: one instance runs the companion `examples/webrtc_broadcast.rs` tool, the other calls `initStream` to receive it. Connects directly by IP:port — no relay server, no STUN/TURN (deliberately; see `src/stream.rs`'s module doc comment) — so it's built for two instances on the same LAN/room, not across separate NATs on the open internet. Requires `ffmpeg` on `PATH` at runtime, same as `video` (also spawned as a subprocess, also never linked in).
+**Not** real hydra.js's own `initStream`/`pb.setName()` — that feature is itself currently broken in the live hydra.js editor (its signaling server hasn't been touched since 2024), and its wire protocol is bespoke and undocumented. This is a **hydra-rust-to-hydra-rust** feature instead. Connects directly by IP:port — no relay server, no STUN/TURN (deliberately; see `src/stream.rs`'s module doc comment) — so it's built for two instances on the same LAN/room, not across separate NATs on the open internet. Requires `ffmpeg` on `PATH` at runtime, same as `video` (also spawned as a subprocess, also never linked in). A broadcast frame wider than 1280px is downscaled before encoding (found necessary via real testing — a Retina display's actual framebuffer resolution is far more pixels than realtime VP8 encoding can keep up with otherwise).
 
 | Function | Description | Example |
 |----------|-------------|---------|
-| `initStream(slot, "host:port")` | Connects to a `webrtc_broadcast` instance listening at that address and streams its video into a source slot | `s0.initStream("192.168.1.20:9000").out()` |
+| `s0.initStream("host:port")` | Connects to a broadcaster listening at that address and streams its video into a source slot | `s0.initStream("192.168.1.20:9000").out()` |
+| `broadcastStream(port)` | Broadcasts *this sketch's own rendered output* — whatever `render()` currently displays — to the next thing that connects on `port`. One viewer at a time. No-op if already broadcasting (call `stopBroadcast()` first to change ports) | `broadcastStream(9000)` |
+| `stopBroadcast()` | Stops broadcasting | `stopBroadcast()` |
 
-Two companion CLI examples let you try (and debug) this without the full GUI app — a "server" that broadcasts, and a "client" that receives:
+The simplest way to try it is two runnable `.hydra` scripts talking to each other directly — no separate tools needed (edit the address in the receiving one first):
 ```bash
-# Server, on the broadcasting machine (a synthetic test pattern needs no webcam):
+cargo run --features stream --bin hydra -- examples/stream_broadcast.hydra   # broadcasts its own visuals on :9000
+cargo run --features stream --bin hydra -- examples/stream_basic.hydra      # receives them - bare initStream().out()
+cargo run --features stream --bin hydra -- examples/stream_vj.hydra         # or with kaleid/modulate/layer on top
+```
+
+Two companion CLI examples are also available, useful for testing/debugging without a full GUI app — a "server" that broadcasts a webcam/file/test pattern (not a live sketch), and a "client" that receives and reports frame stats headlessly:
+```bash
 cargo run --features stream --example webrtc_broadcast -- 9000
 # Or broadcast a real webcam/file: --format avfoundation --input 0  (macOS)
 #                                   --format v4l2 --input /dev/video0  (Linux)
 #                                   --input clip.mp4  (any file)
 
-# Client, on the receiving machine - prints frame stats and can save one as a viewable image:
 cargo run --features stream --example webrtc_receive -- <broadcaster's-ip>:9000 --save frame.ppm
-
-# Or use it for real, in a .hydra script - two runnable examples included
-# (edit the address in each first):
-cargo run --features stream --bin hydra -- examples/stream_basic.hydra   # bare initStream().out()
-cargo run --features stream --bin hydra -- examples/stream_vj.hydra      # kaleid/modulate/layer on top of it
 ```
 
 ## Testing against a real-world sketch corpus
@@ -321,8 +323,8 @@ hydra-rust is the visual engine of [Sova](https://github.com/Bubobubobubobubo/So
 
 - Max nesting depth of 16
 - Audio reactivity, webcam input, image-URL loading, MIDI input, video playback, and WebRTC streaming each require building with their own Cargo feature (off by default) — see [Feature-gated functions](#feature-gated-functions) above
-- `initVideo` (the `video` feature) additionally requires a standalone `ffmpeg` binary on `PATH` at runtime — it's spawned as a subprocess, not linked into this binary, so building hydra-rust itself never needs FFmpeg's dev libraries. Missing it just logs a warning rather than failing. `initStream` (the `stream` feature) shares this same `ffmpeg` requirement.
-- `initStream` is hydra-rust-to-hydra-rust only — not interoperable with real hydra.js's own (currently broken) `initStream`/`pb.setName()` — and connects directly by IP:port with no NAT traversal, so both instances need to be reachable from each other directly (typically the same LAN).
+- `initVideo` (the `video` feature) additionally requires a standalone `ffmpeg` binary on `PATH` at runtime — it's spawned as a subprocess, not linked into this binary, so building hydra-rust itself never needs FFmpeg's dev libraries. Missing it just logs a warning rather than failing. `initStream`/`broadcastStream` (the `stream` feature) share this same `ffmpeg` requirement.
+- `initStream`/`broadcastStream` are hydra-rust-to-hydra-rust only — not interoperable with real hydra.js's own (currently broken) `initStream`/`pb.setName()` — and connect directly by IP:port with no NAT traversal, so both instances need to be reachable from each other directly (typically the same LAN). `broadcastStream` supports one viewer at a time.
 
 ### Stub functions (accepted, but not yet implemented)
 
