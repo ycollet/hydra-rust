@@ -10,9 +10,16 @@
 //!
 //! Unlike `StreamManager` (one manager, `NUM_SOURCES` independent slots),
 //! there's only ever one broadcast: this app's own single rendered output,
-//! analogous to real hydra.js's own single `pb.setName()` per page. Only
-//! one viewer at a time connects, matching `examples/webrtc_broadcast.rs`'s
-//! own scope - a multi-viewer fan-out is a natural, separate extension.
+//! analogous to real hydra.js's own single `pb.setName()` per page. Any
+//! number of viewers can connect, though - each gets its own
+//! `RTCPeerConnection`/DTLS-SRTP session (WebRTC has no concept of one
+//! connection with multiple remote peers), but they all share a *single*
+//! `ffmpeg` encode, fanned out by cloning each encoded RTP packet
+//! (`rtc::rtp::packet::Packet` derives `Clone`) to every connected viewer's
+//! own `TrackLocalStaticRTP`. This matters because VP8 encoding is the
+//! proven CPU bottleneck here (see `MAX_BROADCAST_WIDTH`'s own doc
+//! comment), and running one independent encode per viewer would multiply
+//! exactly the cost already fixed once.
 //!
 //! Frames arrive via `push_frame`, called from the GL render callback
 //! (`app.rs::paint_background`) with whatever was just drawn to the actual
@@ -26,7 +33,7 @@
 #[cfg(feature = "stream")]
 mod imp {
     use std::io::{BufRead, BufReader, Write};
-    use std::net::{TcpListener, UdpSocket};
+    use std::net::{TcpListener, TcpStream, UdpSocket};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use std::thread;
@@ -167,6 +174,27 @@ mod imp {
         }
     }
 
+    /// One connected viewer - its own `RTCPeerConnection` (stored as
+    /// `Arc<dyn PeerConnection>`, per `PeerConnectionBuilder::build`'s own
+    /// documented pattern for sharing a connection across tasks/state) so
+    /// `stop()` can close it, plus the `TrackLocalStaticRTP` the shared
+    /// `ffmpeg` encode is fanned out to.
+    struct Viewer {
+        peer_connection: Arc<dyn PeerConnection>,
+        track: Arc<TrackLocalStaticRTP>,
+    }
+    type Viewers = Mutex<Vec<Viewer>>;
+
+    /// Given each currently-registered viewer's `write_rtp` outcome (in
+    /// registry order), returns which indices failed (disconnected),
+    /// **descending** so the caller can repeatedly `Vec::remove` them
+    /// without earlier removals invalidating later indices. A free
+    /// function purely so this bit of indexing logic is testable without a
+    /// real WebRTC track.
+    fn indices_to_prune(write_results: &[Result<(), ()>]) -> Vec<usize> {
+        write_results.iter().enumerate().filter(|(_, r)| r.is_err()).map(|(i, _)| i).rev().collect()
+    }
+
     /// Runs on its own dedicated OS thread for as long as the broadcast is
     /// active - mirrors `stream.rs::run_receiver`'s shape.
     fn run_broadcast(port: u16, latest_frame: Arc<FrameSlot>, stopped: Arc<AtomicBool>) {
@@ -188,14 +216,176 @@ mod imp {
         stopped: Arc<AtomicBool>,
         runtime: Arc<dyn Runtime>,
     ) -> Result<(), String> {
-        // Same pragmatic "plain blocking std socket on a dedicated
-        // single-task thread" choice as stream.rs's own signaling code -
-        // see its module doc comment for why this never risks starving
-        // anything else.
         let listener = TcpListener::bind(("0.0.0.0", port)).map_err(|e| format!("bind {port}: {e}"))?;
+        // Non-blocking so the accept loop below can also check `stopped`
+        // periodically - a plain blocking `accept()` has no way to be
+        // cancelled once nothing is connecting.
+        listener.set_nonblocking(true).map_err(|e| format!("set nonblocking: {e}"))?;
         log::info!("broadcastStream: listening on 0.0.0.0:{port}");
-        let (tcp, peer_addr) = listener.accept().map_err(|e| e.to_string())?;
-        log::info!("broadcastStream: receiver connected from {peer_addr}");
+
+        let viewers: Arc<Viewers> = Arc::new(Mutex::new(Vec::new()));
+        let ssrc = std::process::id().wrapping_mul(2_654_435_761);
+
+        // Bind the socket ffmpeg will send its encoded RTP to - fixed for
+        // the life of the broadcast even though ffmpeg itself gets
+        // started/stopped repeatedly below (viewers coming and going,
+        // window resizes).
+        let rtp_port = UdpSocket::bind("127.0.0.1:0")
+            .and_then(|s| s.local_addr())
+            .map(|a| a.port())
+            .map_err(|e| e.to_string())?;
+        let std_sock = UdpSocket::bind(("127.0.0.1", rtp_port)).map_err(|e| e.to_string())?;
+        let sock: Arc<dyn AsyncUdpSocket> = runtime.wrap_udp_socket(std_sock).map_err(|e| e.to_string())?;
+
+        // Fans ffmpeg's encoded RTP out to every currently-connected
+        // viewer, pruning any whose write failed (disconnected) - runs on
+        // webrtc-rs's own shared reactor pool for as long as the process
+        // lives, same as stream.rs's on_track forward task; it naturally
+        // goes idle (never a busy loop) once nothing is sending it packets
+        // (no viewers -> no ffmpeg -> nothing arrives here).
+        let viewers_for_fanout = viewers.clone();
+        runtime.spawn(Box::pin(async move {
+            let mut buf = vec![0u8; 1500];
+            loop {
+                let Ok((n, _)) = sock.recv_from(&mut buf).await else { break };
+                let mut bytes = BytesMut::from(&buf[..n]);
+                let Ok(mut packet) = rtc::rtp::packet::Packet::unmarshal(&mut bytes) else { continue };
+                packet.header.ssrc = ssrc;
+
+                let current: Vec<Arc<TrackLocalStaticRTP>> =
+                    viewers_for_fanout.lock().unwrap().iter().map(|v| v.track.clone()).collect();
+                let mut results = Vec::with_capacity(current.len());
+                for track in &current {
+                    results.push(track.write_rtp(packet.clone()).await.map_err(|_| ()));
+                }
+                let dead = indices_to_prune(&results);
+                if !dead.is_empty() {
+                    let mut guard = viewers_for_fanout.lock().unwrap();
+                    for i in dead {
+                        if i < guard.len() {
+                            guard.remove(i);
+                        }
+                    }
+                }
+            }
+        }));
+
+        // Spawns/kills `ffmpeg` as the viewer count transitions to/from
+        // zero, and feeds it captured frames only while at least one
+        // viewer is actually watching - no point paying VP8's real CPU
+        // cost (see MAX_BROADCAST_WIDTH) encoding for an empty room.
+        let viewers_for_feed = viewers.clone();
+        let latest_frame_for_feed = latest_frame.clone();
+        let stopped_for_feed = stopped.clone();
+        let runtime_for_feed = runtime.clone();
+        runtime.spawn(Box::pin(async move {
+            let mut current_dims: Option<(u32, u32)> = None;
+            let mut ffmpeg: Option<(ffmpeg_sidecar::child::FfmpegChild, std::process::ChildStdin)> = None;
+
+            while !stopped_for_feed.load(Ordering::Relaxed) {
+                runtime_for_feed.sleep(Duration::from_millis(20)).await;
+
+                if viewers_for_feed.lock().unwrap().is_empty() {
+                    if let Some((mut child, _)) = ffmpeg.take() {
+                        let _ = child.kill();
+                    }
+                    current_dims = None;
+                    latest_frame_for_feed.lock().unwrap().take();
+                    continue;
+                }
+
+                let Some((w, h, pixels)) = latest_frame_for_feed.lock().unwrap().take() else { continue };
+
+                if current_dims != Some((w, h)) {
+                    if let Some((mut child, _)) = ffmpeg.take() {
+                        let _ = child.kill();
+                    }
+                    match spawn_encoder(w, h, rtp_port) {
+                        Ok(pair) => {
+                            current_dims = Some((w, h));
+                            ffmpeg = Some(pair);
+                        }
+                        Err(e) => {
+                            log::warn!("broadcastStream: failed to start ffmpeg encoder: {e}");
+                            current_dims = None;
+                            continue;
+                        }
+                    }
+                }
+
+                if let Some((_, stdin)) = &mut ffmpeg
+                    && stdin.write_all(&pixels).is_err()
+                {
+                    // ffmpeg died - drop it, a fresh one starts on the next frame.
+                    ffmpeg = None;
+                    current_dims = None;
+                }
+            }
+
+            if let Some((mut child, _)) = ffmpeg.take() {
+                let _ = child.kill();
+            }
+        }));
+
+        // Accept loop, on this dedicated thread: a real connection is
+        // handed off to its own spawned handshake task immediately, so one
+        // slow/stuck negotiation can never block admitting the next viewer.
+        while !stopped.load(Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((tcp, peer_addr)) => {
+                    log::info!("broadcastStream: viewer connecting from {peer_addr}");
+                    // On at least macOS/BSD, a socket accepted from a
+                    // non-blocking listener inherits O_NONBLOCK - found via
+                    // real testing (the handshake's blocking read/write
+                    // calls immediately failed with EAGAIN). The listener
+                    // itself must stay non-blocking (so this loop can check
+                    // `stopped`), but each individual viewer connection
+                    // should behave like a normal blocking socket, matching
+                    // handshake_viewer's blocking-I/O assumptions.
+                    if let Err(e) = tcp.set_nonblocking(false) {
+                        log::warn!("broadcastStream: failed to set viewer socket blocking: {e}");
+                        continue;
+                    }
+                    let viewers2 = viewers.clone();
+                    let runtime2 = runtime.clone();
+                    runtime.spawn(Box::pin(async move {
+                        if let Err(e) = handshake_viewer(tcp, runtime2, viewers2, ssrc).await {
+                            log::warn!("broadcastStream: viewer handshake failed: {e}");
+                        }
+                    }));
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    runtime.sleep(Duration::from_millis(100)).await;
+                }
+                Err(e) => {
+                    log::warn!("broadcastStream: accept error: {e}");
+                    break;
+                }
+            }
+        }
+
+        let closers: Vec<Arc<dyn PeerConnection>> = {
+            let mut guard = viewers.lock().unwrap();
+            guard.drain(..).map(|v| v.peer_connection).collect()
+        };
+        for pc in closers {
+            let _ = pc.close().await;
+        }
+        Ok(())
+    }
+
+    /// Negotiates one viewer's own `RTCPeerConnection` over its own TCP
+    /// connection (a single SDP offer/answer exchange, same non-trickle
+    /// ICE flow the original single-viewer code used) and, once connected,
+    /// registers it in the shared `viewers` list. Runs as its own spawned
+    /// task per accepted connection - a failure here only affects this one
+    /// viewer, never the accept loop or any other viewer.
+    async fn handshake_viewer(
+        tcp: TcpStream,
+        runtime: Arc<dyn Runtime>,
+        viewers: Arc<Viewers>,
+        ssrc: u32,
+    ) -> Result<(), String> {
         let mut reader = BufReader::new(tcp.try_clone().map_err(|e| e.to_string())?);
         let mut writer = tcp;
 
@@ -212,8 +402,7 @@ mod imp {
             sdp_fmtp_line: "".to_owned(),
             rtcp_feedback: vec![],
         };
-        let ssrc = std::process::id().wrapping_mul(2_654_435_761);
-        let video_track: Arc<TrackLocalStaticRTP> = Arc::new(TrackLocalStaticRTP::new(MediaStreamTrack::new(
+        let track: Arc<TrackLocalStaticRTP> = Arc::new(TrackLocalStaticRTP::new(MediaStreamTrack::new(
             "hydra-rust-broadcast-stream".to_string(),
             "hydra-rust-broadcast-video".to_string(),
             "hydra-rust-broadcast".to_string(),
@@ -225,19 +414,21 @@ mod imp {
             }],
         )));
 
-        let peer_connection = PeerConnectionBuilder::new()
-            .with_configuration(config)
-            .with_media_engine(media_engine)
-            .with_interceptor_registry(registry)
-            .with_handler(Arc::clone(&handler) as Arc<dyn PeerConnectionEventHandler>)
-            .with_runtime(runtime.clone())
-            .with_udp_addrs(vec!["0.0.0.0:0".to_string()])
-            .build()
-            .await
-            .map_err(|e| format!("build peer connection: {e}"))?;
+        let peer_connection: Arc<dyn PeerConnection> = Arc::new(
+            PeerConnectionBuilder::new()
+                .with_configuration(config)
+                .with_media_engine(media_engine)
+                .with_interceptor_registry(registry)
+                .with_handler(Arc::clone(&handler) as Arc<dyn PeerConnectionEventHandler>)
+                .with_runtime(runtime.clone())
+                .with_udp_addrs(vec!["0.0.0.0:0".to_string()])
+                .build()
+                .await
+                .map_err(|e| format!("build peer connection: {e}"))?,
+        );
 
         peer_connection
-            .add_track(Arc::clone(&video_track) as Arc<dyn TrackLocal>)
+            .add_track(Arc::clone(&track) as Arc<dyn TrackLocal>)
             .await
             .map_err(|e| format!("add track: {e}"))?;
 
@@ -258,75 +449,9 @@ mod imp {
         peer_connection.set_remote_description(answer).await.map_err(|e| e.to_string())?;
 
         let _ = connected_rx.recv().await;
-        log::info!("broadcastStream: connected");
+        log::info!("broadcastStream: viewer negotiated and connected");
 
-        // Bind the socket ffmpeg will send its encoded RTP to - fixed for
-        // the life of the broadcast even if ffmpeg itself gets restarted
-        // (on a resize) below.
-        let rtp_port = UdpSocket::bind("127.0.0.1:0")
-            .and_then(|s| s.local_addr())
-            .map(|a| a.port())
-            .map_err(|e| e.to_string())?;
-        let std_sock = UdpSocket::bind(("127.0.0.1", rtp_port)).map_err(|e| e.to_string())?;
-        let sock: Arc<dyn AsyncUdpSocket> = runtime.wrap_udp_socket(std_sock).map_err(|e| e.to_string())?;
-
-        // Forwards ffmpeg's encoded RTP to the peer for as long as the
-        // process lives - runs on webrtc-rs's own shared reactor pool
-        // (outlives this function), same as stream.rs's on_track forward
-        // task; it naturally goes idle (never a busy loop) once ffmpeg
-        // stops producing anything, which happens at the same time `stop()`
-        // kills it below.
-        runtime.spawn(Box::pin(async move {
-            let mut buf = vec![0u8; 1500];
-            loop {
-                let Ok((n, _)) = sock.recv_from(&mut buf).await else { break };
-                let mut bytes = BytesMut::from(&buf[..n]);
-                if let Ok(mut packet) = rtc::rtp::packet::Packet::unmarshal(&mut bytes) {
-                    packet.header.ssrc = ssrc;
-                    if video_track.write_rtp(packet).await.is_err() {
-                        break;
-                    }
-                }
-            }
-        }));
-
-        let mut current_dims: Option<(u32, u32)> = None;
-        let mut ffmpeg: Option<(ffmpeg_sidecar::child::FfmpegChild, std::process::ChildStdin)> = None;
-
-        while !stopped.load(Ordering::Relaxed) {
-            runtime.sleep(Duration::from_millis(20)).await;
-            let Some((w, h, pixels)) = latest_frame.lock().unwrap().take() else { continue };
-
-            if current_dims != Some((w, h)) {
-                if let Some((mut child, _)) = ffmpeg.take() {
-                    let _ = child.kill();
-                }
-                match spawn_encoder(w, h, rtp_port) {
-                    Ok(pair) => {
-                        current_dims = Some((w, h));
-                        ffmpeg = Some(pair);
-                    }
-                    Err(e) => {
-                        log::warn!("broadcastStream: failed to start ffmpeg encoder: {e}");
-                        current_dims = None;
-                        continue;
-                    }
-                }
-            }
-
-            if let Some((_, stdin)) = &mut ffmpeg
-                && stdin.write_all(&pixels).is_err()
-            {
-                // ffmpeg died - drop it, a fresh one starts on the next frame.
-                ffmpeg = None;
-                current_dims = None;
-            }
-        }
-
-        if let Some((mut child, _)) = ffmpeg.take() {
-            let _ = child.kill();
-        }
-        let _ = peer_connection.close().await;
+        viewers.lock().unwrap().push(Viewer { peer_connection, track });
         Ok(())
     }
 
@@ -383,6 +508,28 @@ mod imp {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn indices_to_prune_finds_only_failed_writes_in_descending_order() {
+            let results: Vec<Result<(), ()>> = vec![Ok(()), Err(()), Ok(()), Err(()), Err(())];
+            assert_eq!(indices_to_prune(&results), vec![4, 3, 1]);
+        }
+
+        #[test]
+        fn indices_to_prune_is_empty_when_everything_succeeded() {
+            let results: Vec<Result<(), ()>> = vec![Ok(()), Ok(()), Ok(())];
+            assert!(indices_to_prune(&results).is_empty());
+        }
+
+        #[test]
+        fn indices_to_prune_removal_order_never_invalidates_earlier_indices() {
+            let results: Vec<Result<(), ()>> = vec![Err(()), Ok(()), Err(()), Ok(()), Err(())];
+            let mut v = vec!["a", "b", "c", "d", "e"];
+            for i in indices_to_prune(&results) {
+                v.remove(i);
+            }
+            assert_eq!(v, vec!["b", "d"]);
+        }
 
         #[test]
         fn start_on_a_bad_port_does_not_panic() {

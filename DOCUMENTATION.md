@@ -368,8 +368,8 @@ with otherwise.
 | Function | Description | Example |
 |---|---|---|
 | `s0.initStream("host:port")` | Connects to a broadcaster listening at that address and streams its video into a source slot | `s0.initStream("192.168.1.20:9000").out()` |
-| `broadcastStream(port)` | Broadcasts this sketch's own rendered output to the next `initStream` connection on `port`. One viewer at a time; a no-op if already broadcasting | `broadcastStream(9000)` |
-| `stopBroadcast()` | Stops broadcasting | `stopBroadcast()` |
+| `broadcastStream(port)` | Broadcasts this sketch's own rendered output to any number of `initStream` connections on `port`, all sharing a single `ffmpeg` encode; a no-op if already broadcasting | `broadcastStream(9000)` |
+| `stopBroadcast()` | Stops broadcasting, disconnecting every connected viewer | `stopBroadcast()` |
 
 The simplest way to try it is two runnable `.hydra` scripts talking to each other directly (edit
 the address in the receiving one first):
