@@ -314,11 +314,14 @@ and input devices are merged into one rather than filtered separately.
 | `note(...).adsr(a, d, s, r)` | An ADSR envelope (`a`/`d`/`r` in milliseconds, `s` a `0`-`1` sustain level), keyed to that note's on/off events, multiplied by the velocity captured at trigger time | `solid(1, 0, 0, note(60).adsr(50, 100, 0.7, 300)).out()` |
 | `cc(index[, channel])` | A chainable, raw CC value normalized to `0`-`1` | `osc().rotate(cc(1)).out()` |
 | `cc(...).smooth(factor=0.01)` | Exponential slew (temporal smoothing) of the CC value | `osc(60, 0.1, cc(1).smooth(0.2)).out()` |
-| `.range(lo, hi)` (on `note`/`cc`/`.velocity()`) | Linearly remaps a `0`-`1` value into `[lo, hi]` | `osc().rotate(cc(1).range(0, 6.28)).out()` |
-| `.scale(factor)` (on `note`/`cc`/`.velocity()`) | Multiplies a value | `osc(1, 1, note(60).scale(0.5)).out()` |
+| `aft()` | Channel-wide aftertouch (MIDI channel pressure), normalized to `0`-`1` | `osc().brightness(aft()).out()` |
+| `aft(nameOrNumber[, channel])` | Per-note polyphonic aftertouch (key pressure) for that note, normalized to `0`-`1` — passing a note is what distinguishes this from channel-wide `aft()`, matching real hydra-midi | `osc(60, 0.1, aft(60)).out()` |
+| `.range(lo, hi)` (on `note`/`cc`/`aft`/`.velocity()`) | Linearly remaps a `0`-`1` value into `[lo, hi]` | `osc().rotate(cc(1).range(0, 6.28)).out()` |
+| `.scale(factor)` (on `note`/`cc`/`aft`/`.velocity()`) | Multiplies a value | `osc(1, 1, note(60).scale(0.5)).out()` |
 | `_note(nameOrNumber[, channel])` | Plain (non-chainable) equivalent of `note(...)`, for use inside a `()=>` wrapper | `osc(1, 1, _note(60) * 0.5).out()` |
 | `_cc(index[, channel])` | Plain (non-chainable) equivalent of `cc(...)` | `osc(1, 1, _cc(1) * 6.28).out()` |
 | `_noteVelocity(nameOrNumber[, channel])` | Plain (non-chainable) equivalent of `note(...).velocity()` | `osc(1, 1, _noteVelocity(60)).out()` |
+| `_aft([nameOrNumber[, channel]])` | Plain (non-chainable) equivalent of `aft(...)` | `osc(1, 1, _aft(60) * 0.5).out()` |
 | `midi.start()` | Connects to every available MIDI input device — required before anything above reacts to input. Returns `midi` again, so `midi.start().show()` still parses | `midi.start()` |
 | `midi.pause()` | Disconnects from all MIDI input devices | `midi.pause()` |
 | `midi.show()` / `.hide()` | Shows/hides an on-screen overlay listing currently-held notes (with velocity) and non-zero CC values — a "current state" snapshot rather than real hydra-midi's own scrolling raw-message log | `midi.show()` |
@@ -430,7 +433,7 @@ detail on the `.bhr`/`.shr` formats.
 A handful of functions are registered (so a script calling them doesn't hard-error) but don't
 do anything real, or only partially implement real hydra.js/community-extension behavior —
 `initScreen`, `P5(...)`, `setFunction`, `Scene(...)`,
-`loadScript`, `ease` (non-linear curves), MIDI aftertouch, `.value(fn)`, and a few others. See
+`loadScript`, `ease` (non-linear curves), `.value(fn)`, and a few others. See
 [README.md's stub-function table](README.md#stub-functions-accepted-but-not-yet-implemented)
 for the complete, currently-accurate list with rationale for each, and SPEC.md §9 for the
 same list in the language-spec context.

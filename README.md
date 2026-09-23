@@ -144,9 +144,11 @@ A native port of the [hydra-midi](https://github.com/arnoson/hydra-midi) communi
 | `note(...).adsr(a, d, s, r)` | An ADSR envelope (`a`/`d`/`r` in milliseconds, `s` a `0`-`1` sustain level) triggered by the note's on/off events | `solid(1, 0, note(60).adsr(50, 100, 0.7, 300)).out()` |
 | `cc(index[, channel])` | A CC controller's value, normalized to `0`-`1` | `osc().rotate(cc(1)).out()` |
 | `cc(...).smooth(factor=0.01)` | Exponential slew of a CC value between frames | `osc(cc(1).smooth(0.2)).out()` |
-| `.range(lo, hi)` (on `note`/`cc`/`.velocity()`) | Remaps a `0`-`1` value into `[lo, hi]` | `osc().rotate(cc(1).range(0, 6.28)).out()` |
-| `.scale(factor)` (on `note`/`cc`/`.velocity()`) | Multiplies a value | `osc(1, 1, note(60).scale(0.5)).out()` |
-| `_note(...)` / `_cc(...)` / `_noteVelocity(...)` | Plain (non-chainable) equivalents, for use inside a `()=>` wrapper | `osc(1, 1, _note(60) * 0.5).out()` |
+| `aft()` | Channel-wide aftertouch (channel pressure), normalized to `0`-`1` | `osc().brightness(aft()).out()` |
+| `aft(nameOrNumber[, channel])` | Per-note polyphonic aftertouch (key pressure) for that note, normalized to `0`-`1` — passing a note is what distinguishes this from channel-wide `aft()` | `osc(60, 0.1, aft(60)).out()` |
+| `.range(lo, hi)` (on `note`/`cc`/`aft`/`.velocity()`) | Remaps a `0`-`1` value into `[lo, hi]` | `osc().rotate(cc(1).range(0, 6.28)).out()` |
+| `.scale(factor)` (on `note`/`cc`/`aft`/`.velocity()`) | Multiplies a value | `osc(1, 1, note(60).scale(0.5)).out()` |
+| `_note(...)` / `_cc(...)` / `_noteVelocity(...)` / `_aft(...)` | Plain (non-chainable) equivalents, for use inside a `()=>` wrapper | `osc(1, 1, _note(60) * 0.5).out()` |
 | `midi.start()` | Connects to every available MIDI input device (required before any of the above reacts to anything) | `midi.start()` |
 | `midi.pause()` | Disconnects from all MIDI input devices | `midi.pause()` |
 | `midi.show()` / `.hide()` | Shows/hides an on-screen overlay listing currently-held notes (with velocity) and non-zero CC values — a "current state" snapshot rather than real hydra-midi's own scrolling raw-message log, simpler to implement and just as useful for confirming a controller is connected | `midi.show()` |
@@ -343,7 +345,6 @@ These are registered so scripts calling them don't hard-error, but they don't do
 | `setFunction(descriptor)` | No-op — real hydra.js registers a custom GLSL source/color/combine function from a JS descriptor object + GLSL string; no dynamic function-registration or GLSL-embedding pipeline exists here |
 | `Scene(name)` | No-op — not a hydra.js API at all; some external VJ/live-coding integrations use it to switch named cue banks |
 | `.value(fn)` (MIDI `note`/`cc`, `midi` feature) | Not implemented — each chain compiles to a static GLSL expression once, so there's nowhere to run an arbitrary per-frame Rhai closure the way a real per-frame JS callback would; calling it cleanly fails as "Function not found" |
-| `aft(...)` / `_aft(...)` (MIDI aftertouch, `midi` feature) | Not implemented at all — lower real-world usage than notes/CC |
 | `midi.channel(n)` / `.input(n)` | Accepted, logged, ignored — MIDI channels and input devices are all merged into one rather than faithfully filtered (see SPEC.md §6.1) |
 | `ease(name)` (pattern) | Accepted but not faithful — `smooth()` still interpolates linearly regardless of the named curve; no non-linear easing curves are implemented |
 | `screencap()` | No-op — saving/sharing a screenshot isn't supported |

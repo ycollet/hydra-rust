@@ -24,6 +24,8 @@ uniform float iMidiVelocity[128]; // must match midi::NUM_MIDI_NOTES
 uniform float iMidiCC[128]; // must match midi::NUM_MIDI_CC
 uniform float iMidiCCSmoothed[128]; // must match midi::NUM_MIDI_CC
 uniform float iMidiEnvelope[16]; // must match midi::NUM_MIDI_ENVELOPES
+uniform float iMidiAftertouch[128]; // must match midi::NUM_MIDI_NOTES
+uniform float iMidiChannelAftertouch;
 uniform sampler2D iBuffer0;
 uniform sampler2D iBuffer1;
 uniform sampler2D iBuffer2;

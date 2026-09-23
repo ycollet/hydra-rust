@@ -165,6 +165,18 @@ struct MidiCc {
     index: i64,
 }
 
+/// Returned by `aft(...)`: a chainable, normalized (0-1) aftertouch value.
+/// `note: None` is real hydra-midi's channel-wide aftertouch (MIDI status
+/// `0xD0`, `aft()` called with no note argument); `note: Some(n)` is
+/// per-note polyphonic key pressure (`0xA0`, `aft(60)`) - both unified
+/// under one function in real hydra-midi, distinguished only by whether a
+/// note argument was given.
+#[cfg(feature = "midi")]
+#[derive(Debug, Clone, Copy)]
+struct MidiAft {
+    note: Option<i64>,
+}
+
 /// The `mouse` object (`mouse.x`, `mouse.y`), matching real hydra.js.
 #[derive(Debug, Clone, Copy)]
 struct Mouse;
@@ -464,6 +476,8 @@ fn as_arg(d: Dynamic) -> Arg {
             return Arg::Expr(midi_note_glsl(d.cast::<MidiNote>().note));
         } else if d.is::<MidiCc>() {
             return Arg::Expr(midi_cc_glsl(d.cast::<MidiCc>().index));
+        } else if d.is::<MidiAft>() {
+            return Arg::Expr(midi_aft_glsl(d.cast::<MidiAft>().note));
         }
         Arg::Lit(0.0)
     }
@@ -492,6 +506,16 @@ fn midi_cc_glsl(index: i64) -> String {
 #[cfg(feature = "midi")]
 fn midi_cc_smoothed_glsl(index: i64) -> String {
     format!("iMidiCCSmoothed[{}]", midi_clamp(index, NUM_MIDI_CC))
+}
+
+/// `note: None` -> real hydra-midi's channel-wide aftertouch; `Some(n)` ->
+/// per-note polyphonic aftertouch.
+#[cfg(feature = "midi")]
+fn midi_aft_glsl(note: Option<i64>) -> String {
+    match note {
+        Some(n) => format!("iMidiAftertouch[{}]", midi_clamp(n, NUM_MIDI_NOTES)),
+        None => "iMidiChannelAftertouch".to_string(),
+    }
 }
 
 #[cfg(feature = "midi")]
@@ -1291,7 +1315,7 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
     // real hydra.js; no MIDI support exists in hydra-synth's own core at
     // all), ported natively - see src/midi.rs's module doc comment for the
     // faithfulness notes and deliberate scope reductions (merged channels/
-    // inputs, no aftertouch, `.value(fn)` unsupported).
+    // inputs, `.value(fn)` unsupported).
     #[cfg(feature = "midi")]
     {
         engine.register_fn("note", |n: Dynamic| -> MidiNote {
@@ -1373,6 +1397,30 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
             });
         }
 
+        // aft(note?, channel?, input?)/_aft(...): real hydra-midi unifies
+        // channel-wide aftertouch (status 0xD0) and per-note polyphonic
+        // aftertouch (0xA0) under one function, distinguished only by
+        // whether a note argument was given - see MidiAft's own doc
+        // comment. `channel`/`input` are accepted but ignored, same
+        // merged-channel treatment `note`/`cc` already get.
+        engine.register_fn("aft", || -> MidiAft { MidiAft { note: None } });
+        engine.register_fn("aft", |n: Dynamic| -> MidiAft {
+            MidiAft { note: Some(note_number_from_dynamic(n)) }
+        });
+        engine.register_fn("aft", |n: Dynamic, _channel: Dynamic| -> MidiAft {
+            MidiAft { note: Some(note_number_from_dynamic(n)) }
+        });
+        engine.register_fn("aft", |n: Dynamic, _channel: Dynamic, _input: Dynamic| -> MidiAft {
+            MidiAft { note: Some(note_number_from_dynamic(n)) }
+        });
+        engine.register_fn("_aft", || -> GlslExpr { GlslExpr(midi_aft_glsl(None)) });
+        engine.register_fn("_aft", |n: Dynamic| -> GlslExpr {
+            GlslExpr(midi_aft_glsl(Some(note_number_from_dynamic(n))))
+        });
+        engine.register_fn("_aft", |n: Dynamic, _channel: Dynamic| -> GlslExpr {
+            GlslExpr(midi_aft_glsl(Some(note_number_from_dynamic(n))))
+        });
+
         // .range(lo,hi)/.scale(factor): a generic linear remap/multiply,
         // registered for every reactive-value type this module can hand
         // back, matching real hydra-midi's own `range`/`scale` transforms
@@ -1387,6 +1435,9 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
         engine.register_fn("range", |c: MidiCc, lo: Dynamic, hi: Dynamic| -> GlslExpr {
             midi_range(midi_cc_glsl(c.index), lo, hi)
         });
+        engine.register_fn("range", |a: MidiAft, lo: Dynamic, hi: Dynamic| -> GlslExpr {
+            midi_range(midi_aft_glsl(a.note), lo, hi)
+        });
         engine.register_fn("scale", |e: GlslExpr, factor: Dynamic| -> GlslExpr {
             midi_scale(e.0, factor)
         });
@@ -1395,6 +1446,9 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
         });
         engine.register_fn("scale", |c: MidiCc, factor: Dynamic| -> GlslExpr {
             midi_scale(midi_cc_glsl(c.index), factor)
+        });
+        engine.register_fn("scale", |a: MidiAft, factor: Dynamic| -> GlslExpr {
+            midi_scale(midi_aft_glsl(a.note), factor)
         });
 
         {

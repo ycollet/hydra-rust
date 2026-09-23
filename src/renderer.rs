@@ -24,6 +24,8 @@ pub struct RenderUniforms {
     pub midi_cc: [f32; NUM_MIDI_CC],
     pub midi_cc_smoothed: [f32; NUM_MIDI_CC],
     pub midi_envelope: [f32; NUM_MIDI_ENVELOPES],
+    pub midi_aftertouch: [f32; NUM_MIDI_NOTES],
+    pub midi_channel_aftertouch: f32,
 }
 
 const NUM_BUFFERS: usize = 4;
@@ -43,6 +45,8 @@ struct ProgramState {
     loc_midi_cc: Option<glow::UniformLocation>,
     loc_midi_cc_smoothed: Option<glow::UniformLocation>,
     loc_midi_envelope: Option<glow::UniformLocation>,
+    loc_midi_aftertouch: Option<glow::UniformLocation>,
+    loc_midi_channel_aftertouch: Option<glow::UniformLocation>,
     loc_buffers: [Option<glow::UniformLocation>; NUM_BUFFERS],
     loc_text0: Option<glow::UniformLocation>,
     loc_sources: [Option<glow::UniformLocation>; NUM_SOURCES],
@@ -330,6 +334,8 @@ fn resolve_program_state(gl: &glow::Context, program: glow::Program) -> ProgramS
             loc_midi_cc: gl.get_uniform_location(program, "iMidiCC"),
             loc_midi_cc_smoothed: gl.get_uniform_location(program, "iMidiCCSmoothed"),
             loc_midi_envelope: gl.get_uniform_location(program, "iMidiEnvelope"),
+            loc_midi_aftertouch: gl.get_uniform_location(program, "iMidiAftertouch"),
+            loc_midi_channel_aftertouch: gl.get_uniform_location(program, "iMidiChannelAftertouch"),
             loc_buffers: [
                 gl.get_uniform_location(program, "iBuffer0"),
                 gl.get_uniform_location(program, "iBuffer1"),
@@ -448,6 +454,12 @@ pub fn render_multipass(
             }
             if let Some(ref loc) = p.loc_midi_envelope {
                 gl.uniform_1_f32_slice(Some(loc), &u.midi_envelope);
+            }
+            if let Some(ref loc) = p.loc_midi_aftertouch {
+                gl.uniform_1_f32_slice(Some(loc), &u.midi_aftertouch);
+            }
+            if let Some(ref loc) = p.loc_midi_channel_aftertouch {
+                gl.uniform_1_f32(Some(loc), u.midi_channel_aftertouch);
             }
             if let Some(ref loc) = p.loc_resolution {
                 gl.uniform_2_f32(Some(loc), u.resolution[0], u.resolution[1]);

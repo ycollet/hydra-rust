@@ -189,6 +189,17 @@ fn midi_note_and_cc_compile_to_the_expected_uniform_references() {
 
 #[test]
 #[cfg(feature = "midi")]
+fn midi_aftertouch_compiles_to_the_expected_uniform_references() {
+    // aft(note) -> per-note polyphonic aftertouch; bare aft() -> channel-
+    // wide aftertouch; _aft(...) is the plain (non-chainable) equivalent,
+    // for use inside a stripped `()=>` wrapper.
+    let glsl = ok_shader0("osc(60, aft(60).range(0,1), _aft()*0.5).out()");
+    assert!(glsl.contains("iMidiAftertouch[60]"), "{glsl}");
+    assert!(glsl.contains("iMidiChannelAftertouch"), "{glsl}");
+}
+
+#[test]
+#[cfg(feature = "midi")]
 fn midi_adsr_and_smooth_register_a_request_and_reference_their_own_slot() {
     use hydra_rust::eval::MidiRequest;
     let result = eval("solid(1, 0, note(60).adsr(50,100,0.7,300)).diff(osc(cc(1).smooth(0.2))).out()").unwrap();

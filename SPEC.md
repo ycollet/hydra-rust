@@ -609,9 +609,11 @@ not found").
 | `.adsr(a, d, s, r)` (on `note(...)`) | An ADSR envelope (`a`/`d`/`r` in milliseconds, `s` a `0`-`1` sustain level) keyed to that note's on/off events, multiplied by the velocity captured when the note was triggered - ported from `hydra-midi`'s `lib/Envelope.ts`. A small fixed pool of 16 concurrent envelopes (`midi::NUM_MIDI_ENVELOPES`) is available per script |
 | `cc(index[, channel])` | A chainable, raw CC value normalized to `0`-`1` |
 | `.smooth(factor=0.01)` (on `cc(...)`) | Exponential slew (temporal smoothing) of the CC value |
+| `aft()` | A chainable, channel-wide aftertouch value (MIDI status `0xD0`, channel pressure), normalized `0`-`1` |
+| `aft(nameOrNumber[, channel])` | A chainable, per-note polyphonic aftertouch value (status `0xA0`, key pressure) for that note, normalized `0`-`1` - the *presence* of a note argument is what distinguishes this from channel-wide `aft()`, matching real hydra-midi exactly |
 | `.range(lo, hi)` | Linearly remaps a `0`-`1` value (any of the above) into `[lo, hi]` |
 | `.scale(factor)` | Multiplies a value (any of the above) |
-| `_note(...)` / `_cc(...)` / `_noteVelocity(...)` | The plain (non-chainable) equivalents of `note(...)`, `cc(...)`, and `note(...).velocity()`, for use inside a `()=>` wrapper (stripped by `arrow.rs`, see §4 step 14) |
+| `_note(...)` / `_cc(...)` / `_noteVelocity(...)` / `_aft(...)` | The plain (non-chainable) equivalents of `note(...)`, `cc(...)`, `note(...).velocity()`, and `aft(...)`, for use inside a `()=>` wrapper (stripped by `arrow.rs`, see §4 step 14) |
 | `midi.start()` / `.pause()` | Connects to (or disconnects from) every available MIDI input port - see below. `.start()` returns `midi` again, so `midi.start().show()` (the documented real hydra-midi idiom) still parses |
 | `midi.show()` / `.hide()` | Shows/hides an egui overlay (`HydraApp::show_midi_overlay`) listing currently-held notes (with velocity) and non-zero CC values - a "current state" snapshot rather than real hydra-midi's own scrolling raw-message log (see below) |
 | `midi.channel(n)` / `.input(n)` | Accepted, logged, ignored - see below |
@@ -629,7 +631,6 @@ fully implement (e.g. `ease()`, §7):
   `midi.channel(n)`/`.input(n)` are accepted but ignored, rather than
   faithfully filtering per real hydra-midi's own wildcard-keyed system -
   a reasonable trade for a typical one-controller setup.
-- **Aftertouch (`aft`/`_aft`) isn't implemented at all.**
 - **`midi.show()`'s overlay is a state snapshot, not a message log.** Real
   hydra-midi's monitor scrolls raw incoming MIDI messages as they arrive;
   this shows the currently-held notes and non-zero CC values instead

@@ -13,8 +13,6 @@
 //!   ignored. Real hydra-midi's own per-channel/per-input filtering needs
 //!   a much bigger keying scheme (see its `getMidiWildcards`) for little
 //!   real benefit in a typical one-controller setup.
-//! - Aftertouch (`aft`/`_aft`) isn't implemented at all - lower real-world
-//!   usage than notes/CC.
 //! - `.adsr(a,d,s,r)`'s envelope value is multiplied by the velocity
 //!   captured at the moment the note was triggered, held for the envelope's
 //!   whole lifetime (including release) - real hydra-midi's own JS instead
@@ -133,6 +131,12 @@ mod imp {
         note_velocity: [f32; NUM_MIDI_NOTES],
         cc_value: [f32; NUM_MIDI_CC],
         cc_smooth_factor: [f32; NUM_MIDI_CC],
+        /// Polyphonic key pressure (status `0xA0`), per note - real
+        /// hydra-midi's `aft(note)`.
+        aftertouch: [f32; NUM_MIDI_NOTES],
+        /// Channel pressure (status `0xD0`) - real hydra-midi's `aft()`
+        /// with no note argument.
+        channel_aftertouch: f32,
         slots: [Option<EnvelopeSlot>; NUM_MIDI_ENVELOPES],
     }
 
@@ -142,6 +146,8 @@ mod imp {
                 note_velocity: [0.0; NUM_MIDI_NOTES],
                 cc_value: [0.0; NUM_MIDI_CC],
                 cc_smooth_factor: [0.0; NUM_MIDI_CC],
+                aftertouch: [0.0; NUM_MIDI_NOTES],
+                channel_aftertouch: 0.0,
                 slots: [None; NUM_MIDI_ENVELOPES],
             }
         }
@@ -185,6 +191,17 @@ mod imp {
                 self.cc_value[index] = value as f32 / 127.0;
             }
         }
+
+        fn poly_aftertouch(&mut self, note: u8, value: u8) {
+            let note = note as usize;
+            if note < NUM_MIDI_NOTES {
+                self.aftertouch[note] = value as f32 / 127.0;
+            }
+        }
+
+        fn set_channel_aftertouch(&mut self, value: u8) {
+            self.channel_aftertouch = value as f32 / 127.0;
+        }
     }
 
     /// A snapshot of every reactive MIDI value, uploaded as uniform arrays
@@ -196,6 +213,8 @@ mod imp {
         pub cc: [f32; NUM_MIDI_CC],
         pub cc_smoothed: [f32; NUM_MIDI_CC],
         pub envelope: [f32; NUM_MIDI_ENVELOPES],
+        pub aftertouch: [f32; NUM_MIDI_NOTES],
+        pub channel_aftertouch: f32,
     }
 
     pub struct MidiManager {
@@ -320,25 +339,68 @@ mod imp {
                 cc: state.cc_value,
                 cc_smoothed: self.cc_smoothed,
                 envelope,
+                aftertouch: state.aftertouch,
+                channel_aftertouch: state.channel_aftertouch,
             }
         }
     }
 
     fn handle_message(state: &Arc<Mutex<SharedState>>, message: &[u8]) {
-        let [status, d1, d2, ..] = *message else { return };
+        let Some(&status) = message.first() else { return };
         let kind = status & 0xF0;
         let mut state = state.lock().unwrap();
         match kind {
-            0x90 => state.note_on(d1, d2),
-            0x80 => state.note_off(d1),
-            0xB0 => state.control_change(d1, d2),
+            0x90 if message.len() >= 3 => state.note_on(message[1], message[2]),
+            0x80 if message.len() >= 3 => state.note_off(message[1]),
+            0xB0 if message.len() >= 3 => state.control_change(message[1], message[2]),
+            // Polyphonic key pressure - two data bytes (note, pressure).
+            0xA0 if message.len() >= 3 => state.poly_aftertouch(message[1], message[2]),
+            // Channel pressure - only *one* data byte (pressure), unlike
+            // every message kind above - a real 2-byte MIDI message, not a
+            // truncated 3-byte one.
+            0xD0 if message.len() >= 2 => state.set_channel_aftertouch(message[1]),
             _ => {}
         }
     }
 
     #[cfg(test)]
     mod tests {
-        use super::Envelope;
+        use super::{handle_message, Envelope, SharedState};
+        use std::sync::{Arc, Mutex};
+
+        #[test]
+        fn poly_aftertouch_sets_the_given_notes_value() {
+            let state = Arc::new(Mutex::new(SharedState::new()));
+            handle_message(&state, &[0xA0, 60, 100]);
+            assert_eq!(state.lock().unwrap().aftertouch[60], 100.0 / 127.0);
+        }
+
+        #[test]
+        fn channel_aftertouch_sets_the_shared_value_from_a_two_byte_message() {
+            let state = Arc::new(Mutex::new(SharedState::new()));
+            handle_message(&state, &[0xD0, 64]);
+            assert_eq!(state.lock().unwrap().channel_aftertouch, 64.0 / 127.0);
+        }
+
+        #[test]
+        fn aftertouch_on_different_notes_is_independent() {
+            let state = Arc::new(Mutex::new(SharedState::new()));
+            handle_message(&state, &[0xA0, 10, 20]);
+            handle_message(&state, &[0xA0, 11, 40]);
+            let guard = state.lock().unwrap();
+            assert_eq!(guard.aftertouch[10], 20.0 / 127.0);
+            assert_eq!(guard.aftertouch[11], 40.0 / 127.0);
+        }
+
+        #[test]
+        fn a_truncated_message_of_an_otherwise_three_byte_kind_is_ignored_not_a_panic() {
+            let state = Arc::new(Mutex::new(SharedState::new()));
+            handle_message(&state, &[0x90, 60]); // note-on missing its velocity byte
+            handle_message(&state, &[0xA0, 60]); // poly aftertouch missing its value byte
+            let guard = state.lock().unwrap();
+            assert_eq!(guard.note_velocity[60], 0.0);
+            assert_eq!(guard.aftertouch[60], 0.0);
+        }
 
         // `Envelope::value`'s first call after `trigger()` lazily anchors
         // `start_time` to *that call's own argument* (matching real

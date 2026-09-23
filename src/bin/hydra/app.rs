@@ -609,6 +609,8 @@ impl HydraApp {
                 cc: [f32; hydra_rust::midi::NUM_MIDI_CC],
                 cc_smoothed: [f32; hydra_rust::midi::NUM_MIDI_CC],
                 envelope: [f32; hydra_rust::midi::NUM_MIDI_ENVELOPES],
+                aftertouch: [f32; hydra_rust::midi::NUM_MIDI_NOTES],
+                channel_aftertouch: f32,
             }
             EmptyMidiFrame {
                 note: [0.0; hydra_rust::midi::NUM_MIDI_NOTES],
@@ -616,6 +618,8 @@ impl HydraApp {
                 cc: [0.0; hydra_rust::midi::NUM_MIDI_CC],
                 cc_smoothed: [0.0; hydra_rust::midi::NUM_MIDI_CC],
                 envelope: [0.0; hydra_rust::midi::NUM_MIDI_ENVELOPES],
+                aftertouch: [0.0; hydra_rust::midi::NUM_MIDI_NOTES],
+                channel_aftertouch: 0.0,
             }
         };
 
@@ -652,6 +656,8 @@ impl HydraApp {
             midi_cc: midi_frame.cc,
             midi_cc_smoothed: midi_frame.cc_smoothed,
             midi_envelope: midi_frame.envelope,
+            midi_aftertouch: midi_frame.aftertouch,
+            midi_channel_aftertouch: midi_frame.channel_aftertouch,
         };
 
         let cb = eframe::egui_glow::CallbackFn::new(move |_info, painter| {
