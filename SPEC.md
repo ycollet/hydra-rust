@@ -56,7 +56,7 @@ osc(60.0, 0.1, time * 0.5)
   displays only buffer `n`. Default display mode is buffer `0`.
 - **`hush()`** clears all four buffers and resets `o0` to solid black.
 - Multiple statements are just Rhai statements, one per chain (see §4,
-  step 17, `asi`, for how missing `;` between them is handled).
+  step 18, `asi`, for how missing `;` between them is handled).
 - **Nesting limit:** a chain passed as another chain's "other" operand
   (`.modulate(otherChain, ...)`) recurses through `compile_node`; total
   recursion depth is capped at 16 (`MAX_DEPTH`), erroring `nesting too deep
@@ -164,7 +164,7 @@ Pipeline order (each step's output feeds the next):
    argument, keeping just its value. Deliberately leaves a parenthesized
    group untouched when it's actually a *parameter list* rather than a
    call's arguments — `function name(min=0, max=1) {...}` (step 6) or
-   `(min=0, max=1) => ...` (step 18) have the exact same `name = value`
+   `(min=0, max=1) => ...` (step 19) have the exact same `name = value`
    shape, but there they're real default parameter values those later
    steps need to see intact; detected structurally (preceded by `function
    NAME`, or followed by `=>`) and copied verbatim instead of recursed
@@ -196,7 +196,7 @@ Pipeline order (each step's output feeds the next):
    unbound in the body) and reduces the whole construct — handler chain
    included — down to the bare `BODY` text, with **no** wrapping `{ }`:
    since this wrapper typically spans the sketch's entire top-level
-   statement list, keeping a block around it would leave step 17's
+   statement list, keeping a block around it would leave step 18's
    paren/bracket-depth tracking (which counts `{`/`}` the same as `(`/`[`)
    at depth 1 for the whole body, silently disabling semicolon insertion
    between the body's own top-level statements.
@@ -217,7 +217,7 @@ Pipeline order (each step's output feeds the next):
    (an empty `cond`, `for(;;)`, becomes `true`, matching JS's own "no
    condition" semantics). A brace-less single-statement body
    (`for (...) stmt;`, valid JS, seen in real sketches) is normalized to a
-   block either way. Runs asi (step 17) directly on the loop body's own
+   block either way. Runs asi (step 18) directly on the loop body's own
    content before wrapping it (combined with the update clause, for the
    C-style form, so asi correctly sees "something follows" when deciding
    whether the body's last line needs a `;`) — otherwise the *global* asi
@@ -309,14 +309,48 @@ Pipeline order (each step's output feeds the next):
    than via full expression-grammar parsing; nested/chained ternaries
    (`a?b:c?d:e`, right-associative) are handled via recursion on the
    extracted branches.
-17. **`asi::insert_missing_semicolons`** — JS has automatic semicolon
+17. **`commastmt::rewrite_top_level_comma_statements`** — rewrites a bare
+   (non-parenthesized) top-level sequence of comma-joined statements
+   (`loadScript(a), loadScript(b), setResolution(w,h)`) into
+   semicolon-separated Rhai statements. Real sketches commonly load a
+   community extension this way — `await loadScript(url1), await
+   loadScript(url2), setResolution(w, h), canvas.setRelativeSize(1), ...` is
+   a specific, widely-copy-pasted boilerplate line (the `hyper-hydra`/
+   `geikha` canvas extension's setup snippet). JS allows a comma-expression
+   as a standalone statement (each operand runs in order for side effects
+   only), but Rhai has no comma operator at all. This is a different
+   grammatical position from step 20 (`commaexpr`)'s own comma handling:
+   that pass collapses a comma-tuple used *as a value* down to its last
+   term; this one splits a comma chain used *as a sequence of statements*
+   into separate ones. Scoped narrowly: only a comma at true top-level
+   bracket depth (outside every `(`/`[`/`{` in the script) is touched,
+   since any call's own argument-list commas or any array/object literal's
+   commas are inherently nested one level inside their own brackets. One
+   exception is excluded on purpose: a genuine `let`/`const` multi-variable
+   declarator list (`let a=1, b=2`) is also a bare depth-0 comma chain, but
+   needs each declarator to repeat the keyword (`let a=1; let b=2;`), a
+   different, not-yet-handled transform — so a comma between `let`/`const`
+   and its next terminating `;` is left alone, *unless* the very next token
+   after that comma (skipping whitespace) is itself a fresh `let`/`const`.
+   That lookahead matters because `autolet` (step 10) runs first and is
+   itself comma-agnostic — it inserts `let` before every bare assignment it
+   finds regardless of what separates it from the previous one, so a
+   chain like `rn=1,a=2,dx=rn()` becomes `let rn=1,let a=2,let dx=rn()` by
+   the time this pass sees it. Without the lookahead, the first `let` would
+   look like the start of one legitimate multi-declarator list and suppress
+   splitting for the entire rest of the chain; the repeated keyword is the
+   signal that these are actually independent statements, not continuation
+   commas of a single declaration. Runs before `asi`: by the time `asi` sees
+   this, each comma-joined call is already its own semicolon-terminated
+   statement.
+18. **`asi::insert_missing_semicolons`** — JS has automatic semicolon
    insertion; Rhai doesn't. Real multi-buffer sketches routinely put each
    statement on its own line with no `;` (`osc(10).out(o0)\nosc(20).out(o1)`).
    Inserts `;` at line breaks that are genuine statement boundaries (bracket
    depth 0, and neither the end of the current line nor the start of the
    next one looks like a continuation — an operator, a trailing comma/open
    bracket, or a leading `.`/closing bracket/operator on the next line).
-18. **`arrowfn::rewrite_named_arrows`** — real sketches commonly define
+19. **`arrowfn::rewrite_named_arrows`** — real sketches commonly define
    small helpers as a *named* function-*value* assignment rather than
    `function name(...) {...}` (step 6) - either arrow-function spelling
    (`let el = (s,b,l) => shape(99,s,b)`, block-bodied `let f = (a,b) => {
@@ -347,11 +381,11 @@ Pipeline order (each step's output feeds the next):
    event-handler wiring (`p.setup = () => {...}`, `img.onload = function()
    {...}`) that nothing here would ever invoke anyway — dropping it is
    strictly no worse than the hard parse error it replaces. Runs right
-   after `asi` (one more step still follows, see step 19): every other pass
+   after `asi` (one more step still follows, see step 20): every other pass
    has already rewritten the body's own content, and an arrow's expression
    body (no `{ }`) needs an unambiguous end, which becomes just "the next
    top-level `;`" once `asi` has guaranteed one is there.
-19. **`commaexpr::rewrite_comma_expressions`** — rewrites a parenthesized,
+20. **`commaexpr::rewrite_comma_expressions`** — rewrites a parenthesized,
    non-call, comma-containing group (`(a, b, c)`) down to just its last
    term, `(c)` — JS's own comma-operator semantics (every sub-expression is
    evaluated in order, but only the last one's value survives). Rhai has no

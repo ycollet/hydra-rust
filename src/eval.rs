@@ -15,6 +15,7 @@ use crate::jskeywords;
 use crate::kwargs;
 use crate::mathjs;
 use crate::commaexpr;
+use crate::commastmt;
 use crate::numlit;
 use crate::objlit;
 use crate::patcall;
@@ -1128,6 +1129,7 @@ pub fn preprocess(code: &str) -> String {
     let code = &arrow::strip_zero_arg_arrows(code);
     let code = &objlit::rewrite_object_literals(code);
     let code = &ternary::rewrite_ternaries(code);
+    let code = &commastmt::rewrite_top_level_comma_statements(code);
     let code = &asi::insert_missing_semicolons(code);
     let code = &arrowfn::rewrite_named_arrows(code);
     commaexpr::rewrite_comma_expressions(code)
