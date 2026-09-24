@@ -317,31 +317,40 @@ Pipeline order (each step's output feeds the next):
    next one looks like a continuation — an operator, a trailing comma/open
    bracket, or a leading `.`/closing bracket/operator on the next line).
 18. **`arrowfn::rewrite_named_arrows`** — real sketches commonly define
-   small helpers as a *named* arrow-function assignment
-   (`let el = (s,b,l) => shape(99,s,b)`, or block-bodied
-   `let f = (a,b) => { ... }`) rather than `function name(...) {...}`
-   (step 6). Rhai has no `=>` closure syntax at all, and unlike the
-   zero-parameter reactive-value idiom (step 14), these are called
-   elsewhere with real arguments — so they need to become genuine callable
-   `fn` declarations, not a value substitution. Rewrites
-   `IDENT = (params) => BODY` to `fn IDENT(params) { BODY }`, stripping any
-   leading `let`/`const` and any default parameter values (not cascaded
-   into arity-shim overloads the way step 6's does — no corpus evidence yet
-   that this form commonly needs it). `params` may be parenthesized
+   small helpers as a *named* function-*value* assignment rather than
+   `function name(...) {...}` (step 6) - either arrow-function spelling
+   (`let el = (s,b,l) => shape(99,s,b)`, block-bodied `let f = (a,b) => {
+   ... }`) or, just as commonly, the `function` *expression* spelling of
+   the exact same idiom (`let f = function(a,b) { ... }`,
+   `shapefm = function(r=.2,sm=.01){ ... }`). Rhai has no `=>` closure
+   syntax and no function-as-expression at all (`fn` must be a top-level
+   item), and unlike the zero-parameter reactive-value idiom (step 14),
+   these are called elsewhere with real arguments — so they need to become
+   genuine callable `fn` declarations, not a value substitution. Rewrites
+   either spelling to `fn IDENT(params) { BODY }`, stripping any leading
+   `let`/`const` and any default parameter values (not cascaded into
+   arity-shim overloads the way step 6's does — no corpus evidence yet that
+   this form commonly needs it). Arrow `params` may be parenthesized
    (`(a,b)`, possibly empty) or, for one parameter, bare (`v => ...`); an
    empty parameter list is only accepted with a block `BODY` (an empty
    *expression*-bodied arrow is the reactive-value idiom from step 14
-   instead, handled upstream). If `IDENT` is a property path (`obj.prop =
-   ...`, however deeply dotted) rather than a bare identifier, the whole
-   statement is dropped instead: Rhai has no way to declare a function "on"
-   a property path, and every real instance of this shape in the corpus is
-   JS/p5.js/DOM event-handler wiring (`p.setup = () => {...}`) that nothing
-   here would ever invoke anyway — dropping it is strictly no worse than
-   the hard parse error it replaces. Runs right after `asi` (one more step
-   still follows, see step 19): every other pass has already rewritten the
-   arrow body's own content, and an expression body with no `{ }` needs an
-   unambiguous end, which becomes just "the next top-level `;`" once `asi`
-   has guaranteed one is there.
+   instead, handled upstream) - the `function`-expression spelling has no
+   expression-body form at all, so this exclusion doesn't apply to it. A
+   `function`-expression may repeat a name after the keyword
+   (`x = function x() {...}`, only for its own stack traces/self-reference)
+   — accepted and discarded, since `IDENT` (the assignment target) is what
+   actually becomes the callable name either way. If `IDENT` is a property
+   path (`obj.prop = ...`, however deeply dotted) rather than a bare
+   identifier, the whole statement is dropped instead, regardless of which
+   spelling: Rhai has no way to declare a function "on" a property path,
+   and every real instance of this shape in the corpus is JS/p5.js/DOM
+   event-handler wiring (`p.setup = () => {...}`, `img.onload = function()
+   {...}`) that nothing here would ever invoke anyway — dropping it is
+   strictly no worse than the hard parse error it replaces. Runs right
+   after `asi` (one more step still follows, see step 19): every other pass
+   has already rewritten the body's own content, and an arrow's expression
+   body (no `{ }`) needs an unambiguous end, which becomes just "the next
+   top-level `;`" once `asi` has guaranteed one is there.
 19. **`commaexpr::rewrite_comma_expressions`** — rewrites a parenthesized,
    non-call, comma-containing group (`(a, b, c)`) down to just its last
    term, `(c)` — JS's own comma-operator semantics (every sub-expression is

@@ -1,14 +1,16 @@
-//! Rewrites JS named-arrow-function assignments (`let name = (a, b) =>
-//! EXPR` or `name = (a, b) => { BLOCK }`) into genuine Rhai function
-//! declarations (`fn name(a, b) { EXPR }` / `fn name(a, b) { BLOCK }`).
-//! Real sketches commonly define small reusable helpers this way - the
-//! arrow-function equivalent of `function name(a, b) { ... }` (already
-//! handled by `jsfunctions::rewrite_function_decls`), just for authors who
-//! prefer the terser syntax. Rhai has no `=>` closure syntax at all, and a
-//! *value*-only substitution (as `arrow::strip_zero_arg_arrows` does for
-//! the reactive-value idiom) doesn't work here: these are called
-//! elsewhere with real arguments, so they need to become real callable
-//! functions, not an inlined expression.
+//! Rewrites JS named-function-*value* assignments (`let name = (a, b) =>
+//! EXPR` / `name = (a, b) => { BLOCK }`, or the `function` *expression*
+//! spelling of the exact same idiom, `name = function(a, b) { BLOCK }`)
+//! into genuine Rhai function declarations (`fn name(a, b) { EXPR }` /
+//! `fn name(a, b) { BLOCK }`). Real sketches commonly define small reusable
+//! helpers this way - the closure-as-a-value equivalent of `function
+//! name(a, b) { ... }` used as a *statement* (already handled by
+//! `jsfunctions::rewrite_function_decls`), just assigned to a variable
+//! instead. Rhai has no `=>` closure syntax and no function-as-expression
+//! at all (`fn` must be a top-level item), and a *value*-only substitution
+//! (as `arrow::strip_zero_arg_arrows` does for the reactive-value idiom)
+//! doesn't work here: these are called elsewhere with real arguments, so
+//! they need to become real callable functions, not an inlined expression.
 //!
 //! The parameter list may be parenthesized (`(a, b)`) or, for a single
 //! parameter, bare (`v => ...`) - both are real, seen shapes; the bare form
@@ -34,12 +36,21 @@
 //! - **A property path** (`obj.prop = ...`, however deeply dotted): the
 //!   *entire statement* is dropped. Every real instance of this shape seen
 //!   in the corpus is JS/p5.js/DOM-style event-handler wiring (`p.setup =
-//!   () => {...}`, `img.onload = () => {...}`) on an object hydra-rust has
-//!   no model of at all - Rhai has no way to declare a function "on" an
+//!   () => {...}`, `img.onload = function() {...}`) on an object hydra-rust
+//!   has no model of at all - Rhai has no way to declare a function "on" an
 //!   arbitrary property path the way `fn` declares a global one, and
 //!   nothing here would ever invoke it even if it somehow parsed. Since
 //!   the alternative is an unconditional hard parse error, dropping it is
-//!   strictly no worse and often unblocks the rest of the script.
+//!   strictly no worse and often unblocks the rest of the script. Applies
+//!   identically regardless of which spelling (`=>` or `function`) the
+//!   right-hand side used.
+//!
+//! The `function`-expression spelling always has a block body (JS gives it
+//! no expression-body form the way `=>` has), and may optionally repeat a
+//! name right after the `function` keyword (`x = function x() {...}`,
+//! purely for the function's own stack traces/self-reference) - accepted
+//! and discarded, since the assignment target is what's actually used as
+//! the callable name here either way.
 //!
 //! Runs last, after `asi`, for two reasons: every other pass has already
 //! rewritten the arrow body's own content (ternaries, `Math.*`, etc.),
@@ -101,21 +112,37 @@ fn try_rewrite(chars: &[char], mask: &[bool], i: usize) -> Option<(String, usize
     j += 1;
     skip_ws(chars, mask, &mut j);
 
-    let (names, mut j) = parse_arrow_params(chars, mask, j)?;
-    skip_ws(chars, mask, &mut j);
-    if chars.get(j) != Some(&'=') || chars.get(j + 1) != Some(&'>') {
-        return None;
-    }
-    j += 2;
-    skip_ws(chars, mask, &mut j);
-
-    let is_block_body = chars.get(j) == Some(&'{');
-    let (body, after) = if is_block_body {
-        let body_close = matching_close(chars, mask, j, '{', '}')?;
-        (chars[j..=body_close].iter().collect::<String>(), body_close + 1)
+    // Try the `function(...) {...}` expression spelling first; fall back
+    // to arrow syntax if that's not what's here. Both produce the same
+    // (names, body, is_block_body=true) shape from this point on.
+    let (names, body, after) = if let Some(result) = try_parse_function_expr(chars, mask, j) {
+        result
     } else {
-        let (expr, semi_end) = scan_expr_body(chars, mask, j);
-        (format!("{{ {} }}", expr.trim()), semi_end)
+        let (names, mut j) = parse_arrow_params(chars, mask, j)?;
+        skip_ws(chars, mask, &mut j);
+        if chars.get(j) != Some(&'=') || chars.get(j + 1) != Some(&'>') {
+            return None;
+        }
+        j += 2;
+        skip_ws(chars, mask, &mut j);
+
+        let is_block_body = chars.get(j) == Some(&'{');
+        let (body, after) = if is_block_body {
+            let body_close = matching_close(chars, mask, j, '{', '}')?;
+            (chars[j..=body_close].iter().collect::<String>(), body_close + 1)
+        } else {
+            let (expr, semi_end) = scan_expr_body(chars, mask, j);
+            (format!("{{ {} }}", expr.trim()), semi_end)
+        };
+
+        // Only excluded for a bare-identifier target - a property-path
+        // target is always dropped below regardless of arg count/body
+        // shape, since it can never be the reactive-value idiom (that's
+        // an argument-position-only thing, never `obj.prop = ...`).
+        if target.len() == 1 && names.is_empty() && !is_block_body {
+            return None; // the reactive-value idiom, handled upstream
+        }
+        (names, body, after)
     };
 
     if target.len() > 1 {
@@ -123,12 +150,43 @@ fn try_rewrite(chars: &[char], mask: &[bool], i: usize) -> Option<(String, usize
         return Some((String::new(), after));
     }
 
-    if names.is_empty() && !is_block_body {
-        return None; // the reactive-value idiom, handled upstream
-    }
-
     let rewritten = format!("fn {}({}) {body}", target[0], names.join(","));
     Some((rewritten, after))
+}
+
+/// Parses the `function(args) {...}` expression spelling at `j` (an
+/// optional repeated name after the keyword is accepted and discarded -
+/// see the module doc comment), returning the parameter names, the block
+/// body text (braces included), and the index just past it. `None` if
+/// what's at `j` isn't this shape at all (falls back to arrow parsing).
+fn try_parse_function_expr(
+    chars: &[char],
+    mask: &[bool],
+    j: usize,
+) -> Option<(Vec<String>, String, usize)> {
+    let word_end = ident_end(chars, j);
+    if chars[j..word_end].iter().collect::<String>() != "function" {
+        return None;
+    }
+    let mut k = word_end;
+    skip_ws(chars, mask, &mut k);
+    if chars.get(k).is_some_and(|c| is_ident_start(*c)) {
+        k = ident_end(chars, k);
+        skip_ws(chars, mask, &mut k);
+    }
+    if chars.get(k) != Some(&'(') {
+        return None;
+    }
+    let close = matching_close(chars, mask, k, '(', ')')?;
+    let names: Vec<String> = parse_params(chars, mask, k + 1, close).into_iter().map(|(n, _)| n).collect();
+    let mut m = close + 1;
+    skip_ws(chars, mask, &mut m);
+    if chars.get(m) != Some(&'{') {
+        return None;
+    }
+    let body_close = matching_close(chars, mask, m, '{', '}')?;
+    let body = chars[m..=body_close].iter().collect::<String>();
+    Some((names, body, body_close + 1))
 }
 
 /// Parses an assignment target: a bare identifier, or a dotted property
@@ -333,6 +391,71 @@ mod tests {
     #[test]
     fn ignores_inside_strings_and_comments() {
         let src = "text(\"f = (a,b) => a\") // f = (a,b) => a";
+        assert_eq!(rewrite_named_arrows(src), src);
+    }
+
+    // --- the `function(...) {...}` expression spelling ---
+
+    #[test]
+    fn rewrites_bare_identifier_function_expression() {
+        assert_eq!(
+            rewrite_named_arrows("let f = function(a,b) { let c = a+b; c };"),
+            "fn f(a,b) { let c = a+b; c };"
+        );
+    }
+
+    #[test]
+    fn rewrites_bare_assignment_function_expression_without_let() {
+        assert_eq!(
+            rewrite_named_arrows("shapefm = function(r=.2,sm=.01){ shape(r,sm) };"),
+            "fn shapefm(r,sm) { shape(r,sm) };"
+        );
+    }
+
+    #[test]
+    fn rewrites_zero_param_function_expression() {
+        assert_eq!(
+            rewrite_named_arrows("let update = function() { let v = 1; v };"),
+            "fn update() { let v = 1; v };"
+        );
+    }
+
+    #[test]
+    fn drops_a_property_assigned_function_expression() {
+        // same DOM/p5.js event-handler wiring treatment as the arrow form -
+        // see the module doc comment. Block body, so (matching the arrow
+        // form's own precedent) a trailing `;` after it is left alone
+        // rather than consumed - a harmless empty statement in Rhai too.
+        assert_eq!(rewrite_named_arrows("img.onload = function() { draw(); };"), ";");
+    }
+
+    #[test]
+    fn drops_a_deeply_dotted_property_assigned_function_expression() {
+        assert_eq!(
+            rewrite_named_arrows("window.incrementKeys = function() { poll(); };"),
+            ";"
+        );
+    }
+
+    #[test]
+    fn discards_an_optional_repeated_name_after_the_function_keyword() {
+        // `x = function x() {...}` - the repeated name is only for the
+        // function's own stack traces/self-reference; the assignment
+        // target is what's actually used as the callable name.
+        assert_eq!(
+            rewrite_named_arrows("let f = function f(a) { a*2 };"),
+            "fn f(a) { a*2 };"
+        );
+    }
+
+    #[test]
+    fn falls_back_to_end_of_input_without_trailing_semicolon_for_function_expr() {
+        assert_eq!(rewrite_named_arrows("let f = function(a,b) { a+b }"), "fn f(a,b) { a+b }");
+    }
+
+    #[test]
+    fn ignores_function_expression_inside_strings_and_comments() {
+        let src = "text(\"f = function(a) { a }\") // f = function(a) { a }";
         assert_eq!(rewrite_named_arrows(src), src);
     }
 }
