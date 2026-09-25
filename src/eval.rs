@@ -1787,6 +1787,60 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
     engine.register_fn("Scene", |name: ImmutableString| {
         log::warn!("Scene(\"{name}\") ignored: external scene/cue integration is not supported");
     });
+    // `document` - real sketches commonly build an offscreen `<canvas>`/
+    // `<img>` element (usually to feed a p5.js overlay, or occasionally
+    // just leftover DOM boilerplate that's never actually used for
+    // anything hydra renders) - the exact same "no Rust equivalent here"
+    // situation as `P5()`. Each of these returns a plain settable map:
+    // later property reads/writes (`.width = 1024`, `.style.opacity`)
+    // and further real hydra.js-side method calls on it are harmless
+    // instead of "Variable not found"/"Function not found", matching the
+    // `P5()`/`hydraText` treatment.
+    engine.register_fn("createElement", |_doc: Map, _tag: ImmutableString| -> Map { Map::new() });
+    engine.register_fn("getElementById", |_doc: Map, _id: ImmutableString| -> Map { Map::new() });
+    engine.register_fn("querySelector", |_doc: Map, _selector: ImmutableString| -> Map { Map::new() });
+    // Returns a one-element array (not empty) so a real sketch's common
+    // `document.getElementsByTagName('canvas')[0]` indexing doesn't itself
+    // hard-fail on an out-of-bounds access.
+    engine.register_fn("getElementsByTagName", |_doc: Map, _tag: ImmutableString| -> Array {
+        Array::from([Dynamic::from(Map::new())])
+    });
+    engine.register_fn("addEventListener", |_doc: Map, _event: ImmutableString, _handler: Dynamic| {});
+    // `canvasEl.getContext("2d")` - the resulting 2D drawing context is
+    // itself just another settable stand-in map (its own properties like
+    // `.fillStyle`/`.font` need no per-property registration, same as
+    // `hydraText`); only its *methods* need registering. Arities match
+    // the real Canvas 2D API exactly (`fillText`'s optional trailing
+    // `maxWidth`, `measureText` returning a `TextMetrics`-like stand-in
+    // in case `.width` is read off it).
+    engine.register_fn("getContext", |_el: Map, _kind: ImmutableString| -> Map { Map::new() });
+    engine.register_fn("fillText", |_ctx: Map, _text: ImmutableString, _x: Dynamic, _y: Dynamic| {});
+    engine.register_fn(
+        "fillText",
+        |_ctx: Map, _text: ImmutableString, _x: Dynamic, _y: Dynamic, _max_width: Dynamic| {},
+    );
+    engine.register_fn("strokeText", |_ctx: Map, _text: ImmutableString, _x: Dynamic, _y: Dynamic| {});
+    engine.register_fn("fillRect", |_ctx: Map, _x: Dynamic, _y: Dynamic, _w: Dynamic, _h: Dynamic| {});
+    engine.register_fn("clearRect", |_ctx: Map, _x: Dynamic, _y: Dynamic, _w: Dynamic, _h: Dynamic| {});
+    engine.register_fn("save", |_ctx: Map| {});
+    engine.register_fn("restore", |_ctx: Map| {});
+    engine.register_fn("translate", |_ctx: Map, _x: Dynamic, _y: Dynamic| {});
+    engine.register_fn("scale", |_ctx: Map, _x: Dynamic, _y: Dynamic| {});
+    engine.register_fn("measureText", |_ctx: Map, _text: ImmutableString| -> Map { Map::new() });
+    engine.register_fn(
+        "createLinearGradient",
+        |_ctx: Map, _x0: Dynamic, _y0: Dynamic, _x1: Dynamic, _y1: Dynamic| -> Map { Map::new() },
+    );
+    // The `hyper-hydra` community extension (see the `mandeloffs`/
+    // `mirrorX`/etc. ports above, same `hydra-outputs.js`/
+    // `hydra-fractals.js` family) also exposes a top-level `canvas`
+    // object real sketches configure right after loading it
+    // (`canvas.setRelativeSize(1)`, `.setLinear()`) - a no-op stand-in
+    // map, same treatment.
+    engine.register_fn("setRelativeSize", |_c: Map, _size: Dynamic| {});
+    engine.register_fn("setAlign", |_c: Map, _align: Dynamic| {});
+    engine.register_fn("setLinear", |_c: Map| {});
+    engine.register_fn("setNearest", |_c: Map| {});
 
     engine.register_get("x", |_m: &mut Mouse| -> GlslExpr { GlslExpr("iMouse.x".to_string()) });
     engine.register_get("y", |_m: &mut Mouse| -> GlslExpr { GlslExpr("iMouse.y".to_string()) });
@@ -1840,6 +1894,10 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
     // no per-property registration needed, so the assignments themselves
     // at least don't hard-fail the rest of the sketch.
     scope.push("hydraText", Map::new());
+    // `document`/`canvas` - see the `createElement`/`setRelativeSize`/etc.
+    // registrations above.
+    scope.push("document", Map::new());
+    scope.push("canvas", Map::new());
     // Pushed as a regular (non-constant) variable, unlike the GlslExpr constants above:
     // Rhai forbids mutable-receiver method calls on constants, and `a.setBins(...)`
     // dispatches as one even though the registered fns take `Audio` by value.

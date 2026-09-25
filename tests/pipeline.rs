@@ -158,6 +158,64 @@ fn pb_setname_and_list_are_harmless_no_ops() {
 }
 
 #[test]
+fn document_dom_methods_are_harmless_no_ops() {
+    // real sketches commonly build an offscreen <canvas>/<img> element
+    // (usually to feed a p5.js overlay) - the exact same "no Rust
+    // equivalent here" situation as P5(). Each DOM method returns a
+    // plain settable map so later property reads/writes on it are
+    // harmless too, instead of "Variable not found"/"Function not found".
+    let src = r#"
+        let c = document.createElement("canvas");
+        c.width = 1024;
+        let img = document.getElementById("thing");
+        let el = document.querySelector("canvas.bg");
+        let tags = document.getElementsByTagName("canvas");
+        tags[0].style;
+        document.addEventListener("resize", () => {});
+        osc(60).out()
+    "#;
+    assert!(eval(src).is_ok());
+}
+
+#[test]
+fn canvas_2d_context_methods_are_harmless_no_ops() {
+    // `canvasEl.getContext("2d")` is the classic overlay-text-drawing
+    // idiom (offscreen canvas + 2D context, real hydra.js has no
+    // rendering pipeline for it either) - the resulting context is a
+    // plain settable map (its own properties, `.fillStyle`/`.font`/...,
+    // need no per-property registration), with just its own methods
+    // registered as no-ops.
+    let src = r#"
+        let c = document.createElement("canvas");
+        let ctx = c.getContext("2d");
+        ctx.fillStyle = "white";
+        ctx.font = "30px sans-serif";
+        ctx.clearRect(0, 0, 100, 100);
+        ctx.fillRect(0, 0, 100, 100);
+        ctx.fillText("hi", 10, 10);
+        ctx.fillText("hi", 10, 10, 50);
+        ctx.strokeText("hi", 10, 10);
+        ctx.save();
+        ctx.translate(1, 1);
+        ctx.scale(2, 2);
+        ctx.restore();
+        let m = ctx.measureText("hi");
+        let g = ctx.createLinearGradient(0, 0, 1, 1);
+        osc(60).out()
+    "#;
+    assert!(eval(src).is_ok());
+}
+
+#[test]
+fn canvas_extension_config_calls_are_harmless_no_ops() {
+    // the `hyper-hydra` community extension exposes a top-level `canvas`
+    // object real sketches configure right after loading it - not a real
+    // hydra.js API at all, but common boilerplate.
+    let src = "canvas.setRelativeSize(1)\ncanvas.setAlign(0.5)\ncanvas.setLinear()\ncanvas.setNearest()\nosc(60).out()";
+    assert!(eval(src).is_ok());
+}
+
+#[test]
 fn p5_instance_and_its_common_methods_are_harmless_no_ops() {
     // p5.js is a whole separate creative-coding framework with no Rust
     // equivalent here (see README.md); a P5 instance is stood in for by a
