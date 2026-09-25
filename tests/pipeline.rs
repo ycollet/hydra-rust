@@ -158,10 +158,55 @@ fn p5_instance_and_its_common_methods_are_harmless_no_ops() {
         p1.hide();
         p1.show();
         p1.textSize(24);
+        p1.fill(255, 0, 0);
+        p1.stroke("red");
+        p1.stroke(15, 252, 3);
+        p1.strokeWeight(2);
         p1.someArbitraryProperty = "anything";
         osc(60).out()
     "#;
     assert!(eval(src).is_ok());
+}
+
+#[test]
+fn arithmetic_on_an_unset_p5_instance_property_falls_back_to_zero() {
+    // `p1.frameCount`/`mouseX`/etc. aren't populated with a real live
+    // value (no real p5.js canvas is ever rendered here) - reading one off
+    // the P5() stand-in map yields `()`, same as any other undefined JS
+    // value; multiplying that by a number must not hard-fail the sketch.
+    let src = r#"
+        let p1 = P5({});
+        let c = p1.frameCount * 256;
+        osc(60).out()
+    "#;
+    assert!(eval(src).is_ok());
+}
+
+#[test]
+fn a_chained_double_out_call_is_a_harmless_no_op() {
+    // `osc(10).out(o0).out()`/`render(o0).out()` - the first `.out(...)`
+    // already returns `()` (nothing further to chain), so the second
+    // call's receiver is `()` rather than a Node.
+    assert!(eval("osc(10).out(o0).out()").is_ok());
+    assert!(eval("osc(10).out().out(o0)").is_ok());
+}
+
+#[test]
+fn out_with_a_float_buffer_index_rounds_and_clamps() {
+    // JS silently ignores extra arguments, so `.out(0.1,0.7,0.5)` reaches
+    // the registered function as just `.out(0.1)` once argtrunc.rs has
+    // already dropped the rest - a float buffer index instead of the
+    // usual `o0`-`o3` int constants.
+    assert!(eval("osc(10).out(1.765)").is_ok());
+}
+
+#[test]
+fn a_bare_receiverless_out_call_is_a_harmless_no_op() {
+    // No preceding chain at all - most plausibly leftover/broken
+    // authoring rather than a real hydra.js idiom, but shouldn't take the
+    // rest of the sketch down with it.
+    assert!(eval("out(o0)\nosc(60).out()").is_ok());
+    assert!(eval("out()\nosc(60).out()").is_ok());
 }
 
 #[test]

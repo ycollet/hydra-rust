@@ -855,6 +855,19 @@ fn register_glsl_ops(engine: &mut Engine) {
     binop!("*");
     binop!("/");
 
+    // A handful of real sketches do arithmetic on a p5.js instance
+    // property we don't populate a real value for (`p1.frameCount * 256`,
+    // `mouseX - mouseY`) - reading an unregistered key off the `P5()`
+    // stand-in map (see below) yields `()`, same as any other undefined
+    // JS value here, and `() * i64`/`() * f64` has no operator otherwise.
+    // Treated as `0`, same graceful-fallback spirit as the rest of this
+    // sketch's harmless p5.js no-ops - there's no real p5 canvas rendering
+    // to make these values meaningful anyway.
+    engine.register_fn("*", |_a: (), _b: i64| -> i64 { 0 });
+    engine.register_fn("*", |_a: i64, _b: ()| -> i64 { 0 });
+    engine.register_fn("*", |_a: (), _b: f64| -> f64 { 0.0 });
+    engine.register_fn("*", |_a: f64, _b: ()| -> f64 { 0.0 });
+
     // `%` maps to GLSL's `mod()` builtin, not the `%` operator (which in
     // GLSL only applies to integers) - GLSL is float-typed throughout here.
     engine.register_fn("%", |a: GlslExpr, b: GlslExpr| -> GlslExpr {
@@ -1176,6 +1189,38 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
             }
         });
     }
+    {
+        // A buffer-index argument that's a float rather than an int, e.g.
+        // `.out(0.1)` (JS silently ignores extra arguments, so
+        // `.out(0.1,0.7,0.5)` reaches here as just `.out(0.1)` once
+        // argtrunc.rs has already dropped the rest) or `.out(o0+0.9)`
+        // (arithmetic on a buffer constant instead of picking a different
+        // one) - rounds and clamps into the valid 0..=3 range rather than
+        // hard-erroring on a call shape real sketches do actually use.
+        let s = state.clone();
+        engine.register_fn("out", move |node: Node, idx: f64| {
+            let i = (idx.round().clamp(0.0, 3.0)) as usize;
+            s.lock().unwrap().buffers[i] = Some(node);
+        });
+    }
+    // A chained `.out()`/`.out(idx)` immediately after another `.out(...)`
+    // call (`osc(10).out(o0).out()`, `render(o0).out()`) - the first call
+    // already returns `()` (its own render side effect has no further
+    // chainable value), so the second one's receiver is `()` rather than a
+    // Node. Harmless no-op: there is nothing further to render.
+    engine.register_fn("out", |_unit: ()| {});
+    engine.register_fn("out", |_unit: (), _idx: Dynamic| {});
+    // A bare, receiver-less `out(...)` statement (no preceding chain at
+    // all) - seen in a handful of real sketches, most plausibly leftover/
+    // broken authoring rather than a real hydra.js idiom. Harmless no-op
+    // rather than a hard parse-adjacent failure that would also take out
+    // the rest of the script.
+    engine.register_fn("out", || {
+        log::warn!("out() ignored: no preceding chain to render");
+    });
+    engine.register_fn("out", |_idx: i64| {
+        log::warn!("out(...) ignored: no preceding chain to render");
+    });
     // s0-s3 constants are 100-103; indices below 100 are internal buffers
     engine.register_fn("src", idx_to_source);
     // strokeText/fillStrokeText/strokeFillText are the hydra-text.js
@@ -1710,6 +1755,9 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
     engine.register_fn("textSize", |_p: Map, _size: Dynamic| {});
     engine.register_fn("fill", |_p: Map, _color: Dynamic| {});
     engine.register_fn("fill", |_p: Map, _r: Dynamic, _g: Dynamic, _b: Dynamic| {});
+    engine.register_fn("stroke", |_p: Map, _color: Dynamic| {});
+    engine.register_fn("stroke", |_p: Map, _r: Dynamic, _g: Dynamic, _b: Dynamic| {});
+    engine.register_fn("strokeWeight", |_p: Map, _weight: Dynamic| {});
     // `sN.init({src: ...})` - not a real hydra.js API at all, but a
     // pattern some external platforms/community sketches use to feed a
     // p5.js canvas (or other DOM element) into a hydra source slot. No
