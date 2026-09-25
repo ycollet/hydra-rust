@@ -92,6 +92,16 @@ fn ported_community_extension_functions_compose_with_blend_and_modulate() {
 }
 
 #[test]
+fn mandeloffs_geo_function_compiles_with_all_arities() {
+    // ported from geikha/hyper-hydra (hydra-fractals.js) via a widely
+    // copy-pasted setFunction() call - real hydra.js's setFunction is
+    // itself a no-op here (no dynamic GLSL registration pipeline exists),
+    // so this needed a real, static port like any other missing function.
+    let glsl = ok_shader0("osc(60).mandeloffs().mandeloffs(0.05).mandeloffs(0.05,0.1,0.2).out()");
+    assert!(glsl.contains("mandeloffs("), "{glsl}");
+}
+
+#[test]
 fn multiple_buffers_are_kept_independent() {
     let src = "osc(60).out(o0)\nnoise(10).out(o1)";
     let result = eval(src).unwrap();

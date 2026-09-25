@@ -390,6 +390,7 @@ const FUNCTIONS: &[FnMeta] = &[
     FnMeta { name: "mirrorX2", kind: OpKind::Geo, defaults: &[0.0, 1.0] },
     FnMeta { name: "mirrorY2", kind: OpKind::Geo, defaults: &[0.0, 1.0] },
     FnMeta { name: "mirrorWrap", kind: OpKind::Geo, defaults: &[] },
+    FnMeta { name: "mandeloffs", kind: OpKind::Geo, defaults: &[0.05, 0.0, 0.0] },
     FnMeta { name: "color", kind: OpKind::Color, defaults: &[1.0, 1.0, 1.0, 1.0] },
     FnMeta { name: "invert", kind: OpKind::Color, defaults: &[1.0] },
     FnMeta { name: "contrast", kind: OpKind::Color, defaults: &[1.6] },

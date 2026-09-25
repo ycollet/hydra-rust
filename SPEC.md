@@ -654,6 +654,7 @@ itself is a permanent no-op, see README.md):
 | `mirrorX(pos=0, coverage=1)` / `mirrorY(...)` | | Mirror-fold around `pos` — `geikha/hyper-hydra`, MIT |
 | `mirrorX2(pos=0, coverage=1)` / `mirrorY2(...)` | | `mirrorX`/`mirrorY` variant, unflipped half — `geikha/hyper-hydra`, MIT |
 | `mirrorWrap()` | | Fold coordinates into `[-1, 1]` then reflect — `geikha/hyper-hydra`, MIT |
+| `mandeloffs(amt=0.05, offx=0, offy=0)` | | Offsets `st` by one step of a Mandelbrot iteration (`z -> z^2 + c`) — `geikha/hyper-hydra`, MIT |
 
 ### Color
 

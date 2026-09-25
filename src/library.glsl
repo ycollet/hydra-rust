@@ -770,3 +770,13 @@ vec2 mirrorY2(vec2 _st, float pos, float coverage) {
 vec2 mirrorWrap(vec2 _st) {
   return -abs(fract(_st / 2.0) * 2.0 - 1.0) + 1.0;
 }
+
+// mandeloffs, from geikha/hyper-hydra (hydra-fractals.js), MIT license -
+// offsets `_st` by one step of a Mandelbrot iteration (z -> z^2 + c).
+vec2 mandeloffs(vec2 _st, float amt, float offx, float offy) {
+  vec2 scaled = _st * 16.0 - vec2(8.0, 8.0);
+  vec2 np = vec2(scaled.x * scaled.x - scaled.y * scaled.y,
+                 2.0 * scaled.x * scaled.y) + vec2(offx, offy);
+  vec2 diff = (np - scaled) * amt;
+  return _st + diff;
+}
