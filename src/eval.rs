@@ -9,6 +9,7 @@ use crate::asi;
 use crate::autolet;
 use crate::closurefn;
 use crate::forloop;
+use crate::ifstmt;
 use crate::iife;
 use crate::increment;
 use crate::jsfunctions;
@@ -1146,6 +1147,7 @@ pub fn preprocess(code: &str) -> String {
     let code = &objlit::rewrite_object_literals(code);
     let code = &ternary::rewrite_ternaries(code);
     let code = &commastmt::rewrite_top_level_comma_statements(code);
+    let code = &ifstmt::brace_bare_if_bodies(code);
     let code = &asi::insert_missing_semicolons(code);
     let code = &arrowfn::rewrite_named_arrows(code);
     commaexpr::rewrite_comma_expressions(code)

@@ -16,6 +16,7 @@ mod autolet;
 mod closurefn;
 mod forloop;
 mod glsl;
+mod ifstmt;
 mod iife;
 mod increment;
 mod jsfunctions;

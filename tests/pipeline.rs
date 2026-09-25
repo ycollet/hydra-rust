@@ -158,6 +158,15 @@ fn pb_setname_and_list_are_harmless_no_ops() {
 }
 
 #[test]
+fn a_brace_less_js_if_statement_compiles() {
+    // real JS routinely omits `{ }` for a short guard clause (`if (t < 1)
+    // return [1, 0, 0];`) - Rhai's own `if` has no bare-statement form at
+    // all ("Expecting '{' to start a statement block").
+    let src = "if (time < 1) render(o0); else if (time < 2) render(o1); else render(o2);\nosc(60).out()";
+    assert!(eval(src).is_ok());
+}
+
+#[test]
 fn document_dom_methods_are_harmless_no_ops() {
     // real sketches commonly build an offscreen <canvas>/<img> element
     // (usually to feed a p5.js overlay) - the exact same "no Rust
