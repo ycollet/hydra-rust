@@ -8,7 +8,16 @@
 //! grammar: a top-level `,`, `;`, or bare `=` marks where a condition/branch
 //! starts or ends, and brackets are recursed into so nested calls
 //! (`osc(cond?a:b)`) and chained ternaries (`a?b:c?d:e`, right-associative)
-//! are each handled independently.
+//! are each handled independently. A Rhai closure header (`|a,b,c|`, the
+//! form `closurefn.rs` produces for an argument-position JS arrow, and
+//! which runs *before* this pass) is also treated as one atomic unit to
+//! skip over, for the same reason as a real bracket: its own internal
+//! commas aren't real boundaries either (`arr.reduce(|acc,layer,idx| idx
+//! == 0 ? layer : acc.add(layer))` must not treat `idx` - the closure's
+//! last parameter - as leaking into the ternary's own condition text just
+//! because there's no comma or bracket between them). A lone `|` that
+//! *isn't* a well-formed closure header (bitwise OR, used elsewhere) is
+//! correctly left as an ordinary character instead.
 
 use crate::srcscan::mask_strings_and_comments;
 
@@ -83,6 +92,23 @@ fn strip_arrow_header(s: &str) -> Option<(String, String)> {
     Some((chars[..j].iter().collect(), chars[j..].iter().collect()))
 }
 
+/// If `s` (after trimming leading whitespace) starts with a Rhai closure
+/// header - `|params|`, the form `closurefn.rs` produces for an
+/// argument-position JS arrow - returns the header text (params plus both
+/// pipes) and the remainder. Same idea as `strip_arrow_header`: the header
+/// has no `,`/`;`/bare-`=` boundary before its own body, so without this
+/// the whole `|acc,layer,idx|` gets swept into the ternary's condition
+/// instead of staying outside the resulting `if`/`else`.
+fn strip_closure_header(s: &str) -> Option<(String, String)> {
+    let chars: Vec<char> = s.trim_start().chars().collect();
+    let mask = mask_strings_and_comments(&chars);
+    if chars.first() != Some(&'|') {
+        return None;
+    }
+    let after = match_closure_params(&chars, &mask, 0)?;
+    Some((chars[..after].iter().collect(), chars[after..].iter().collect()))
+}
+
 fn matching_close(chars: &[char], mask: &[bool], open_idx: usize) -> usize {
     let open = chars[open_idx];
     let close = match open {
@@ -107,6 +133,38 @@ fn matching_close(chars: &[char], mask: &[bool], open_idx: usize) -> usize {
         i += 1;
     }
     chars.len()
+}
+
+/// If a Rhai closure parameter list (`|ident,ident,...|`, possibly empty)
+/// starts at `i`, returns the index just past its closing `|`. `None` if
+/// what's at `i` isn't this exact shape (most commonly a bitwise-OR `|`
+/// used elsewhere, which must be left alone rather than misread as an
+/// unterminated closure header).
+fn match_closure_params(chars: &[char], mask: &[bool], i: usize) -> Option<usize> {
+    let mut j = i + 1;
+    loop {
+        while j < chars.len() && !mask[j] && chars[j].is_whitespace() {
+            j += 1;
+        }
+        if chars.get(j) == Some(&'|') && !mask[j] {
+            return Some(j + 1);
+        }
+        let name_start = j;
+        while j < chars.len() && !mask[j] && (chars[j].is_alphanumeric() || chars[j] == '_') {
+            j += 1;
+        }
+        if j == name_start {
+            return None; // not an identifier - not a well-formed param list
+        }
+        while j < chars.len() && !mask[j] && chars[j].is_whitespace() {
+            j += 1;
+        }
+        match chars.get(j) {
+            Some(',') if !mask[j] => j += 1,
+            Some('|') if !mask[j] => return Some(j + 1),
+            _ => return None,
+        }
+    }
 }
 
 /// Copies a bracketed group verbatim into `out`, recursively transforming
@@ -138,6 +196,10 @@ fn transform(chars: &[char], mask: &[bool], start: usize, end: usize) -> String 
             '(' | '[' | '{' => {
                 i = copy_bracket(chars, mask, i, end, &mut seg);
             }
+            '|' if let Some(after) = match_closure_params(chars, mask, i) => {
+                seg.push_str(&chars[i..after].iter().collect::<String>());
+                i = after;
+            }
             ',' | ';' => {
                 out.push_str(&seg);
                 out.push(chars[i]);
@@ -157,7 +219,7 @@ fn transform(chars: &[char], mask: &[bool], start: usize, end: usize) -> String 
                 i = next;
                 let (else_text, next) = scan_branch(chars, mask, i, end, false);
                 i = next;
-                let (arrow_prefix, cond) = match strip_arrow_header(&cond) {
+                let (arrow_prefix, cond) = match strip_arrow_header(&cond).or_else(|| strip_closure_header(&cond)) {
                     Some((header, rest)) => (header, rest),
                     None => (String::new(), cond),
                 };
@@ -203,6 +265,10 @@ fn scan_branch(chars: &[char], mask: &[bool], start: usize, end: usize, stop_at_
         match chars[i] {
             '(' | '[' | '{' => {
                 i = copy_bracket(chars, mask, i, end, &mut buf);
+            }
+            '|' if let Some(after) = match_closure_params(chars, mask, i) => {
+                buf.push_str(&chars[i..after].iter().collect::<String>());
+                i = after;
             }
             ':' if stop_at_colon => {
                 return (buf, i + 1);
@@ -330,6 +396,40 @@ mod tests {
     fn leaves_return_of_non_ternary_alone() {
         let src = "return foo(x)";
         assert_eq!(rewrite_ternaries(src), src);
+    }
+
+    #[test]
+    fn does_not_leak_a_closure_params_last_name_into_a_ternary_condition() {
+        // regression test: `closurefn.rs` runs before this pass and turns
+        // an argument-position multi-param arrow into a Rhai closure
+        // header (`|acc,layer,idx|`) - its own internal commas aren't
+        // real boundaries, so without treating the whole `|...|` as one
+        // atomic unit, the last parameter name before the closing `|`
+        // (here `idx`) leaked into the ternary condition just because
+        // there's no comma/bracket between them.
+        assert_eq!(
+            rewrite_ternaries("arr.reduce(|acc,layer,idx| idx == 0 ? layer : acc.add(layer))"),
+            "arr.reduce(|acc,layer,idx|if idx == 0 { layer } else { acc.add(layer) })"
+        );
+    }
+
+    #[test]
+    fn does_not_misfire_on_a_real_bitwise_or() {
+        // a lone `|` that isn't a well-formed closure header (nothing
+        // resembling `ident,ident,...|` follows) must be left as an
+        // ordinary character - this is a genuine bitwise-OR expression.
+        assert_eq!(
+            rewrite_ternaries("(a | b) ? 1 : 0"),
+            "if (a | b) { 1 } else { 0 }"
+        );
+    }
+
+    #[test]
+    fn handles_an_empty_closure_param_list() {
+        assert_eq!(
+            rewrite_ternaries(".method(|| cond ? 1 : 0)"),
+            ".method(||if cond { 1 } else { 0 })"
+        );
     }
 
     #[test]

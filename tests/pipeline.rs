@@ -158,6 +158,34 @@ fn pb_setname_and_list_are_harmless_no_ops() {
 }
 
 #[test]
+fn destructuring_declarations_from_a_dynamic_import_are_harmless_no_ops() {
+    // real sketches commonly extract named exports from a dynamically-
+    // imported module (`const { name } = await import(url)`) - hydra-rust
+    // has no dynamic module loading (see loadScript's own no-op
+    // treatment), so whatever names would have been extracted were always
+    // going to be undefined regardless of how the destructuring target
+    // itself is handled.
+    let src = r#"
+        const { sculptToHydraRenderer } = await import("https://example.com/x.js");
+        const { src, shape, ...otherControls } = strudel.controls;
+        osc(60).out()
+    "#;
+    assert!(eval(src).is_ok());
+}
+
+#[test]
+fn a_reduce_callback_with_a_ternary_body_compiles() {
+    // regression test for a real bug caught while fixing "Expecting name
+    // of a variable": closurefn.rs (an earlier pass) turns a multi-param
+    // arrow into a Rhai closure header (`|acc,layer,idx|`) before ternary.rs
+    // runs - without treating that whole header as one atomic unit,
+    // ternary.rs's own comma-boundary scan let the closure's last
+    // parameter name leak into the ternary's condition text.
+    let src = "let layers = [1,2,3];\nlet combined = layers.reduce((acc, layer, idx) => idx === 0 ? layer : acc + layer, 0);\nosc(60).out()";
+    assert!(eval(src).is_ok());
+}
+
+#[test]
 fn a_brace_less_js_if_statement_compiles() {
     // real JS routinely omits `{ }` for a short guard clause (`if (t < 1)
     // return [1, 0, 0];`) - Rhai's own `if` has no bare-statement form at

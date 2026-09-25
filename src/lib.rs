@@ -14,6 +14,7 @@ mod arrowfn;
 mod asi;
 mod autolet;
 mod closurefn;
+mod destructure;
 mod forloop;
 mod glsl;
 mod ifstmt;

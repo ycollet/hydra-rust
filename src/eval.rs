@@ -8,6 +8,7 @@ use crate::arrowfn;
 use crate::asi;
 use crate::autolet;
 use crate::closurefn;
+use crate::destructure;
 use crate::forloop;
 use crate::ifstmt;
 use crate::iife;
@@ -1149,6 +1150,7 @@ pub fn preprocess(code: &str) -> String {
     let code = &commastmt::rewrite_top_level_comma_statements(code);
     let code = &ifstmt::brace_bare_if_bodies(code);
     let code = &asi::insert_missing_semicolons(code);
+    let code = &destructure::rewrite_destructuring_declarations(code);
     let code = &arrowfn::rewrite_named_arrows(code);
     commaexpr::rewrite_comma_expressions(code)
 }

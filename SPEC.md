@@ -164,7 +164,7 @@ Pipeline order (each step's output feeds the next):
    argument, keeping just its value. Deliberately leaves a parenthesized
    group untouched when it's actually a *parameter list* rather than a
    call's arguments — `function name(min=0, max=1) {...}` (step 6) or
-   `(min=0, max=1) => ...` (step 21) have the exact same `name = value`
+   `(min=0, max=1) => ...` (step 22) have the exact same `name = value`
    shape, but there they're real default parameter values those later
    steps need to see intact; detected structurally (preceded by `function
    NAME`, or followed by `=>`) and copied verbatim instead of recursed
@@ -283,7 +283,7 @@ Pipeline order (each step's output feeds the next):
    arrows (`(a,b)=>...`, `x=>...`, used for pattern/sequencer callbacks —
    unsupported), block-bodied arrows (`()=>{ ... }` — don't reduce to a
    single expression), and an arrow that's itself the right-hand side of a
-   bare `TARGET =` assignment (`pat = ()=>solid()`) - step 21 (`arrowfn`)
+   bare `TARGET =` assignment (`pat = ()=>solid()`) - step 22 (`arrowfn`)
    owns that position entirely instead, since it runs after `asi` has made
    every statement's own boundary unambiguous and needs to tell a genuine
    reactive-value body apart from an unsupported mutating-update idiom in
@@ -291,7 +291,7 @@ Pipeline order (each step's output feeds the next):
 15. **`closurefn::rewrite_argument_position_closures`** — rewrites an
    arrow function's parameter-list header into Rhai's own closure syntax
    (`|params|`) wherever it appears as anything *other* than the
-   right-hand side of a bare assignment (step 14's and step 21's own
+   right-hand side of a bare assignment (step 14's and step 22's own
    cases, both excluded here the same way step 14 recognizes a preceding
    bare `=`). Real sketches commonly use JS's generic `Array` functional
    methods this way (`arr.reduce((a,b)=>a+b, 0)`, `[0,2,4].map((v,i)=>
@@ -358,7 +358,17 @@ Pipeline order (each step's output feeds the next):
    looks like a genuine statement boundary - mirroring `asi`'s own "does
    this line end here" heuristic (same two character sets, checked on both
    sides of the break) since this pass can't yet rely on a `;` already
-   being there.
+   being there. A Rhai closure header (`|a,b,c|`, the form step 15
+   produces for an argument-position arrow, which runs before this pass)
+   is treated as one atomic unit to skip over, the same way a real bracket
+   is - otherwise its own internal commas aren't real boundaries either,
+   and the closure's *last* parameter name would leak into a ternary
+   condition just because nothing else separates them (`arr.reduce(|acc,
+   layer,idx| idx==0 ? layer : acc.add(layer))` needs `idx` to stay part
+   of the closure header, not become part of the condition text) - and a
+   leading closure header at the very start of an extracted condition is
+   moved back outside the resulting `if`/`else`, the same way an arrow
+   header already is.
 18. **`commastmt::rewrite_top_level_comma_statements`** — rewrites a bare
    (non-parenthesized) top-level sequence of comma-joined statements
    (`loadScript(a), loadScript(b), setResolution(w,h)`) into
@@ -369,7 +379,7 @@ Pipeline order (each step's output feeds the next):
    `geikha` canvas extension's setup snippet). JS allows a comma-expression
    as a standalone statement (each operand runs in order for side effects
    only), but Rhai has no comma operator at all. This is a different
-   grammatical position from step 22 (`commaexpr`)'s own comma handling:
+   grammatical position from step 23 (`commaexpr`)'s own comma handling:
    that pass collapses a comma-tuple used *as a value* down to its last
    term; this one splits a comma chain used *as a sequence of statements*
    into separate ones. Scoped narrowly: only a comma at true top-level
@@ -437,7 +447,38 @@ Pipeline order (each step's output feeds the next):
    depth 0, and neither the end of the current line nor the start of the
    next one looks like a continuation — an operator, a trailing comma/open
    bracket, or a leading `.`/closing bracket/operator on the next line).
-21. **`arrowfn::rewrite_named_arrows`** — real sketches commonly define
+21. **`destructure::rewrite_destructuring_declarations`** — rewrites a JS
+   destructuring declaration (`const { a, b } = EXPR;` / `let [x, y] =
+   EXPR;`) into a plain `let NAME = ();` per bound name, discarding `EXPR`
+   entirely. Rhai's own `let`/`const` bind exactly one plain identifier -
+   no destructuring-pattern target at all ("Expecting name of a
+   variable"). By far the most common real shape is extracting named
+   exports from a dynamically-imported module (`const {
+   sculptToHydraRenderer } = await import("https://...")`) - `import`/
+   `await` are already stripped as bare keywords elsewhere in the
+   pipeline, so `EXPR` here is never anything meaningful regardless of how
+   the destructuring target itself is handled: hydra-rust has no dynamic
+   module loading (see `loadScript`'s own no-op treatment), so whatever
+   names would have been extracted were always going to be undefined.
+   Binding each one to `()` means a later real reference to it fails as an
+   ordinary runtime error instead of a hard parse error that stops the
+   whole script. `EXPR` is discarded unevaluated rather than genuinely
+   indexed/property-accessed to extract real values - safer for the
+   dominant import case above, at the cost of not correctly supporting the
+   rarer case where `EXPR` is a real, meaningful call (`const [x, y] =
+   orbitWithNoise(...)`) - a deliberately accepted small loss of fidelity
+   rather than a crash. Deliberately narrow: only a flat pattern of plain
+   identifiers is recognized - shorthand (`{ a }`), renamed (`{ a: b }`,
+   binds `b`), rest (`{ ...rest }` / `[...rest]`, binds `rest`), or an
+   array element (`[a, b]`, empty holes skipped); a default value (`{ a =
+   1 }`) or a nested pattern (`{ a: { b } }`) bails out entirely rather
+   than guessing. Runs after `asi`: the pattern's own `{`/`[` keeps `asi`'s
+   bracket-depth tracking above zero while scanning across it (no
+   ambiguity like step 19's own `if`-header problem), so the whole
+   declaration is already properly `;`-terminated by this point, making
+   "scan to the next top-level `;`" a reliable way to find where the
+   value expression (about to be discarded) ends.
+22. **`arrowfn::rewrite_named_arrows`** — real sketches commonly define
    small helpers as a *named* function-*value* assignment rather than
    `function name(...) {...}` (step 6) - either arrow-function spelling
    (`let el = (s,b,l) => shape(99,s,b)`, block-bodied `let f = (a,b) => {
@@ -480,7 +521,7 @@ Pipeline order (each step's output feeds the next):
    event-handler wiring (`p.setup = () => {...}`, `img.onload = function()
    {...}`) that nothing here would ever invoke anyway — dropping it is
    strictly no worse than the hard parse error it replaces. Runs right
-   after `asi` (one more step still follows, see step 22): every other pass
+   after `asi` (one more step still follows, see step 23): every other pass
    has already rewritten the body's own content, and an arrow's expression
    body (no `{ }`) needs an unambiguous end, which becomes just "the next
    top-level `;`" once `asi` has guaranteed one is there. A *block* body,
@@ -494,7 +535,7 @@ Pipeline order (each step's output feeds the next):
    Rhai's parser exactly as broken as if `asi` had never run at all - the
    same idea `forloop.rs` uses for its own loop bodies, and step 6 for its
    function-*declaration* equivalent of this same idiom.
-22. **`commaexpr::rewrite_comma_expressions`** — rewrites a parenthesized,
+23. **`commaexpr::rewrite_comma_expressions`** — rewrites a parenthesized,
    non-call, comma-containing group (`(a, b, c)`) down to just its last
    term, `(c)` — JS's own comma-operator semantics (every sub-expression is
    evaluated in order, but only the last one's value survives). Rhai has no
