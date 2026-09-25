@@ -21,6 +21,15 @@
 //!   for a different purpose (pattern/sequencer callbacks)
 //! - block-bodied arrows (`()=>{ ... }`), which don't reduce to a bare
 //!   expression
+//! - an arrow that's itself the right-hand side of a bare `TARGET =`
+//!   assignment (`pat = ()=>solid()`, `update = ()=>b+=1`) - `arrowfn.rs`
+//!   owns this position entirely instead (it runs later, after `asi` has
+//!   made every statement's own boundary unambiguous, and needs to tell
+//!   apart a genuine reactive-value body from one that's actually an
+//!   unsupported mutating-update idiom in disguise - see its own module
+//!   doc comment). Recognized the same way `patcall.rs`/`kwargs.rs`
+//!   recognize a preceding call token: a bare `=` (not `==`/`<=`/`>=`/
+//!   `!=`) immediately before this arrow's own opening `(`/`{`.
 
 use crate::srcscan::mask_strings_and_comments;
 
@@ -33,6 +42,7 @@ pub fn strip_zero_arg_arrows(src: &str) -> String {
     let mut i = 0;
     while i < n {
         if !mask[i]
+            && !preceded_by_bare_assignment_eq(&chars, &mask, i)
             && let Some(after) = match_zero_arg_arrow(&chars, &mask, i)
         {
             i = after;
@@ -43,6 +53,23 @@ pub fn strip_zero_arg_arrows(src: &str) -> String {
     }
 
     out
+}
+
+/// True if, skipping whitespace/comments backward from `i`, the previous
+/// token is a standalone `=` - i.e. `i` is the right-hand side of a bare
+/// assignment (`TARGET = ` immediately before it), not an argument
+/// position. Excludes `==`/`<=`/`>=`/`!=` (checks the character before the
+/// `=` too); `=>` can't occur here since that's this arrow's own token,
+/// always after its parameter list, never before it.
+fn preceded_by_bare_assignment_eq(chars: &[char], mask: &[bool], i: usize) -> bool {
+    let mut p = i;
+    while p > 0 && (mask[p - 1] || chars[p - 1].is_whitespace()) {
+        p -= 1;
+    }
+    if p == 0 || chars[p - 1] != '=' {
+        return false;
+    }
+    !matches!(chars.get(p.wrapping_sub(2)), Some('=' | '<' | '>' | '!'))
 }
 
 /// If a zero-arg, single-expression arrow (`()=>expr`) or a
@@ -195,7 +222,35 @@ mod tests {
     }
 
     #[test]
-    fn strips_variable_assigned_arrow() {
-        assert_eq!(strip_zero_arg_arrows("pat = ()=>\nsolid()"), "pat = \nsolid()");
+    fn leaves_a_bare_assignment_targets_arrow_alone() {
+        // arrowfn.rs owns this position now - see the module doc comment.
+        let src = "pat = ()=>\nsolid()";
+        assert_eq!(strip_zero_arg_arrows(src), src);
+    }
+
+    #[test]
+    fn leaves_a_property_path_assignment_targets_arrow_alone() {
+        let src = "window.onclick = ()=>modtoggle";
+        assert_eq!(strip_zero_arg_arrows(src), src);
+    }
+
+    #[test]
+    fn does_not_misfire_on_a_comparison_immediately_before_an_arrow() {
+        // `==`/`<=`/`>=`/`!=` must not be mistaken for a bare `=` - this is
+        // a contrived shape (an arrow can't actually follow a comparison
+        // meaningfully), just guarding the boundary check itself.
+        assert_eq!(strip_zero_arg_arrows("x==()=>1"), "x==1");
+        assert_eq!(strip_zero_arg_arrows("x<=()=>1"), "x<=1");
+    }
+
+    #[test]
+    fn still_strips_an_argument_position_arrow_after_an_assignment_statement() {
+        // the exclusion only applies to the arrow immediately on the
+        // right-hand side of `=` - a later, unrelated argument-position
+        // arrow on the same line is unaffected.
+        assert_eq!(
+            strip_zero_arg_arrows("pat = solid();\nrotate(()=>time)"),
+            "pat = solid();\nrotate(time)"
+        );
     }
 }

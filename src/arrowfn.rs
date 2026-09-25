@@ -19,15 +19,24 @@
 //! requires an actual assignment (`target = ...`) before it, which that
 //! shape doesn't have.
 //!
-//! An empty parameter list (`()=>...`) is ambiguous on its own: with an
-//! *expression* body it's the reactive-value idiom (already fully handled
-//! upstream by `arrow::strip_zero_arg_arrows`/`patcall::rewrite_pattern_calls`,
-//! and never reaches this pass as an assignment target since it's a
-//! function-argument-position thing, not an assignment RHS) - but with a
+//! An empty parameter list (`()=>...`) is ambiguous on its own: with a
 //! *block* body it can only be a real named helper (`let update = () => {
-//! ...; return v; }`), since the reactive idiom is expression-only by
-//! construction. So an empty parameter list is accepted here too, but only
-//! when paired with a block body.
+//! ...; return v; }`), since the reactive-value idiom is expression-only by
+//! construction - accepted here unconditionally. With an *expression* body
+//! it's almost always the reactive-value idiom instead (`pat = ()=>
+//! solid()`) - `arrow::strip_zero_arg_arrows` only strips this shape in
+//! *argument* position now (`.brightness(()=>time)`), deferring the
+//! assignment-target position entirely to this pass (which runs later,
+//! after `asi` has made every statement's own boundary unambiguous, unlike
+//! `arrow.rs`). This pass does the equivalent substitution itself
+//! (`TARGET = BODY`) - *unless* the body is itself an assignment
+//! (`update = ()=>b+=0.01`) rather than a value-producing expression: real
+//! sketches occasionally write this shape meaning "re-run this mutation
+//! every frame," an idiom with no possible equivalent here (nothing ever
+//! re-invokes a stored Rhai value per frame the way a real JS callback
+//! would) - dropped the same way a property-path target is, rather than
+//! leave a nonsensical "assign the result of an assignment" shape for
+//! Rhai's parser to trip over.
 //!
 //! Two different assignment targets are handled, differently:
 //! - **A bare identifier** (`let name = ...` / `name = ...`, no `let`
@@ -98,10 +107,13 @@ fn try_rewrite(chars: &[char], mask: &[bool], i: usize) -> Option<(String, usize
     let mut j = i;
     let word_end = ident_end(chars, j);
     let word: String = chars[j..word_end].iter().collect();
-    if word == "let" || word == "const" {
+    let let_prefix = if word == "let" || word == "const" {
         j = word_end;
         skip_ws(chars, mask, &mut j);
-    }
+        format!("{word} ")
+    } else {
+        String::new()
+    };
 
     let (target, mut j) = parse_dotted_target(chars, mask, j)?;
     skip_ws(chars, mask, &mut j);
@@ -126,23 +138,24 @@ fn try_rewrite(chars: &[char], mask: &[bool], i: usize) -> Option<(String, usize
         j += 2;
         skip_ws(chars, mask, &mut j);
 
-        let is_block_body = chars.get(j) == Some(&'{');
-        let (body, after) = if is_block_body {
+        if chars.get(j) == Some(&'{') {
             let body_close = matching_close(chars, mask, j, '{', '}')?;
-            (chars[j..=body_close].iter().collect::<String>(), body_close + 1)
+            (names, chars[j..=body_close].iter().collect::<String>(), body_close + 1)
         } else {
             let (expr, semi_end) = scan_expr_body(chars, mask, j);
-            (format!("{{ {} }}", expr.trim()), semi_end)
-        };
-
-        // Only excluded for a bare-identifier target - a property-path
-        // target is always dropped below regardless of arg count/body
-        // shape, since it can never be the reactive-value idiom (that's
-        // an argument-position-only thing, never `obj.prop = ...`).
-        if target.len() == 1 && names.is_empty() && !is_block_body {
-            return None; // the reactive-value idiom, handled upstream
+            // Only for a bare-identifier target - a property-path target
+            // is always dropped below regardless of arg count/body shape,
+            // since it can never be the reactive-value idiom (see the
+            // module doc comment).
+            if target.len() == 1 && names.is_empty() {
+                return if is_assignment_shaped(&expr) {
+                    Some((String::new(), semi_end))
+                } else {
+                    Some((format!("{let_prefix}{} = {};", target[0], expr.trim()), semi_end))
+                };
+            }
+            (names, format!("{{ {} }}", expr.trim()), semi_end)
         }
-        (names, body, after)
     };
 
     if target.len() > 1 {
@@ -258,6 +271,41 @@ fn scan_expr_body(chars: &[char], mask: &[bool], start: usize) -> (String, usize
     (chars[start..].iter().collect(), chars.len())
 }
 
+/// True if `body` (an already-extracted zero-arg arrow's expression body)
+/// itself contains a top-level assignment (`b += 1`, `x = 2`, ...) rather
+/// than being a pure value-producing expression - see the module doc
+/// comment. Re-derives its own string/comment mask since `body` is a
+/// freshly-extracted owned string, not a slice into the original `chars`.
+fn is_assignment_shaped(body: &str) -> bool {
+    let chars: Vec<char> = body.chars().collect();
+    let mask = mask_strings_and_comments(&chars);
+    let mut depth = 0i32;
+    let mut i = 0;
+    while i < chars.len() {
+        if !mask[i] {
+            match chars[i] {
+                '(' | '[' | '{' => depth += 1,
+                ')' | ']' | '}' => depth -= 1,
+                '=' if depth == 0 => {
+                    let prev = if i > 0 { chars.get(i - 1) } else { None };
+                    let next = chars.get(i + 1);
+                    if !matches!(prev, Some('=' | '!' | '<' | '>')) && !matches!(next, Some('=' | '>')) {
+                        return true;
+                    }
+                }
+                '+' | '-' | '*' | '/' | '%' | '^' | '&' | '|'
+                    if depth == 0 && chars.get(i + 1) == Some(&'=') && chars.get(i + 2) != Some(&'=') =>
+                {
+                    return true;
+                }
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
 fn is_ident_start(c: char) -> bool {
     c.is_alphabetic() || c == '_'
 }
@@ -335,10 +383,35 @@ mod tests {
     }
 
     #[test]
-    fn leaves_zero_param_arrow_alone() {
-        // the reactive-value idiom - handled upstream, never touched here
-        let src = "let pat = ()=>osc(30);";
-        assert_eq!(rewrite_named_arrows(src), src);
+    fn strips_zero_param_expression_bodied_arrow_to_a_plain_value_assignment() {
+        // the reactive-value idiom, assigned to a variable rather than
+        // used directly in argument position - this pass owns the
+        // assignment-target position now (arrow.rs only strips argument
+        // position), so it does the equivalent substitution itself.
+        assert_eq!(rewrite_named_arrows("let pat = ()=>osc(30);"), "let pat = osc(30);");
+    }
+
+    #[test]
+    fn drops_a_bare_identifier_assigned_arrow_whose_body_is_itself_an_assignment() {
+        // `update = ()=>b+=0.01` isn't a value at all - it's an attempt at
+        // a per-frame mutating callback, which nothing here ever
+        // re-invokes. Dropped the same way a property-path target is,
+        // rather than leave "assign the result of an assignment" for
+        // Rhai's parser to trip over.
+        assert_eq!(rewrite_named_arrows("update = ()=>b+=0.01;"), "");
+    }
+
+    #[test]
+    fn drops_a_bare_identifier_assigned_arrow_with_a_compound_assignment_body() {
+        assert_eq!(rewrite_named_arrows("laX = ()=>x+=0.00001;"), "");
+    }
+
+    #[test]
+    fn does_not_misfire_on_a_comparison_inside_a_reactive_value_body() {
+        assert_eq!(
+            rewrite_named_arrows("let f = ()=>time>=1;"),
+            "let f = time>=1;"
+        );
     }
 
     #[test]

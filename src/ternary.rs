@@ -184,10 +184,12 @@ fn transform(chars: &[char], mask: &[bool], start: usize, end: usize) -> String 
 }
 
 /// Scans a ternary branch: the "then" branch ends at a top-level `:`; the
-/// "else" branch ends at a top-level `,`/`;`/bare `=`/end-of-range. Brackets
-/// are recursed into (via `copy_bracket`) so nested ternaries inside them
-/// are transformed independently. Returns the branch text and the index
-/// just past its terminator (for "then", past the `:`; for "else", at the
+/// "else" branch ends at a top-level `,`/`;`/bare `=`/end-of-range, or (see
+/// `ends_branch_at_newline`) a bare newline that looks like a genuine
+/// statement boundary rather than a mid-expression line break. Brackets are
+/// recursed into (via `copy_bracket`) so nested ternaries inside them are
+/// transformed independently. Returns the branch text and the index just
+/// past its terminator (for "then", past the `:`; for "else", at the
 /// terminator itself, unconsumed).
 fn scan_branch(chars: &[char], mask: &[bool], start: usize, end: usize, stop_at_colon: bool) -> (String, usize) {
     let mut buf = String::new();
@@ -211,6 +213,9 @@ fn scan_branch(chars: &[char], mask: &[bool], start: usize, end: usize, stop_at_
             '=' if !stop_at_colon && is_bare_equals(chars, i) => {
                 return (buf, i);
             }
+            '\n' if !stop_at_colon && ends_branch_at_newline(chars, mask, &buf, i, end) => {
+                return (buf, i);
+            }
             _ => {
                 buf.push(chars[i]);
                 i += 1;
@@ -218,6 +223,44 @@ fn scan_branch(chars: &[char], mask: &[bool], start: usize, end: usize, stop_at_
         }
     }
     (buf, i)
+}
+
+/// True if a bare newline at `i` looks like a genuine statement boundary
+/// rather than a mid-expression line break - i.e. neither the branch text
+/// scanned so far nor the next line's first significant character looks
+/// like a continuation. Without this, an else-branch with no explicit
+/// `,`/`;`/`=` terminator anywhere later in the file (a bare, un-asi'd
+/// `hh=height>width?width/height:1` with nothing after it but a newline)
+/// swallows the *entire rest of the file* into its own branch text, since
+/// the only terminators this scan otherwise recognizes never occur again.
+/// Mirrors `asi::insert_missing_semicolons`'s own "does this line
+/// genuinely end here" heuristic (same character sets), since this pass
+/// runs *before* `asi` and can't rely on a `;` already being there.
+fn ends_branch_at_newline(chars: &[char], mask: &[bool], buf: &str, i: usize, end: usize) -> bool {
+    let last_significant = buf.trim_end().chars().next_back();
+    if last_significant.is_some_and(continues_branch_line) {
+        return false;
+    }
+    let mut j = i + 1;
+    while j < end && (chars[j].is_whitespace() || mask[j]) {
+        j += 1;
+    }
+    match chars.get(j).filter(|_| j < end) {
+        None => false,
+        Some(c) => !continues_branch_line(*c),
+    }
+}
+
+/// Same character set on both sides of a line break - `asi.rs`'s
+/// `continues_line`/`continues_next_line` are two different (if mostly
+/// overlapping) sets since a full statement has more shapes than a bare
+/// ternary branch does; a branch is just a value expression, so one set
+/// suffices here.
+fn continues_branch_line(c: char) -> bool {
+    matches!(
+        c,
+        '.' | ')' | ']' | '}' | ',' | '+' | '-' | '*' | '/' | '%' | '=' | '<' | '>' | '!' | '&' | '|' | '^' | ':' | '?'
+    )
 }
 
 #[cfg(test)]
@@ -341,6 +384,38 @@ mod tests {
         assert_eq!(
             rewrite_ternaries("pat=x=>cond?t:f"),
             "pat=x=>if cond { t } else { f }"
+        );
+    }
+
+    #[test]
+    fn stops_else_branch_at_a_bare_trailing_newline() {
+        // a top-level assignment with no `,`/`;`/`=` anywhere later in the
+        // file (the common case, since `asi` hasn't run yet at this point
+        // in the pipeline) must not swallow the rest of the file into the
+        // else branch's own text.
+        assert_eq!(
+            rewrite_ternaries("hh=height>width?width/height:1\nosc(60).out()"),
+            "hh=if height>width { width/height } else { 1 }\nosc(60).out()"
+        );
+    }
+
+    #[test]
+    fn leaves_a_genuine_multiline_chain_continuation_in_the_else_branch_alone() {
+        // the next line starts with `.` - a continuation, not a new
+        // statement - so the branch must keep scanning past the newline.
+        assert_eq!(
+            rewrite_ternaries("cond?a:b\n  .out()"),
+            "if cond { a } else { b\n  .out() }"
+        );
+    }
+
+    #[test]
+    fn leaves_a_dangling_operator_at_end_of_line_in_the_else_branch_alone() {
+        // the branch text itself ends in `+` - clearly not done yet,
+        // regardless of what the next line starts with.
+        assert_eq!(
+            rewrite_ternaries("cond?a:b+\n1"),
+            "if cond { a } else { b+\n1 }"
         );
     }
 

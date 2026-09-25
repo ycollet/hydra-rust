@@ -271,8 +271,13 @@ Pipeline order (each step's output feeds the next):
    correctly in the body whenever they match one of hydra-rust's own
    globals. Deliberately **not** rewritten: multi-param or bare-identifier
    arrows (`(a,b)=>...`, `x=>...`, used for pattern/sequencer callbacks —
-   unsupported) and block-bodied arrows (`()=>{ ... }` — don't reduce to a
-   single expression).
+   unsupported), block-bodied arrows (`()=>{ ... }` — don't reduce to a
+   single expression), and an arrow that's itself the right-hand side of a
+   bare `TARGET =` assignment (`pat = ()=>solid()`) - step 19 (`arrowfn`)
+   owns that position entirely instead, since it runs after `asi` has made
+   every statement's own boundary unambiguous and needs to tell a genuine
+   reactive-value body apart from an unsupported mutating-update idiom in
+   disguise (`update = ()=>b+=1`).
 15. **`objlit::rewrite_object_literals`** — rewrites JS object literals
    (`{key: value, ...}`) into Rhai's map literal syntax (`#{key: value,
    ...}`) wherever one appears in value position (a call argument,
@@ -308,7 +313,16 @@ Pipeline order (each step's output feeds the next):
    where a branch starts or ends, and brackets are recursed into — rather
    than via full expression-grammar parsing; nested/chained ternaries
    (`a?b:c?d:e`, right-associative) are handled via recursion on the
-   extracted branches.
+   extracted branches. Since this pass runs *before* `asi` (step 18), an
+   else-branch with no `,`/`;`/bare `=` anywhere later in the file at all
+   (a bare top-level assignment, e.g. `hh=height>width?width/height:1`
+   with nothing after it but a newline) has no other terminator to stop
+   at, and would otherwise swallow the *entire rest of the file* into its
+   own branch text. The else-branch scan also stops at a bare newline that
+   looks like a genuine statement boundary - mirroring `asi`'s own "does
+   this line end here" heuristic (same two character sets, checked on both
+   sides of the break) since this pass can't yet rely on a `;` already
+   being there.
 17. **`commastmt::rewrite_top_level_comma_statements`** — rewrites a bare
    (non-parenthesized) top-level sequence of comma-joined statements
    (`loadScript(a), loadScript(b), setResolution(w,h)`) into
@@ -340,7 +354,14 @@ Pipeline order (each step's output feeds the next):
    look like the start of one legitimate multi-declarator list and suppress
    splitting for the entire rest of the chain; the repeated keyword is the
    signal that these are actually independent statements, not continuation
-   commas of a single declaration. Runs before `asi`: by the time `asi` sees
+   commas of a single declaration. The lookahead also exits the declarator
+   list (splits regardless) if what follows the comma isn't even a
+   plausible declarator name at all — not a bare identifier, or an
+   identifier immediately followed by `(`/`.` (a call or property-path
+   access, e.g. `let S=0.5,0.1` or `let a=1,foo()`) — since `autolet` only
+   ever prefixes bare *assignments*, so a literal, call, or member access
+   right after the comma was never turned into (or was ever part of) a
+   real declarator to begin with. Runs before `asi`: by the time `asi` sees
    this, each comma-joined call is already its own semicolon-terminated
    statement.
 18. **`asi::insert_missing_semicolons`** — JS has automatic semicolon
@@ -365,11 +386,23 @@ Pipeline order (each step's output feeds the next):
    `let`/`const` and any default parameter values (not cascaded into
    arity-shim overloads the way step 6's does — no corpus evidence yet that
    this form commonly needs it). Arrow `params` may be parenthesized
-   (`(a,b)`, possibly empty) or, for one parameter, bare (`v => ...`); an
-   empty parameter list is only accepted with a block `BODY` (an empty
-   *expression*-bodied arrow is the reactive-value idiom from step 14
-   instead, handled upstream) - the `function`-expression spelling has no
-   expression-body form at all, so this exclusion doesn't apply to it. A
+   (`(a,b)`, possibly empty) or, for one parameter, bare (`v => ...`). An
+   empty parameter list paired with a *block* body is unconditionally a
+   real named helper; paired with an *expression* body (only possible for
+   the arrow spelling - `function` has no expression-body form at all),
+   it's almost always the reactive-value idiom instead (`pat = ()=>
+   solid()`) assigned to a variable rather than used directly in argument
+   position - `arrow.rs` (step 14) only strips this shape in *argument*
+   position now, deferring the assignment-target position entirely to
+   this pass. This pass does the equivalent substitution itself (`IDENT =
+   BODY;`, preserving any `let`/`const` prefix) - *unless* the body is
+   itself an assignment (`update = ()=>b+=0.01`) rather than a
+   value-producing expression: that's not a value at all, it's an attempt
+   at a per-frame *mutating* callback, an idiom with no possible
+   equivalent here (nothing ever re-invokes a stored Rhai value per frame
+   the way a real JS callback would) - dropped the same way a
+   property-path target is (see below), rather than leave "assign the
+   result of an assignment" for Rhai's parser to trip over. A
    `function`-expression may repeat a name after the keyword
    (`x = function x() {...}`, only for its own stack traces/self-reference)
    — accepted and discarded, since `IDENT` (the assignment target) is what

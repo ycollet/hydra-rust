@@ -58,7 +58,7 @@ pub fn rewrite_top_level_comma_statements(src: &str) -> String {
 
         match chars[i] {
             ',' if depth == 0
-                && (!in_declarator_list || starts_declarator_keyword_after_ws(&chars, &mask, i + 1)) =>
+                && (!in_declarator_list || comma_exits_declarator_list(&chars, &mask, i + 1)) =>
             {
                 out.push(';');
                 i += 1;
@@ -101,22 +101,46 @@ fn is_ident_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
-/// True if, skipping whitespace/comments from `i` onward, the next token is
-/// `let`/`const`. Used to detect a comma immediately followed by its own
-/// fresh declarator keyword - this only happens when an earlier pipeline
-/// step (`autolet`, which is comma-agnostic and inserts `let` before *every*
-/// bare assignment regardless of what separates it from the previous one)
-/// has independently prefixed several originally comma-joined bare
-/// assignments with their own repeated `let`. That repetition is the
-/// signal that these are actually separate statements, not a continuation
-/// of one genuine `let a=1, b=2` declarator list (which never repeats the
-/// keyword) - so this comma must split regardless of the current
-/// `in_declarator_list` state.
-fn starts_declarator_keyword_after_ws(chars: &[char], mask: &[bool], mut i: usize) -> bool {
-    while i < chars.len() && !mask[i] && chars[i].is_whitespace() {
-        i += 1;
+/// True if a depth-0 comma immediately followed (at `j`, skipping
+/// whitespace/comments) by this content can *not* be a continuation of an
+/// already-open `let`/`const` declarator list - i.e. the comma must split
+/// into `;` even though `in_declarator_list` is currently set. Two distinct
+/// ways this happens, both stemming from the same root cause: `autolet`
+/// (an earlier pipeline step) is comma-agnostic and inserts `let` before
+/// *every* bare assignment it finds, regardless of what separates it from
+/// the previous one - so a chain that was never a real declarator list at
+/// all can still end up *looking* like one by the time this pass runs:
+/// - The next token is itself a fresh `let`/`const` (`let rn=1,let a=2`) -
+///   a repeated keyword can only mean a separate, independent statement,
+///   since a genuine multi-declarator list never repeats it.
+/// - The next token isn't even a plausible declarator name at all - not a
+///   bare identifier, or an identifier immediately followed by `(`/`.`
+///   (a call or a property-path access, e.g. `let S=0.5,0.1` or
+///   `let a=1,foo()` - `autolet` only prefixes bare *assignments*, so a
+///   literal, call, or member access after the comma was never turned
+///   into its own declarator and was never part of one to begin with).
+fn comma_exits_declarator_list(chars: &[char], mask: &[bool], mut j: usize) -> bool {
+    while j < chars.len() && !mask[j] && chars[j].is_whitespace() {
+        j += 1;
     }
-    starts_declarator_keyword(chars, i)
+    if starts_declarator_keyword(chars, j) {
+        return true;
+    }
+    if !chars.get(j).is_some_and(|c| is_ident_start(*c)) {
+        return true;
+    }
+    let mut k = j;
+    while k < chars.len() && is_ident_char(chars[k]) {
+        k += 1;
+    }
+    while k < chars.len() && !mask[k] && chars[k].is_whitespace() {
+        k += 1;
+    }
+    !matches!(chars.get(k), None | Some(',' | ';' | '='))
+}
+
+fn is_ident_start(c: char) -> bool {
+    c.is_alphabetic() || c == '_'
 }
 
 #[cfg(test)]
@@ -185,6 +209,36 @@ mod tests {
         assert_eq!(
             rewrite_top_level_comma_statements("canvas.setLinear(),let rn=1,let a=2,let dx=rn()"),
             "canvas.setLinear();let rn=1;let a=2;let dx=rn()"
+        );
+    }
+
+    #[test]
+    fn splits_a_bare_literal_after_a_single_let_prefixed_assignment() {
+        // `S=0.5,0.1` (JS's comma operator: assign, then a discarded bare
+        // literal) - once `autolet` has prefixed the first operand with
+        // `let`, `0.1` isn't a plausible declarator name at all, so this
+        // can't be a genuine multi-declarator continuation.
+        assert_eq!(
+            rewrite_top_level_comma_statements("let S=0.5,0.1"),
+            "let S=0.5;0.1"
+        );
+    }
+
+    #[test]
+    fn splits_a_call_after_a_single_let_prefixed_assignment() {
+        // `a=1,foo()` - `foo` starts like an identifier but is immediately
+        // followed by `(`, so it's a call, not a fresh declarator name.
+        assert_eq!(
+            rewrite_top_level_comma_statements("let a=1,foo()"),
+            "let a=1;foo()"
+        );
+    }
+
+    #[test]
+    fn splits_a_property_access_after_a_single_let_prefixed_assignment() {
+        assert_eq!(
+            rewrite_top_level_comma_statements("let a=1,foo.bar"),
+            "let a=1;foo.bar"
         );
     }
 
