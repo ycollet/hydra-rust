@@ -22,7 +22,20 @@
 //! (used as JS closures/callbacks, which can capture outer-scope
 //! variables - Rhai's `fn`-defined functions can't, so this wouldn't be a
 //! safe like-for-like translation).
+//!
+//! Runs `asi::insert_missing_semicolons` on the body's own inner content
+//! before copying it, even though the file-wide `asi` pass (step 18)
+//! hasn't run yet at this point (step 6, before `autolet`): the file-wide
+//! pass never inserts a `;` while bracket depth is above 0 anyway - true
+//! for everything inside this function's own `{`/`}` regardless of when
+//! it runs - so a multi-statement body with no explicit `;` between its
+//! own lines (`function f(e) {\n  x = e.a\n  y = e.b\n}`, common real JS
+//! style) would otherwise reach Rhai's parser exactly as broken as if
+//! this pass hadn't run `asi` locally at all. Same idea `forloop.rs`
+//! already uses for its own loop bodies, and `arrowfn.rs` for its
+//! function-*value* equivalent of this same declaration form.
 
+use crate::asi;
 use crate::srcscan::mask_strings_and_comments;
 
 pub fn rewrite_function_decls(src: &str) -> String {
@@ -90,8 +103,11 @@ fn rewrite_one(chars: &[char], mask: &[bool], after_kw: usize, out: &mut String)
     out.push_str(&name);
     out.push('(');
     out.push_str(&names.join(","));
-    out.push_str(") ");
-    out.extend(&chars[body_open..=body_close]);
+    out.push_str(") {");
+    out.push_str(&asi::insert_missing_semicolons(
+        &chars[body_open + 1..body_close].iter().collect::<String>(),
+    ));
+    out.push('}');
 
     // Trailing-default shim cascade: only when every defaulted parameter
     // is followed solely by other defaulted parameters (`a,b=1,c=2`, not
@@ -229,6 +245,18 @@ mod tests {
         assert_eq!(
             rewrite_function_decls("function r(min=0,max=1) { return max-min; }"),
             "fn r(min,max) { return max-min; }\nfn r() { r(0) }\nfn r(min) { r(min,1) }"
+        );
+    }
+
+    #[test]
+    fn inserts_missing_semicolons_between_the_bodys_own_bare_statements() {
+        // real JS style routinely puts each statement on its own line
+        // with no `;` - the file-wide `asi` pass (step 18) never reaches
+        // inside this function's own `{ }` (bracket depth > 0 there
+        // regardless of when it runs), so this pass runs it locally first.
+        assert_eq!(
+            rewrite_function_decls("function f(e) {\n  x = e.a\n  y = e.b\n}"),
+            "fn f(e) {\n  x = e.a;\n  y = e.b\n}"
         );
     }
 

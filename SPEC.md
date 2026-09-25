@@ -185,7 +185,14 @@ Pipeline order (each step's output feeds the next):
    shorter arity couldn't unambiguously fill the gap). Anonymous
    `function(...) { ... }` expressions are left alone, since they're often
    used as closures capturing outer-scope variables, which Rhai's
-   `fn`-defined functions can't do.
+   `fn`-defined functions can't do. Runs `asi::insert_missing_semicolons`
+   on the body's own inner content before copying it, even though this
+   runs well before step 18's file-wide pass: that pass never inserts a
+   `;` while bracket depth is above 0 anyway, true for everything inside
+   this function's own `{`/`}` regardless of when it runs, so a
+   multi-statement body with no explicit `;` between its own lines
+   (ordinary real JS style) needs this handled locally, the same idea
+   `forloop.rs` already uses for its own loop bodies.
 7. **`iife::unwrap_iife`** — real sketches sometimes wrap their entire body
    in an immediately-invoked function expression to load an extension
    library first: `(() => { BODY })()` (`async`/`await` already stripped
@@ -417,7 +424,17 @@ Pipeline order (each step's output feeds the next):
    after `asi` (one more step still follows, see step 20): every other pass
    has already rewritten the body's own content, and an arrow's expression
    body (no `{ }`) needs an unambiguous end, which becomes just "the next
-   top-level `;`" once `asi` has guaranteed one is there.
+   top-level `;`" once `asi` has guaranteed one is there. A *block* body,
+   though, still needs its own local `asi::insert_missing_semicolons` pass
+   on just its inner content before being wrapped in `fn IDENT(...) {
+   ... }`: the file-wide pass at step 18 never inserts a `;` while bracket
+   depth is above 0, true for everything inside this block's own `{`/`}`
+   - so a multi-statement body with no explicit `;` between its own lines
+   (`update = () => {\n  b1 = a.fft[0]\n  b2 = a.fft[1]\n}`, common once
+   `autolet` has already let-prefixed each line) would otherwise reach
+   Rhai's parser exactly as broken as if `asi` had never run at all - the
+   same idea `forloop.rs` uses for its own loop bodies, and step 6 for its
+   function-*declaration* equivalent of this same idiom.
 20. **`commaexpr::rewrite_comma_expressions`** — rewrites a parenthesized,
    non-call, comma-containing group (`(a, b, c)`) down to just its last
    term, `(c)` — JS's own comma-operator semantics (every sub-expression is

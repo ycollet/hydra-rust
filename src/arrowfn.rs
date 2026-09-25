@@ -68,6 +68,7 @@
 //! which by this point in the pipeline is always there (either written by
 //! the author or inserted by `asi`).
 
+use crate::asi;
 use crate::jsfunctions::{matching_close, parse_params};
 use crate::srcscan::mask_strings_and_comments;
 
@@ -140,7 +141,7 @@ fn try_rewrite(chars: &[char], mask: &[bool], i: usize) -> Option<(String, usize
 
         if chars.get(j) == Some(&'{') {
             let body_close = matching_close(chars, mask, j, '{', '}')?;
-            (names, chars[j..=body_close].iter().collect::<String>(), body_close + 1)
+            (names, block_body_with_asi(chars, j, body_close), body_close + 1)
         } else {
             let (expr, semi_end) = scan_expr_body(chars, mask, j);
             // Only for a bare-identifier target - a property-path target
@@ -198,8 +199,26 @@ fn try_parse_function_expr(
         return None;
     }
     let body_close = matching_close(chars, mask, m, '{', '}')?;
-    let body = chars[m..=body_close].iter().collect::<String>();
-    Some((names, body, body_close + 1))
+    Some((names, block_body_with_asi(chars, m, body_close), body_close + 1))
+}
+
+/// Extracts a `{...}` block's text (braces included) and runs `asi` on its
+/// *inner* content before re-wrapping it. `asi::insert_missing_semicolons`
+/// (step 18) already ran once over the whole file by the time this pass
+/// (step 19) sees it, but it deliberately never inserts a `;` while bracket
+/// depth is above 0 - exactly true for everything inside this block's own
+/// `{`/`}` - so a multi-statement arrow/function body with no explicit
+/// `;` between its own lines (`update = () => {\n  b1 = a.fft[0]\n  b2 =
+/// a.fft[1]\n}`, common once `autolet` has already turned each line into
+/// its own `let`-prefixed assignment) reaches this pass with those
+/// statements still glued together with nothing but a newline - a hard
+/// parse error once wrapped in `fn update() { ... }`. Running `asi` again
+/// on just this block's own content (bracket depth restarts at 0) fixes
+/// exactly that, the same "run asi locally before wrapping" idea
+/// `forloop.rs` already uses for its own loop bodies.
+fn block_body_with_asi(chars: &[char], open: usize, close: usize) -> String {
+    let inner: String = chars[open + 1..close].iter().collect();
+    format!("{{{}}}", asi::insert_missing_semicolons(&inner))
 }
 
 /// Parses an assignment target: a bare identifier, or a dotted property
@@ -380,6 +399,29 @@ mod tests {
     #[test]
     fn falls_back_to_end_of_input_without_trailing_semicolon() {
         assert_eq!(rewrite_named_arrows("let f = (a,b) => a+b"), "fn f(a,b) { a+b }");
+    }
+
+    #[test]
+    fn inserts_missing_semicolons_between_a_block_bodys_own_bare_statements() {
+        // `asi` (step 18) already ran once over the whole file by the time
+        // this pass sees it, but never inserts a `;` while bracket depth
+        // is above 0 - exactly true for everything inside this block's
+        // own `{ }` - so a multi-statement body with no explicit `;`
+        // between its own lines (common once `autolet` has already
+        // let-prefixed each one) needs a second, local asi pass before
+        // being wrapped in `fn`.
+        assert_eq!(
+            rewrite_named_arrows("update = () => {\n  let b1 = a.fft[0]\n  let b2 = a.fft[1]\n}"),
+            "fn update() {\n  let b1 = a.fft[0];\n  let b2 = a.fft[1]\n}"
+        );
+    }
+
+    #[test]
+    fn inserts_missing_semicolons_in_a_function_expressions_block_body() {
+        assert_eq!(
+            rewrite_named_arrows("update = function() {\n  let b1 = a.fft[0]\n  let b2 = a.fft[1]\n}"),
+            "fn update() {\n  let b1 = a.fft[0];\n  let b2 = a.fft[1]\n}"
+        );
     }
 
     #[test]
