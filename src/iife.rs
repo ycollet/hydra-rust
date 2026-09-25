@@ -17,8 +17,11 @@
 //! insertion between its own top-level statements.
 //!
 //! Deliberately narrow: only matches a wrapper with an *empty* parameter
-//! list (`()=>`). A non-empty one (`(hydra) => { ... }`) is left alone,
-//! since dropping the wrapper would leave `hydra` unbound inside the body.
+//! list (`()=>`, or the `function` *expression* spelling of the exact
+//! same idiom, `(function() { ... })()` - optionally named, since an
+//! IIFE's own name (if any) is never referenced again either way). A
+//! non-empty one (`(hydra) => { ... }`) is left alone, since dropping the
+//! wrapper would leave `hydra` unbound inside the body.
 
 use crate::srcscan::mask_strings_and_comments;
 
@@ -79,25 +82,7 @@ fn match_iife(chars: &[char], mask: &[bool], i: usize) -> Option<(usize, usize, 
     }
     let mut j = i + 1;
     skip_ws(chars, mask, &mut j);
-    if chars.get(j) != Some(&'(') {
-        return None;
-    }
-    j += 1;
-    skip_ws(chars, mask, &mut j);
-    if chars.get(j) != Some(&')') {
-        return None; // only the empty-param form is handled
-    }
-    j += 1;
-    skip_ws(chars, mask, &mut j);
-    if chars.get(j) != Some(&'=') || chars.get(j + 1) != Some(&'>') {
-        return None;
-    }
-    j += 2;
-    skip_ws(chars, mask, &mut j);
-    if chars.get(j) != Some(&'{') {
-        return None; // not a block-bodied arrow: nothing for us to unwrap
-    }
-    let body_open = j;
+    let body_open = match_arrow_head(chars, mask, j).or_else(|| match_function_head(chars, mask, j))?;
     let body_close = matching_close(chars, mask, body_open, '{', '}')?;
     let body_start = body_open + 1;
     let body_end = body_close;
@@ -141,6 +126,72 @@ fn match_iife(chars: &[char], mask: &[bool], i: usize) -> Option<(usize, usize, 
     Some((body_start, body_end, j))
 }
 
+/// If a zero-param arrow header (`()=>`) starts at `j` and is immediately
+/// followed by a block body, returns the index of that body's opening
+/// `{`.
+fn match_arrow_head(chars: &[char], mask: &[bool], j: usize) -> Option<usize> {
+    let mut j = j;
+    if chars.get(j) != Some(&'(') {
+        return None;
+    }
+    j += 1;
+    skip_ws(chars, mask, &mut j);
+    if chars.get(j) != Some(&')') {
+        return None; // only the empty-param form is handled
+    }
+    j += 1;
+    skip_ws(chars, mask, &mut j);
+    if chars.get(j) != Some(&'=') || chars.get(j + 1) != Some(&'>') {
+        return None;
+    }
+    j += 2;
+    skip_ws(chars, mask, &mut j);
+    if chars.get(j) != Some(&'{') {
+        return None; // not a block-bodied arrow: nothing for us to unwrap
+    }
+    Some(j)
+}
+
+/// If a zero-param `function` *expression* header (`function() {` or
+/// `function name() {`) starts at `j`, returns the index of the body's
+/// opening `{` - the same idiom as `match_arrow_head`, just spelled
+/// differently (see the module doc comment).
+fn match_function_head(chars: &[char], mask: &[bool], j: usize) -> Option<usize> {
+    let mut j = j;
+    let word_end = ident_end(chars, j);
+    if chars[j..word_end].iter().collect::<String>() != "function" {
+        return None;
+    }
+    j = word_end;
+    skip_ws(chars, mask, &mut j);
+    if chars.get(j).is_some_and(|c| c.is_alphabetic() || *c == '_') {
+        j = ident_end(chars, j);
+        skip_ws(chars, mask, &mut j);
+    }
+    if chars.get(j) != Some(&'(') {
+        return None;
+    }
+    j += 1;
+    skip_ws(chars, mask, &mut j);
+    if chars.get(j) != Some(&')') {
+        return None; // only the empty-param form is handled
+    }
+    j += 1;
+    skip_ws(chars, mask, &mut j);
+    if chars.get(j) != Some(&'{') {
+        return None;
+    }
+    Some(j)
+}
+
+fn ident_end(chars: &[char], start: usize) -> usize {
+    let mut j = start;
+    while j < chars.len() && (chars[j].is_alphanumeric() || chars[j] == '_') {
+        j += 1;
+    }
+    j
+}
+
 #[cfg(test)]
 mod tests {
     use super::unwrap_iife;
@@ -148,6 +199,32 @@ mod tests {
     #[test]
     fn unwraps_plain_iife() {
         assert_eq!(unwrap_iife("(()=>{osc(60).out()})()"), "osc(60).out()");
+    }
+
+    #[test]
+    fn unwraps_function_expression_iife() {
+        assert_eq!(unwrap_iife("(function() {osc(60).out()})()"), "osc(60).out()");
+    }
+
+    #[test]
+    fn unwraps_named_function_expression_iife() {
+        // an IIFE's own name (if any) is never referenced again either
+        // way - only useful for the function's own stack traces.
+        assert_eq!(unwrap_iife("(function main() {osc(60).out()})()"), "osc(60).out()");
+    }
+
+    #[test]
+    fn unwraps_function_expression_iife_with_a_catch_handler() {
+        assert_eq!(
+            unwrap_iife("(function() {osc(60).out()})().catch(e=>log(e))"),
+            "osc(60).out()"
+        );
+    }
+
+    #[test]
+    fn leaves_function_expression_with_params_alone() {
+        let src = "(function(hydra) {osc(60).out()})(hydraSynth)";
+        assert_eq!(unwrap_iife(src), src);
     }
 
     #[test]

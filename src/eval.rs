@@ -7,6 +7,7 @@ use crate::arrow;
 use crate::arrowfn;
 use crate::asi;
 use crate::autolet;
+use crate::closurefn;
 use crate::forloop;
 use crate::iife;
 use crate::increment;
@@ -1140,6 +1141,7 @@ pub fn preprocess(code: &str) -> String {
     let code = &argtrunc::truncate_extra_args(code);
     let code = &patcall::rewrite_pattern_calls(code);
     let code = &arrow::strip_zero_arg_arrows(code);
+    let code = &closurefn::rewrite_argument_position_closures(code);
     let code = &objlit::rewrite_object_literals(code);
     let code = &ternary::rewrite_ternaries(code);
     let code = &commastmt::rewrite_top_level_comma_statements(code);

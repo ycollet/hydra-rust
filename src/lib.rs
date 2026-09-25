@@ -13,6 +13,7 @@ mod arrow;
 mod arrowfn;
 mod asi;
 mod autolet;
+mod closurefn;
 mod forloop;
 mod glsl;
 mod iife;

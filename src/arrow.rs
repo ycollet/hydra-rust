@@ -16,9 +16,12 @@
 //! not found" instead - a plain, graceful degradation, not worse than the
 //! hard parse error this replaces.
 //!
-//! Deliberately left untouched:
-//! - multi-param or bare-identifier arrows (`(a,b)=>...`, `x=>...`), used
-//!   for a different purpose (pattern/sequencer callbacks)
+//! Deliberately left untouched here (not unhandled - see `closurefn.rs`,
+//! which runs right after this pass and picks up everything below except
+//! the assignment-target case):
+//! - multi-param or bare-identifier arrows (`(a,b)=>...`, `x=>...`) - real
+//!   JS's generic `Array` functional methods (`arr.reduce((a,b)=>a+b)`)
+//!   use this shape and have nothing to do with hydra's own chain API
 //! - block-bodied arrows (`()=>{ ... }`), which don't reduce to a bare
 //!   expression
 //! - an arrow that's itself the right-hand side of a bare `TARGET =`
@@ -61,7 +64,7 @@ pub fn strip_zero_arg_arrows(src: &str) -> String {
 /// position. Excludes `==`/`<=`/`>=`/`!=` (checks the character before the
 /// `=` too); `=>` can't occur here since that's this arrow's own token,
 /// always after its parameter list, never before it.
-fn preceded_by_bare_assignment_eq(chars: &[char], mask: &[bool], i: usize) -> bool {
+pub(crate) fn preceded_by_bare_assignment_eq(chars: &[char], mask: &[bool], i: usize) -> bool {
     let mut p = i;
     while p > 0 && (mask[p - 1] || chars[p - 1].is_whitespace()) {
         p -= 1;

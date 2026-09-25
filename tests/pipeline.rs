@@ -432,6 +432,17 @@ fn smooth_and_fit_pattern_calls_compile_to_valid_glsl() {
 }
 
 #[test]
+fn array_reduce_with_a_multi_param_arrow_callback_compiles() {
+    // real sketches commonly use JS's generic Array.reduce()/map() with an
+    // arrow callback for one-time setup computation (palette generation,
+    // an audio-FFT sum) - nothing to do with hydra's own chain API. Rhai
+    // has no `=>` syntax at all, but does have its own closure syntax that
+    // `Array::reduce` already accepts directly.
+    let src = "let s = [1,2,3].reduce((a,b) => a+b, 0);\nosc(60).out()";
+    assert!(eval(src).is_ok());
+}
+
+#[test]
 fn hydratext_config_assignments_are_harmless_no_ops() {
     // the hydra-text.js community extension's config object - real
     // sketches set arbitrary properties on it before calling the
