@@ -861,16 +861,24 @@ fn register_glsl_ops(engine: &mut Engine) {
 
     // A handful of real sketches do arithmetic on a p5.js instance
     // property we don't populate a real value for (`p1.frameCount * 256`,
-    // `mouseX - mouseY`) - reading an unregistered key off the `P5()`
-    // stand-in map (see below) yields `()`, same as any other undefined
-    // JS value here, and `() * i64`/`() * f64` has no operator otherwise.
-    // Treated as `0`, same graceful-fallback spirit as the rest of this
-    // sketch's harmless p5.js no-ops - there's no real p5 canvas rendering
-    // to make these values meaningful anyway.
-    engine.register_fn("*", |_a: (), _b: i64| -> i64 { 0 });
-    engine.register_fn("*", |_a: i64, _b: ()| -> i64 { 0 });
-    engine.register_fn("*", |_a: (), _b: f64| -> f64 { 0.0 });
-    engine.register_fn("*", |_a: f64, _b: ()| -> f64 { 0.0 });
+    // `mouseX - mouseY`, `p1.frameCount / fps`) - reading an unregistered
+    // key off the `P5()` stand-in map (see below) yields `()`, same as any
+    // other undefined JS value here, and `() OP i64`/`() OP f64` has no
+    // operator otherwise. Treated as `0`, same graceful-fallback spirit as
+    // the rest of this sketch's harmless p5.js no-ops - there's no real p5
+    // canvas rendering to make these values meaningful anyway.
+    macro_rules! unit_fallback {
+        ($op:literal) => {
+            engine.register_fn($op, |_a: (), _b: i64| -> i64 { 0 });
+            engine.register_fn($op, |_a: i64, _b: ()| -> i64 { 0 });
+            engine.register_fn($op, |_a: (), _b: f64| -> f64 { 0.0 });
+            engine.register_fn($op, |_a: f64, _b: ()| -> f64 { 0.0 });
+        };
+    }
+    unit_fallback!("+");
+    unit_fallback!("-");
+    unit_fallback!("*");
+    unit_fallback!("/");
 
     // `%` maps to GLSL's `mod()` builtin, not the `%` operator (which in
     // GLSL only applies to integers) - GLSL is float-typed throughout here.
@@ -1765,6 +1773,55 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
     engine.register_fn("stroke", |_p: Map, _color: Dynamic| {});
     engine.register_fn("stroke", |_p: Map, _r: Dynamic, _g: Dynamic, _b: Dynamic| {});
     engine.register_fn("strokeWeight", |_p: Map, _weight: Dynamic| {});
+    engine.register_fn("noStroke", |_p: Map| {});
+    engine.register_fn("noFill", |_p: Map| {});
+    engine.register_fn("text", |_p: Map, _str: ImmutableString, _x: Dynamic, _y: Dynamic| {});
+    engine.register_fn("textFont", |_p: Map, _name: ImmutableString| {});
+    engine.register_fn("color", |_p: Map, _r: Dynamic, _g: Dynamic, _b: Dynamic| {});
+    engine.register_fn("color", |_p: Map, _r: Dynamic, _g: Dynamic, _b: Dynamic, _a: Dynamic| {});
+    // p5.js's `color(r,g,b[,a])`/`color(gray)` free function (global mode,
+    // no `p1.` instance prefix) - a *different* function from hydra's own
+    // `.color()` chain method (always Node-receiver, registered via
+    // `register_color` below): dispatches correctly on the first
+    // argument's type, no collision. Returns a settable stand-in map,
+    // same treatment as every other p5.js value-constructor here - real
+    // sketches only ever pass the result along to `fill`/`stroke`, which
+    // already accept any `Dynamic` color argument.
+    engine.register_fn("color", |_gray: Dynamic| -> Map { Map::new() });
+    engine.register_fn("color", |_r: Dynamic, _g: Dynamic, _b: Dynamic| -> Map { Map::new() });
+    engine.register_fn("color", |_r: Dynamic, _g: Dynamic, _b: Dynamic, _a: Dynamic| -> Map { Map::new() });
+    // `new THREE.PerspectiveCamera(fov, aspect, near, far)` - three.js's
+    // camera constructor, seen after `THREE` itself degrades to a plain
+    // string (`let THREE = await import(url)`, with `await`/`import`
+    // already stripped as bare keywords, leaving just the url string as
+    // `THREE`'s value) - so this call's real receiver is that string, not
+    // a `Map`. Also registered as a bare 4-arg free function for sketches
+    // that destructure `PerspectiveCamera` off `THREE` first instead.
+    // Neither actually renders a 3D scene (see README's "Known-broken
+    // sketches" - no 3D pipeline exists here); returns a settable stand-in
+    // map so later property/method access on the camera is harmless too.
+    engine.register_fn(
+        "PerspectiveCamera",
+        |_receiver: Dynamic, _fov: Dynamic, _aspect: Dynamic, _near: Dynamic, _far: Dynamic| -> Map {
+            Map::new()
+        },
+    );
+    engine.register_fn(
+        "PerspectiveCamera",
+        |_fov: Dynamic, _aspect: Dynamic, _near: Dynamic, _far: Dynamic| -> Map { Map::new() },
+    );
+    // `new THREE.WebGLRenderer([{antialias: true, ...}])` - same idiom as
+    // `PerspectiveCamera` above (a stripped-import `THREE` string as the
+    // real receiver), typically constructed right alongside a camera in
+    // real three.js setup code. Optional config object accepted and
+    // ignored, same as `P5(...)`'s own optional config.
+    engine.register_fn("WebGLRenderer", |_receiver: Dynamic| -> Map { Map::new() });
+    engine.register_fn("WebGLRenderer", |_receiver: Dynamic, _config: Map| -> Map { Map::new() });
+    engine.register_fn("WebGLRenderer", || -> Map { Map::new() });
+    engine.register_fn("WebGLRenderer", |_config: Map| -> Map { Map::new() });
+    // `renderer.setSize(width, height)` - the very next call in the same
+    // three.js setup chain, right after constructing the renderer.
+    engine.register_fn("setSize", |_r: Map, _w: Dynamic, _h: Dynamic| {});
     // `sN.init({src: ...})` - not a real hydra.js API at all, but a
     // pattern some external platforms/community sketches use to feed a
     // p5.js canvas (or other DOM element) into a hydra source slot. No

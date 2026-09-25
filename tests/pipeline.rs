@@ -195,6 +195,40 @@ fn a_brace_less_js_if_statement_compiles() {
 }
 
 #[test]
+fn p5_global_mode_color_constructor_is_a_harmless_no_op() {
+    // p5.js's global-mode `color(r,g,b[,a])`/`color(gray)` - a different
+    // function from hydra's own `.color()` chain method (always
+    // Node-receiver) - dispatches correctly by argument type, no
+    // collision.
+    let src = r#"
+        let c1 = color(200);
+        let c2 = color(255, 0, 0);
+        let c3 = color(255, 0, 0, 128);
+        osc(60).out()
+    "#;
+    assert!(eval(src).is_ok());
+}
+
+#[test]
+fn three_js_perspective_camera_is_a_harmless_no_op() {
+    // `new THREE.PerspectiveCamera(fov, aspect, near, far)` - seen after
+    // `THREE` itself degrades to a plain string (`let THREE = await
+    // import(url)`, with await/import already stripped, leaving just the
+    // url string as THREE's value) - so the real receiver here is a
+    // string, not a Map. No 3D rendering pipeline exists here either way.
+    let src = "let THREE = \"https://cdn.example.com/three.module.js\";\nlet camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);\nosc(60).out()";
+    assert!(eval(src).is_ok());
+}
+
+#[test]
+fn three_js_webgl_renderer_is_a_harmless_no_op() {
+    // typically constructed right alongside a PerspectiveCamera in real
+    // three.js setup code - same "THREE degrades to a string" idiom.
+    let src = "let THREE = \"https://cdn.example.com/three.module.js\";\nlet renderer = new THREE.WebGLRenderer({antialias: true});\nrenderer.setSize(window.innerWidth, window.innerHeight);\nosc(60).out()";
+    assert!(eval(src).is_ok());
+}
+
+#[test]
 fn document_dom_methods_are_harmless_no_ops() {
     // real sketches commonly build an offscreen <canvas>/<img> element
     // (usually to feed a p5.js overlay) - the exact same "no Rust
@@ -267,6 +301,12 @@ fn p5_instance_and_its_common_methods_are_harmless_no_ops() {
         p1.stroke("red");
         p1.stroke(15, 252, 3);
         p1.strokeWeight(2);
+        p1.textFont("Courier");
+        p1.color(255, 0, 0);
+        p1.color(255, 0, 0, 128);
+        p1.noStroke();
+        p1.noFill();
+        p1.text("hi", 10, 10);
         p1.someArbitraryProperty = "anything";
         osc(60).out()
     "#;
@@ -281,7 +321,10 @@ fn arithmetic_on_an_unset_p5_instance_property_falls_back_to_zero() {
     // value; multiplying that by a number must not hard-fail the sketch.
     let src = r#"
         let p1 = P5({});
-        let c = p1.frameCount * 256;
+        let c1 = p1.frameCount * 256;
+        let c2 = p1.frameCount / 30;
+        let c3 = p1.frameCount + 1;
+        let c4 = p1.frameCount - 1;
         osc(60).out()
     "#;
     assert!(eval(src).is_ok());
