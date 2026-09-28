@@ -522,11 +522,16 @@ pub fn render_multipass(
             RenderMode::All => {
                 let hw = saved_vp[2] / 2;
                 let hh = saved_vp[3] / 2;
-                for (idx, (vx, vy)) in
-                    [(0, hh), (hw, hh), (0, 0), (hw, 0)].iter().enumerate()
+                // Quadrant positions paired with the buffer index hydra-synth's own
+                // renderAll shader puts there. That shader derives the quadrant from
+                // `floor(2*x)*2 + floor(2*(1-y))`, which works out to a diagonal
+                // o0/o2/o1/o3 assignment (top-right is o2, bottom-left is o1) rather
+                // than the row-major o0/o1/o2/o3 order it might look like at a glance.
+                for ((vx, vy), buf_idx) in
+                    [(0, hh), (hw, hh), (0, 0), (hw, 0)].iter().zip([0, 2, 1, 3])
                 {
                     gl.viewport(saved_vp[0] + vx, saved_vp[1] + vy, hw, hh);
-                    draw_display_buffer(gl, snap, d, write, idx);
+                    draw_display_buffer(gl, snap, d, write, buf_idx);
                 }
                 gl.viewport(saved_vp[0], saved_vp[1], saved_vp[2], saved_vp[3]);
             }

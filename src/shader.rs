@@ -71,7 +71,14 @@ uniform sampler2D iBuffer0;
 in vec2 v_uv;
 out vec4 fragColor;
 void main() {
-  fragColor = texture(iBuffer0, v_uv);
+  // Node shaders (mainImage) sample/write buffers using gl_FragCoord directly, so
+  // the internal per-node coordinate space is never Y-flipped. hydra-synth's final
+  // canvas blit (HydraRenderer's renderFbo/renderAll regl passes), however, samples
+  // its output FBO at (uv.x, 1.0 - uv.y). Skipping that flip here made rotate()
+  // spin the opposite way on screen from hydra-web (and, in the render() 2x2 grid,
+  // put buffers in the wrong quadrants) even though the math driving the rotation
+  // itself was identical - only this last blit-to-screen step needs the flip.
+  fragColor = texture(iBuffer0, vec2(v_uv.x, 1.0 - v_uv.y));
 }"
     .to_string()
 }
