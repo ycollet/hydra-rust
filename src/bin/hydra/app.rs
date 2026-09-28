@@ -772,12 +772,22 @@ impl HydraApp {
                         } else {
                             Color32::from_gray(90)
                         };
-                        if ui
-                            .add(egui::Button::new(egui::RichText::new(label).color(color)).small())
-                            .clicked()
-                        {
-                            self.recall_slot(i);
+                        let response = ui
+                            .add(egui::Button::new(egui::RichText::new(label).color(color)).small());
+                        if response.clicked() {
+                            // Mirror the Alt(+Shift)+<hex> keyboard shortcuts: a plain click
+                            // recalls the slot, Shift+click saves the editor's current code
+                            // into it. Without this, mouse-only users had no way to save at
+                            // all - clicking a slot always overwrote the editor, silently
+                            // discarding any code that was never bound to a slot yet (e.g.
+                            // typed before ever using the keyboard shortcut).
+                            if ui.input(|i| i.modifiers.shift) {
+                                self.save_slot(i);
+                            } else {
+                                self.recall_slot(i);
+                            }
                         }
+                        response.on_hover_text("Click: recall  •  Shift+click: save");
                     }
                 });
 
