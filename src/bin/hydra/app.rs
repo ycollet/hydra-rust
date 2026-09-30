@@ -928,11 +928,28 @@ impl HydraApp {
     /// on-screen debug graph (which draws directly onto the canvas the
     /// visuals render to; nothing else here draws into the GL output, so
     /// this is a separate egui overlay instead).
+    ///
+    /// This overlay shows relative loudness on a dB (logarithmic) scale
+    /// rather than `a.fft[i]`'s own raw linear amplitude - human hearing
+    /// (and the visual "punch" a script's own audio-reactivity usually
+    /// wants to convey) is much closer to logarithmic than linear, so a
+    /// linear bar graph makes quiet-but-audible detail invisible at the
+    /// bottom of the scale. This only affects this on-screen graph -
+    /// `a.fft[i]` itself, read by scripts, is untouched (its own scale is
+    /// deliberately kept unchanged for compatibility with existing sketches
+    /// already tuned against it).
     #[cfg(feature = "audio")]
     fn show_audio_overlay(&self, ctx: &egui::Context) {
         if !self.audio_overlay_visible {
             return;
         }
+        // Below this, a bin is drawn at the very bottom of the graph -
+        // a fairly generous floor (rather than e.g. a "true" digital-audio
+        // -96dB floor) since these are already-smoothed, already-scaled FFT
+        // magnitudes, not raw sample values - quiet bins routinely sit
+        // much closer to 0dB than a full-range signal would.
+        const DB_FLOOR: f32 = -48.0;
+
         egui::Area::new(egui::Id::new("audio_fft_overlay"))
             .anchor(egui::Align2::LEFT_BOTTOM, [20.0, -20.0])
             .interactable(false)
@@ -942,26 +959,68 @@ impl HydraApp {
                     .inner_margin(egui::Margin::symmetric(8, 6))
                     .show(ui, |ui| {
                         ui.label(
-                            egui::RichText::new("a.fft")
+                            egui::RichText::new("a.fft (dB)")
                                 .small()
                                 .color(Color32::from_gray(200)),
                         );
                         let n = hydra_rust::audio::NUM_FFT_BINS;
+                        // A little taller than a purely linear graph would
+                        // need, so the 0dB reference line has clear room
+                        // above the tallest bar instead of sitting flush
+                        // against the frame's own top edge.
                         let (rect, _) = ui.allocate_exact_size(
-                            egui::vec2(8.0 * n as f32 * 2.0, 40.0),
+                            egui::vec2(8.0 * n as f32 * 2.0, 48.0),
                             egui::Sense::hover(),
                         );
                         let painter = ui.painter();
+
+                        let line_y = rect.top() + 8.0;
+                        let graph_top = line_y + 3.0;
+                        let graph_height = rect.bottom() - graph_top;
                         let bar_w = rect.width() / n as f32;
+
                         for (i, v) in self.last_fft.iter().enumerate() {
-                            let h = v.clamp(0.0, 1.0) * rect.height();
                             let x0 = rect.left() + i as f32 * bar_w;
-                            let bar = egui::Rect::from_min_max(
-                                egui::pos2(x0 + 1.0, rect.bottom() - h),
+                            let cell = egui::Rect::from_min_max(
+                                egui::pos2(x0 + 1.0, graph_top),
                                 egui::pos2(x0 + bar_w - 1.0, rect.bottom()),
+                            );
+                            painter.rect_stroke(
+                                cell,
+                                0.0,
+                                egui::Stroke::new(1.0_f32, Color32::from_gray(90)),
+                                egui::StrokeKind::Inside,
+                            );
+
+                            // 20*log10(amplitude): 0dB at unity amplitude,
+                            // negative below it - the standard amplitude-
+                            // to-dB conversion (power would use 10*log10
+                            // instead, but these are FFT magnitudes, i.e.
+                            // amplitudes, not power values).
+                            let db = 20.0 * v.max(1e-6).log10();
+                            let normalized = ((db - DB_FLOOR) / -DB_FLOOR).clamp(0.0, 1.0);
+                            let h = normalized * graph_height;
+                            let bar = egui::Rect::from_min_max(
+                                egui::pos2(cell.left() + 1.0, rect.bottom() - h),
+                                egui::pos2(cell.right() - 1.0, rect.bottom()),
                             );
                             painter.rect_filled(bar, 0.0, Color32::from_rgb(80, 220, 255));
                         }
+
+                        // 0dB reference line - unity amplitude, the level
+                        // every bin's own height is measured against.
+                        painter.hline(
+                            rect.left()..=rect.right(),
+                            line_y,
+                            egui::Stroke::new(1.0_f32, Color32::from_rgb(255, 180, 60)),
+                        );
+                        painter.text(
+                            egui::pos2(rect.right(), line_y - 1.0),
+                            egui::Align2::RIGHT_BOTTOM,
+                            "0dB",
+                            FontId::proportional(9.0),
+                            Color32::from_rgb(255, 180, 60),
+                        );
                     });
             });
     }
