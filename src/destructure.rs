@@ -97,14 +97,23 @@ fn try_rewrite(chars: &[char], mask: &[bool], i: usize, end: usize) -> Option<(S
     if names.is_empty() {
         return Some((String::new(), stmt_end));
     }
-    let rewritten = names.iter().map(|n| format!("let {n} = ();")).collect::<Vec<_>>().join(" ");
+    let rewritten = names
+        .iter()
+        .map(|n| format!("let {n} = ();"))
+        .collect::<Vec<_>>()
+        .join(" ");
     Some((rewritten, stmt_end))
 }
 
 /// Parses `{ a, b: c, ...rest }` starting at the `{` in `j`, returning the
 /// bound local names. `None` if it contains anything other than a plain
 /// shorthand/rename/rest element (a default value or nested pattern).
-fn parse_object_pattern(chars: &[char], mask: &[bool], open: usize, end: usize) -> Option<Vec<String>> {
+fn parse_object_pattern(
+    chars: &[char],
+    mask: &[bool],
+    open: usize,
+    end: usize,
+) -> Option<Vec<String>> {
     let close = matching_close(chars, mask, open, end)?;
     let mut names = Vec::new();
     let mut j = open + 1;
@@ -113,7 +122,10 @@ fn parse_object_pattern(chars: &[char], mask: &[bool], open: usize, end: usize) 
         if j >= close {
             break;
         }
-        if chars.get(j) == Some(&'.') && chars.get(j + 1) == Some(&'.') && chars.get(j + 2) == Some(&'.') {
+        if chars.get(j) == Some(&'.')
+            && chars.get(j + 1) == Some(&'.')
+            && chars.get(j + 2) == Some(&'.')
+        {
             j += 3;
             skip_ws(chars, mask, &mut j, close);
         }
@@ -156,7 +168,12 @@ fn parse_object_pattern(chars: &[char], mask: &[bool], open: usize, end: usize) 
 /// Parses `[a, b, ...rest]` starting at the `[` in `j`, returning the
 /// bound names (holes skipped). `None` if any element isn't a plain
 /// identifier (a default value or nested pattern).
-fn parse_array_pattern(chars: &[char], mask: &[bool], open: usize, end: usize) -> Option<Vec<String>> {
+fn parse_array_pattern(
+    chars: &[char],
+    mask: &[bool],
+    open: usize,
+    end: usize,
+) -> Option<Vec<String>> {
     let close = matching_close(chars, mask, open, end)?;
     let mut names = Vec::new();
     let mut j = open + 1;
@@ -169,7 +186,10 @@ fn parse_array_pattern(chars: &[char], mask: &[bool], open: usize, end: usize) -
             j += 1; // a hole - skip
             continue;
         }
-        if chars.get(j) == Some(&'.') && chars.get(j + 1) == Some(&'.') && chars.get(j + 2) == Some(&'.') {
+        if chars.get(j) == Some(&'.')
+            && chars.get(j + 1) == Some(&'.')
+            && chars.get(j + 2) == Some(&'.')
+        {
             j += 3;
             skip_ws(chars, mask, &mut j, close);
         }
@@ -298,7 +318,9 @@ mod tests {
     #[test]
     fn rewrites_a_rest_element() {
         assert_eq!(
-            rewrite_destructuring_declarations("const { src, shape, ...otherControls } = strudel.controls;"),
+            rewrite_destructuring_declarations(
+                "const { src, shape, ...otherControls } = strudel.controls;"
+            ),
             "let src = (); let shape = (); let otherControls = ();"
         );
     }
@@ -322,7 +344,9 @@ mod tests {
     #[test]
     fn discards_a_multiline_value_expression() {
         assert_eq!(
-            rewrite_destructuring_declarations("let {\n  a,\n  b\n} = foo(\n  1,\n  2\n);\nosc(60)"),
+            rewrite_destructuring_declarations(
+                "let {\n  a,\n  b\n} = foo(\n  1,\n  2\n);\nosc(60)"
+            ),
             "let a = (); let b = ();\nosc(60)"
         );
     }

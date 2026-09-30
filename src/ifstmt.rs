@@ -93,11 +93,12 @@ fn try_wrap_if(chars: &[char], mask: &[bool], i: usize, end: usize) -> Option<(S
     if matches_word(chars, j, end, "else") && !preceded_by_ident_char(chars, j) {
         let mut k = j + 4; // past "else"
         skip_ws(chars, mask, &mut k, end);
-        let (part, after) = if matches_word(chars, k, end, "if") && !preceded_by_ident_char(chars, k) {
-            try_wrap_if(chars, mask, k, end)?
-        } else {
-            wrap_body(chars, mask, k, end)?
-        };
+        let (part, after) =
+            if matches_word(chars, k, end, "if") && !preceded_by_ident_char(chars, k) {
+                try_wrap_if(chars, mask, k, end)?
+            } else {
+                wrap_body(chars, mask, k, end)?
+            };
         out.push_str(" else ");
         out.push_str(&part);
         return Some((out, after));
@@ -161,7 +162,13 @@ fn scan_statement_end(chars: &[char], mask: &[bool], j: usize, end: usize) -> us
 /// line (closing a multi-line call) - `asi.rs`'s own two sets, duplicated
 /// here rather than made `pub(crate)` there, matching this codebase's
 /// existing convention of small local per-module helpers.
-fn ends_statement_at_newline(chars: &[char], mask: &[bool], start: usize, i: usize, end: usize) -> bool {
+fn ends_statement_at_newline(
+    chars: &[char],
+    mask: &[bool],
+    start: usize,
+    i: usize,
+    end: usize,
+) -> bool {
     let mut k = i;
     while k > start && (mask[k - 1] || chars[k - 1].is_whitespace()) {
         k -= 1;
@@ -182,14 +189,49 @@ fn ends_statement_at_newline(chars: &[char], mask: &[bool], start: usize, i: usi
 fn continues_line(c: char) -> bool {
     matches!(
         c,
-        ';' | '{' | ',' | '(' | '[' | '+' | '-' | '*' | '/' | '%' | '=' | '<' | '>' | '!' | '&' | '|' | '^' | '.' | ':' | '?'
+        ';' | '{'
+            | ','
+            | '('
+            | '['
+            | '+'
+            | '-'
+            | '*'
+            | '/'
+            | '%'
+            | '='
+            | '<'
+            | '>'
+            | '!'
+            | '&'
+            | '|'
+            | '^'
+            | '.'
+            | ':'
+            | '?'
     )
 }
 
 fn continues_next_line(c: char) -> bool {
     matches!(
         c,
-        '.' | ')' | ']' | '}' | ',' | '+' | '-' | '*' | '/' | '%' | '=' | '<' | '>' | '!' | '&' | '|' | '^' | ':' | '?'
+        '.' | ')'
+            | ']'
+            | '}'
+            | ','
+            | '+'
+            | '-'
+            | '*'
+            | '/'
+            | '%'
+            | '='
+            | '<'
+            | '>'
+            | '!'
+            | '&'
+            | '|'
+            | '^'
+            | ':'
+            | '?'
     )
 }
 

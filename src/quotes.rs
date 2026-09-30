@@ -117,7 +117,10 @@ mod tests {
 
     #[test]
     fn converts_simple_single_quoted_string() {
-        assert_eq!(rewrite_single_quoted_strings(".ease('sin')"), ".ease(\"sin\")");
+        assert_eq!(
+            rewrite_single_quoted_strings(".ease('sin')"),
+            ".ease(\"sin\")"
+        );
     }
 
     #[test]
@@ -128,12 +131,18 @@ mod tests {
 
     #[test]
     fn unescapes_embedded_single_quote() {
-        assert_eq!(rewrite_single_quoted_strings("text('it\\'s')"), "text(\"it's\")");
+        assert_eq!(
+            rewrite_single_quoted_strings("text('it\\'s')"),
+            "text(\"it's\")"
+        );
     }
 
     #[test]
     fn escapes_embedded_double_quote() {
-        assert_eq!(rewrite_single_quoted_strings("text('say \"hi\"')"), "text(\"say \\\"hi\\\"\")");
+        assert_eq!(
+            rewrite_single_quoted_strings("text('say \"hi\"')"),
+            "text(\"say \\\"hi\\\"\")"
+        );
     }
 
     #[test]

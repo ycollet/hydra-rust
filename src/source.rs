@@ -9,14 +9,14 @@ pub struct SourceFrame {
 
 #[cfg(feature = "webcam")]
 mod imp {
-    use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
     use std::sync::Once;
+    use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
     use std::thread;
     use std::time::Duration;
 
+    use nokhwa::Camera;
     use nokhwa::pixel_format::RgbFormat;
     use nokhwa::utils::{ApiBackend, CameraIndex, RequestedFormat, RequestedFormatType};
-    use nokhwa::Camera;
 
     use super::SourceFrame;
 
@@ -39,9 +39,19 @@ mod imp {
     #[derive(Debug, Clone, PartialEq)]
     pub enum CameraStatus {
         Idle,
-        Opening { camera_index: u32 },
-        Active { camera_index: u32, camera_name: String, width: u32, height: u32 },
-        Error { camera_index: u32, message: String },
+        Opening {
+            camera_index: u32,
+        },
+        Active {
+            camera_index: u32,
+            camera_name: String,
+            width: u32,
+            height: u32,
+        },
+        Error {
+            camera_index: u32,
+            message: String,
+        },
     }
 
     pub struct CameraInfo {
@@ -117,7 +127,11 @@ mod imp {
                 return;
             }
 
-            if camera_slot.command_tx.send(CameraCommand::Open(camera_index)).is_ok() {
+            if camera_slot
+                .command_tx
+                .send(CameraCommand::Open(camera_index))
+                .is_ok()
+            {
                 camera_slot.current_camera = Some(camera_index);
             } else {
                 self.slots[slot] = None;
@@ -169,7 +183,10 @@ mod imp {
                         CameraIndex::Index(i) => *i,
                         CameraIndex::String(s) => s.parse().unwrap_or(0),
                     };
-                    CameraInfo { index, name: info.human_name().to_string() }
+                    CameraInfo {
+                        index,
+                        name: info.human_name().to_string(),
+                    }
                 })
                 .collect();
         }
@@ -238,8 +255,7 @@ mod imp {
             }
 
             if let Some(ref mut cam) = camera {
-                let result =
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cam.frame()));
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cam.frame()));
 
                 match result {
                     Ok(Ok(buf)) => match buf.decode_image::<RgbFormat>() {
@@ -261,20 +277,18 @@ mod imp {
                     Ok(Err(e)) => {
                         let msg = e.to_string();
                         log::warn!("slot {slot} frame error: {msg}");
-                        let _ =
-                            message_tx.try_send(SlotMessage::Status(CameraStatus::Error {
-                                camera_index: active_index,
-                                message: msg,
-                            }));
+                        let _ = message_tx.try_send(SlotMessage::Status(CameraStatus::Error {
+                            camera_index: active_index,
+                            message: msg,
+                        }));
                         camera = None;
                     }
                     Err(_) => {
                         log::warn!("slot {slot} camera crashed (caught panic)");
-                        let _ =
-                            message_tx.try_send(SlotMessage::Status(CameraStatus::Error {
-                                camera_index: active_index,
-                                message: "camera crashed".into(),
-                            }));
+                        let _ = message_tx.try_send(SlotMessage::Status(CameraStatus::Error {
+                            camera_index: active_index,
+                            message: "camera crashed".into(),
+                        }));
                         camera = None;
                     }
                 }
@@ -299,11 +313,7 @@ mod imp {
         )
     }
 
-    fn open_camera(
-        slot: usize,
-        index: u32,
-        tx: &SyncSender<SlotMessage>,
-    ) -> Option<Camera> {
+    fn open_camera(slot: usize, index: u32, tx: &SyncSender<SlotMessage>) -> Option<Camera> {
         let mut camera = match try_open(index, RequestedFormatType::None)
             .or_else(|_| try_open(index, RequestedFormatType::AbsoluteHighestFrameRate))
             .or_else(|_| try_open(index, RequestedFormatType::AbsoluteHighestResolution))

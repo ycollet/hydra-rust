@@ -56,9 +56,9 @@ mod imp {
 
     use ffmpeg_sidecar::command::FfmpegCommand;
     use rtc::interceptor::Registry;
-    use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
-    use rtc::peer_connection::configuration::media_engine::{MediaEngine, MIME_TYPE_VP8};
     use rtc::peer_connection::configuration::RTCConfigurationBuilder;
+    use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
+    use rtc::peer_connection::configuration::media_engine::{MIME_TYPE_VP8, MediaEngine};
     use rtc::peer_connection::sdp::RTCSessionDescription;
     use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RTCRtpCodecParameters, RtpCodecKind};
     use rtc::rtp_transceiver::{RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
@@ -68,9 +68,9 @@ mod imp {
         PeerConnection, PeerConnectionBuilder, PeerConnectionEventHandler, RTCIceGatheringState,
         RTCPeerConnectionState,
     };
-    use webrtc::runtime::{channel, AsyncUdpSocket, Runtime, Sender};
+    use webrtc::runtime::{AsyncUdpSocket, Runtime, Sender, channel};
 
-    use crate::source::{SourceFrame, NUM_SOURCES};
+    use crate::source::{NUM_SOURCES, SourceFrame};
 
     pub const VP8_PAYLOAD_TYPE: u8 = 96;
     pub const VP8_CLOCK_RATE: u32 = 90000;
@@ -173,13 +173,22 @@ mod imp {
                 .spawn(move || run_receiver(addr, latest_writer, stop_rx))
                 .expect("spawn stream-receive thread");
 
-            self.slots[slot] = Some(StreamSlot { stop_tx: Some(stop_tx), latest });
+            self.slots[slot] = Some(StreamSlot {
+                stop_tx: Some(stop_tx),
+                latest,
+            });
         }
 
         /// Returns the newest decoded frame for `slot`, if the background
         /// decode pipeline has produced one since the last call.
         pub fn poll(&mut self, slot: usize) -> Option<SourceFrame> {
-            self.slots.get(slot)?.as_ref()?.latest.lock().unwrap().take()
+            self.slots
+                .get(slot)?
+                .as_ref()?
+                .latest
+                .lock()
+                .unwrap()
+                .take()
         }
 
         /// Stops every active stream - called on app exit, mirroring
@@ -288,8 +297,9 @@ mod imp {
         // The RTP-forwarding port is chosen up front so the ffmpeg SDP file
         // (below) can name it before any packets arrive.
         let rtp_port = pick_udp_port().map_err(|e| format!("pick RTP port: {e}"))?;
-        let rtp_forward_addr: std::net::SocketAddr =
-            format!("127.0.0.1:{rtp_port}").parse().map_err(|e: std::net::AddrParseError| e.to_string())?;
+        let rtp_forward_addr: std::net::SocketAddr = format!("127.0.0.1:{rtp_port}")
+            .parse()
+            .map_err(|e: std::net::AddrParseError| e.to_string())?;
 
         let handler = Arc::new(Handler {
             runtime: runtime.clone(),
@@ -321,7 +331,9 @@ mod imp {
             .map_err(|e| format!("add recvonly transceiver: {e}"))?;
 
         let mut offer_line = String::new();
-        reader.read_line(&mut offer_line).map_err(|e| format!("read offer: {e}"))?;
+        reader
+            .read_line(&mut offer_line)
+            .map_err(|e| format!("read offer: {e}"))?;
         let offer: RTCSessionDescription =
             serde_json::from_str(offer_line.trim()).map_err(|e| format!("parse offer: {e}"))?;
         peer_connection

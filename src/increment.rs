@@ -26,7 +26,9 @@ pub fn rewrite_increment_decrement(src: &str) -> String {
         // Prefix: ++IDENT / --IDENT.
         if matches!(chars[i], '+' | '-')
             && is_op_pair(&chars, &mask, i)
-            && chars.get(i + 2).is_some_and(|c| is_ident_start(*c) && !mask[i + 2])
+            && chars
+                .get(i + 2)
+                .is_some_and(|c| is_ident_start(*c) && !mask[i + 2])
         {
             let op = chars[i];
             let start = i + 2;
@@ -40,7 +42,11 @@ pub fn rewrite_increment_decrement(src: &str) -> String {
         // Postfix: IDENT++ / IDENT--.
         if is_ident_start(chars[i]) && !preceded_by_ident_char(&chars, i) {
             let end = ident_end(&chars, i);
-            if end + 1 < n && !mask[end] && matches!(chars[end], '+' | '-') && is_op_pair(&chars, &mask, end) {
+            if end + 1 < n
+                && !mask[end]
+                && matches!(chars[end], '+' | '-')
+                && is_op_pair(&chars, &mask, end)
+            {
                 let op = chars[end];
                 out.extend(&chars[i..end]);
                 out.push_str(if op == '+' { "+=1" } else { "-=1" });
@@ -108,7 +114,10 @@ mod tests {
 
     #[test]
     fn rewrites_inside_a_for_loop_header() {
-        assert_eq!(rewrite_increment_decrement("for(i=0;i<n;i++){}"), "for(i=0;i<n;i+=1){}");
+        assert_eq!(
+            rewrite_increment_decrement("for(i=0;i<n;i++){}"),
+            "for(i=0;i<n;i+=1){}"
+        );
     }
 
     #[test]

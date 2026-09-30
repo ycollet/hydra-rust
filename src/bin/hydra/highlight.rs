@@ -32,12 +32,30 @@ impl HydraHighlighter {
             (r"//[^\n]*", 5),
             (r"/\*[^*]*\*+(?:[^/*][^*]*\*+)*/", 5),
             (r"\b\d+(\.\d+)?\b", 3),
-            (r"\b(?:osc|noise|voronoi|shape|gradient|solid|rings|checker|src|text)\b", 1),
-            (r"\b(?:add|mult|blend|diff|layer|mask|sub|modulate|modulateScale|modulateRotate|modulateRepeat|modulateRepeatX|modulateRepeatY|modulateKaleid|modulateScrollX|modulateScrollY|modulatePixelate|modulateHue)\b", 0),
-            (r"\b(?:rotate|scale|scroll|kaleid|pixelate|repeat|scrollX|scrollY|repeatX|repeatY|polar|cart|fold)\b", 2),
-            (r"\b(?:color|invert|contrast|brightness|saturate|hue|posterize|luma|colorama|shift|thresh)\b", 6),
-            (r"\b(?:out|r|g|b|render|o0|o1|o2|o3|s0|s1|s2|s3|time|beat|tempo|phase|mouseX|mouseY|fast|smooth|offset)\b", 8),
-            (r"\b(?:let|const|if|else|while|loop|for|in|fn|return|true|false|hush|initCam)\b", 7),
+            (
+                r"\b(?:osc|noise|voronoi|shape|gradient|solid|rings|checker|src|text)\b",
+                1,
+            ),
+            (
+                r"\b(?:add|mult|blend|diff|layer|mask|sub|modulate|modulateScale|modulateRotate|modulateRepeat|modulateRepeatX|modulateRepeatY|modulateKaleid|modulateScrollX|modulateScrollY|modulatePixelate|modulateHue)\b",
+                0,
+            ),
+            (
+                r"\b(?:rotate|scale|scroll|kaleid|pixelate|repeat|scrollX|scrollY|repeatX|repeatY|polar|cart|fold)\b",
+                2,
+            ),
+            (
+                r"\b(?:color|invert|contrast|brightness|saturate|hue|posterize|luma|colorama|shift|thresh)\b",
+                6,
+            ),
+            (
+                r"\b(?:out|r|g|b|render|o0|o1|o2|o3|s0|s1|s2|s3|time|beat|tempo|phase|mouseX|mouseY|fast|smooth|offset)\b",
+                8,
+            ),
+            (
+                r"\b(?:let|const|if|else|while|loop|for|in|fn|return|true|false|hush|initCam)\b",
+                7,
+            ),
             (r"[+\-*/%]=?|[=!<>]=|&&|\|\||!", 2),
             (r"[.(),;]", 9),
         ];
@@ -50,7 +68,10 @@ impl HydraHighlighter {
         }
 
         let regex = Regex::new(&parts.join("|")).expect("valid syntax regex");
-        Self { regex, group_categories: categories }
+        Self {
+            regex,
+            group_categories: categories,
+        }
     }
 
     fn tokenize<'a>(&'a self, text: &'a str) -> impl Iterator<Item = (Range<usize>, usize)> + 'a {

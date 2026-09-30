@@ -13,7 +13,13 @@
 
 pub fn normalize_whitespace(src: &str) -> String {
     src.chars()
-        .map(|c| if c.is_whitespace() && !matches!(c, ' ' | '\t' | '\n' | '\r') { ' ' } else { c })
+        .map(|c| {
+            if c.is_whitespace() && !matches!(c, ' ' | '\t' | '\n' | '\r') {
+                ' '
+            } else {
+                c
+            }
+        })
         .collect()
 }
 
@@ -23,13 +29,19 @@ mod tests {
 
     #[test]
     fn replaces_non_breaking_space() {
-        assert_eq!(normalize_whitespace("osc(60)\u{00A0}.out()"), "osc(60) .out()");
+        assert_eq!(
+            normalize_whitespace("osc(60)\u{00A0}.out()"),
+            "osc(60) .out()"
+        );
     }
 
     #[test]
     fn replaces_other_unicode_spaces() {
         // en quad, em space, ideographic space
-        assert_eq!(normalize_whitespace("a\u{2000}b\u{2003}c\u{3000}d"), "a b c d");
+        assert_eq!(
+            normalize_whitespace("a\u{2000}b\u{2003}c\u{3000}d"),
+            "a b c d"
+        );
     }
 
     #[test]

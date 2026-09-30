@@ -22,6 +22,7 @@ rustfft = { version = "6", optional = true }
 image = { version = "0.25", optional = true, default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 ureq = { version = "2", optional = true, features = ["tls"] }
 midir = { version = "0.10", optional = true }
+rosc = { version = "0.11", optional = true }
 # `default-features = false`: excludes `download_ffmpeg` deliberately - this
 # project requires a pre-installed `ffmpeg` on PATH rather than silently
 # fetching a large binary off the internet, matching the same "no surprise
@@ -52,6 +53,7 @@ webcam = ["dep:nokhwa"]
 audio = ["dep:cpal", "dep:rustfft"]
 image_url = ["dep:image", "dep:ureq"]
 midi = ["dep:midir"]
+osc = ["dep:rosc"]
 video = ["dep:ffmpeg-sidecar"]
 stream = ["dep:webrtc", "dep:rtc", "dep:tokio", "dep:bytes", "dep:async-trait", "video"]
 

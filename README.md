@@ -88,7 +88,7 @@ hydra -ss mysketch.shr             # --slot-save: snapshot the starting code out
 
 ## Feature-gated functions
 
-The functions below only exist when the library is built with the matching Cargo feature (`cargo build --features <name>`, or comma-separated for several: `--features webcam,audio,image_url,midi,video,stream`). Without the feature, calling one of these fails with a plain "Function not found" error. See [SPEC.md](SPEC.md) for the complete function reference, including the ~48 always-available core functions.
+The functions below only exist when the library is built with the matching Cargo feature (`cargo build --features <name>`, or comma-separated for several: `--features webcam,audio,image_url,midi,osc,video,stream`). Without the feature, calling one of these fails with a plain "Function not found" error. See [SPEC.md](SPEC.md) for the complete function reference, including the ~48 always-available core functions.
 
 ### `webcam` — camera input
 
@@ -153,6 +153,25 @@ A native port of the [hydra-midi](https://github.com/arnoson/hydra-midi) communi
 | `midi.pause()` | Disconnects from all MIDI input devices | `midi.pause()` |
 | `midi.show()` / `.hide()` | Shows/hides an on-screen overlay listing currently-held notes (with velocity) and non-zero CC values — a "current state" snapshot rather than real hydra-midi's own scrolling raw-message log, simpler to implement and just as useful for confirming a controller is connected | `midi.show()` |
 | `midi.channel(n)` / `.input(n)` | Accepted, logged, ignored — channels/inputs are merged (see above) | `midi.channel(0)` |
+
+### `osc` — OSC (Open Sound Control) input
+
+```bash
+cargo run --features osc --bin hydra
+```
+
+A native UDP OSC listener, modeled on the [hydra-osc](https://github.com/ojack/hydra-osc) example and atom-hydra's more complete [`osc-loader.js`](https://github.com/hydra-synth/atom-hydra/blob/master/lib/osc-loader.js) (default port `57101`, matching atom-hydra's own). Exposed as `_osc` rather than `osc` — real hydra.js's `osc(freq, sync, offset)` is already the sine-oscillator source function, so a bare `osc` would collide with it. Unlike real hydra-osc/atom-hydra's `_osc.on(address, callback)` event style (there's nowhere to run an arbitrary per-frame JS callback here — every hydra-rust chain compiles to one static GLSL expression, the same reason `.value(fn)` on MIDI `note`/`cc` isn't implemented either), values are read reactively instead, the same shape MIDI's `note()`/`cc()` already use.
+
+| Function | Description | Example |
+|----------|-------------|---------|
+| `_osc.get(address)` | The most recent first argument received at that OSC address, or `0` if none has arrived yet | `osc(60, 0.1, _osc.get("/hue")).out()` |
+| `_osc.get(address, argIndex)` | The most recent `argIndex`'th argument (0-based) at that address | `osc().rotate(_osc.get("/xyz", 1)).out()` |
+| `.range(lo, hi)` / `.scale(factor)` (on `_osc.get(...)`) | Same generic remap/multiply MIDI's `note`/`cc`/`aft` chains use | `osc().rotate(_osc.get("/x").range(0, 6.28)).out()` |
+| `_osc.start()` / `_osc.start(port)` | Binds a UDP socket and starts listening (default port `57101`) — required before `.get()` reacts to anything | `_osc.start(9000)` |
+| `_osc.pause()` | Stops listening and releases the UDP socket | `_osc.pause()` |
+| `_osc.show()` / `.hide()` | Shows/hides an on-screen overlay listing every address received so far and its latest arguments | `_osc.show()` |
+
+Each distinct `_osc.get(...)` call site claims one slot from a small fixed pool (32), assigned round-robin at eval time — OSC addresses are arbitrary strings, unlike MIDI's 0-127 note/CC numbers, so there's no natural small index to key a uniform array on directly.
 
 ### `video` — play a video file or URL as a source
 
@@ -219,7 +238,7 @@ so `a.fft[...]`/`initCam(...)`/`initImage(...)`/`note(...)`-style sketches
 don't fail just because those functions aren't registered):
 
 ```bash
-cargo run --release --features webcam,audio,image_url,midi,video,stream --example check_corpus -- sketches
+cargo run --release --features webcam,audio,image_url,midi,osc,video,stream --example check_corpus -- sketches
 ```
 
 This prints an ok/failed count and the top failure buckets, and writes

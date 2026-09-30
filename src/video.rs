@@ -28,7 +28,7 @@ mod imp {
     use ffmpeg_sidecar::child::FfmpegChild;
     use ffmpeg_sidecar::command::FfmpegCommand;
 
-    use crate::source::{SourceFrame, NUM_SOURCES};
+    use crate::source::{NUM_SOURCES, SourceFrame};
 
     struct VideoSlot {
         child: Arc<Mutex<FfmpegChild>>,
@@ -119,7 +119,10 @@ mod imp {
                 })
                 .expect("spawn video-decode thread");
 
-            self.slots[slot] = Some(VideoSlot { child: Arc::new(Mutex::new(child)), latest });
+            self.slots[slot] = Some(VideoSlot {
+                child: Arc::new(Mutex::new(child)),
+                latest,
+            });
         }
 
         /// Returns the newest decoded frame for `slot`, if the background
@@ -127,7 +130,13 @@ mod imp {
         /// otherwise, so callers don't needlessly re-upload an unchanged
         /// frame every render frame.
         pub fn poll(&mut self, slot: usize) -> Option<SourceFrame> {
-            self.slots.get(slot)?.as_ref()?.latest.lock().unwrap().take()
+            self.slots
+                .get(slot)?
+                .as_ref()?
+                .latest
+                .lock()
+                .unwrap()
+                .take()
         }
 
         /// Stops every playing video - called on app exit, mirroring

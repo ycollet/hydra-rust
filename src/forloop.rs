@@ -74,9 +74,21 @@ fn try_rewrite_for(chars: &[char], mask: &[bool], i: usize, end: usize) -> Optio
     }
 
     let (init, cond, update) = split_c_style(chars, mask, header_open + 1, header_close)?;
-    let init_stmt = if init.trim().is_empty() { String::new() } else { format!("{init};") };
-    let cond_expr = if cond.trim().is_empty() { "true".to_string() } else { cond };
-    let update_stmt = if update.trim().is_empty() { String::new() } else { format!("{update};") };
+    let init_stmt = if init.trim().is_empty() {
+        String::new()
+    } else {
+        format!("{init};")
+    };
+    let cond_expr = if cond.trim().is_empty() {
+        "true".to_string()
+    } else {
+        cond
+    };
+    let update_stmt = if update.trim().is_empty() {
+        String::new()
+    } else {
+        format!("{update};")
+    };
     // Run asi on the body *and* the trailing update statement together, as
     // one unit: asi decides whether the body's last line needs a `;`
     // based on what significant text follows it, so running it on the
@@ -93,7 +105,12 @@ fn try_rewrite_for(chars: &[char], mask: &[bool], i: usize, end: usize) -> Optio
 /// Splits a `for (...)`-header's content on its two top-level `;`
 /// (bracket-depth-aware), the three-clause C-style form. `None` if there
 /// aren't exactly two (so it isn't this form at all).
-fn split_c_style(chars: &[char], mask: &[bool], start: usize, end: usize) -> Option<(String, String, String)> {
+fn split_c_style(
+    chars: &[char],
+    mask: &[bool],
+    start: usize,
+    end: usize,
+) -> Option<(String, String, String)> {
     let mut depth = 0i32;
     let mut semis = Vec::new();
     let mut i = start;
@@ -122,7 +139,12 @@ fn split_c_style(chars: &[char], mask: &[bool], start: usize, end: usize) -> Opt
 /// earlier), a bare identifier, `of` or `in`, then the iterated
 /// expression. Returns `(name, expr)` - both forms compile to Rhai's own
 /// `for x in expr`, which iterates values either way.
-fn split_for_of_in(chars: &[char], mask: &[bool], start: usize, end: usize) -> Option<(String, String)> {
+fn split_for_of_in(
+    chars: &[char],
+    mask: &[bool],
+    start: usize,
+    end: usize,
+) -> Option<(String, String)> {
     let mut j = start;
     skip_ws(chars, mask, &mut j);
     for kw in ["let", "const"] {
@@ -141,7 +163,9 @@ fn split_for_of_in(chars: &[char], mask: &[bool], start: usize, end: usize) -> O
     }
     let name: String = chars[name_start..j].iter().collect();
     skip_ws(chars, mask, &mut j);
-    let matched_kw = ["of", "in"].iter().find(|kw| matches_word(chars, mask, j, kw))?;
+    let matched_kw = ["of", "in"]
+        .iter()
+        .find(|kw| matches_word(chars, mask, j, kw))?;
     j += matched_kw.len();
     let expr: String = chars[j..end].iter().collect();
     Some((name, expr))
@@ -181,7 +205,14 @@ fn find_body(chars: &[char], mask: &[bool], start: usize, end: usize) -> Option<
     Some((format!("{inner};"), after))
 }
 
-fn matching_close(chars: &[char], mask: &[bool], open_idx: usize, open: char, close: char, limit: usize) -> Option<usize> {
+fn matching_close(
+    chars: &[char],
+    mask: &[bool],
+    open_idx: usize,
+    open: char,
+    close: char,
+    limit: usize,
+) -> Option<usize> {
     let mut depth = 0i32;
     let mut i = open_idx;
     while i < limit {
@@ -260,8 +291,11 @@ i+=1; } }"
 
     #[test]
     fn rewrites_empty_clauses_as_infinite_loop() {
-        assert_eq!(rewrite_for_loops("for(;;){ x=1; }"), "{  while true {  x=1; 
- } }");
+        assert_eq!(
+            rewrite_for_loops("for(;;){ x=1; }"),
+            "{  while true {  x=1; 
+ } }"
+        );
     }
 
     #[test]
@@ -274,7 +308,10 @@ i+=1; } }"
 
     #[test]
     fn rewrites_for_in_loop_without_declaration_keyword() {
-        assert_eq!(rewrite_for_loops("for(k in obj){ y=k; }"), "for k in  obj {  y=k;  }");
+        assert_eq!(
+            rewrite_for_loops("for(k in obj){ y=k; }"),
+            "for k in  obj {  y=k;  }"
+        );
     }
 
     #[test]

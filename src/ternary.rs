@@ -34,7 +34,12 @@ fn is_bare_equals(chars: &[char], i: usize) -> bool {
     if matches!(chars.get(i + 1), Some('=') | Some('>')) {
         return false; // ==, =>
     }
-    if i > 0 && matches!(chars[i - 1], '=' | '!' | '<' | '>' | '+' | '-' | '*' | '/' | '%') {
+    if i > 0
+        && matches!(
+            chars[i - 1],
+            '=' | '!' | '<' | '>' | '+' | '-' | '*' | '/' | '%'
+        )
+    {
         return false; // !=, <=, >=, +=, -=, *=, /=, %=
     }
     true
@@ -48,7 +53,10 @@ fn is_bare_equals(chars: &[char], i: usize) -> bool {
 /// ternary's condition text along with everything after it.
 fn strip_return_prefix(s: &str) -> Option<&str> {
     let rest = s.trim_start().strip_prefix("return")?;
-    let boundary = rest.chars().next().is_none_or(|c| !c.is_alphanumeric() && c != '_');
+    let boundary = rest
+        .chars()
+        .next()
+        .is_none_or(|c| !c.is_alphanumeric() && c != '_');
     boundary.then_some(rest)
 }
 
@@ -73,7 +81,10 @@ fn strip_arrow_header(s: &str) -> Option<(String, String)> {
             return None;
         }
         j = close + 1;
-    } else if chars.first().is_some_and(|c| c.is_alphabetic() || *c == '_') {
+    } else if chars
+        .first()
+        .is_some_and(|c| c.is_alphabetic() || *c == '_')
+    {
         j = 0;
         while j < n && (chars[j].is_alphanumeric() || chars[j] == '_') {
             j += 1;
@@ -106,7 +117,10 @@ fn strip_closure_header(s: &str) -> Option<(String, String)> {
         return None;
     }
     let after = match_closure_params(&chars, &mask, 0)?;
-    Some((chars[..after].iter().collect(), chars[after..].iter().collect()))
+    Some((
+        chars[..after].iter().collect(),
+        chars[after..].iter().collect(),
+    ))
 }
 
 fn matching_close(chars: &[char], mask: &[bool], open_idx: usize) -> usize {
@@ -219,10 +233,11 @@ fn transform(chars: &[char], mask: &[bool], start: usize, end: usize) -> String 
                 i = next;
                 let (else_text, next) = scan_branch(chars, mask, i, end, false);
                 i = next;
-                let (arrow_prefix, cond) = match strip_arrow_header(&cond).or_else(|| strip_closure_header(&cond)) {
-                    Some((header, rest)) => (header, rest),
-                    None => (String::new(), cond),
-                };
+                let (arrow_prefix, cond) =
+                    match strip_arrow_header(&cond).or_else(|| strip_closure_header(&cond)) {
+                        Some((header, rest)) => (header, rest),
+                        None => (String::new(), cond),
+                    };
                 let (return_prefix, cond) = match strip_return_prefix(&cond) {
                     Some(rest) => ("return ", rest.to_string()),
                     None => ("", cond),
@@ -253,7 +268,13 @@ fn transform(chars: &[char], mask: &[bool], start: usize, end: usize) -> String 
 /// transformed independently. Returns the branch text and the index just
 /// past its terminator (for "then", past the `:`; for "else", at the
 /// terminator itself, unconsumed).
-fn scan_branch(chars: &[char], mask: &[bool], start: usize, end: usize, stop_at_colon: bool) -> (String, usize) {
+fn scan_branch(
+    chars: &[char],
+    mask: &[bool],
+    start: usize,
+    end: usize,
+    stop_at_colon: bool,
+) -> (String, usize) {
     let mut buf = String::new();
     let mut i = start;
     while i < end {
@@ -325,7 +346,24 @@ fn ends_branch_at_newline(chars: &[char], mask: &[bool], buf: &str, i: usize, en
 fn continues_branch_line(c: char) -> bool {
     matches!(
         c,
-        '.' | ')' | ']' | '}' | ',' | '+' | '-' | '*' | '/' | '%' | '=' | '<' | '>' | '!' | '&' | '|' | '^' | ':' | '?'
+        '.' | ')'
+            | ']'
+            | '}'
+            | ','
+            | '+'
+            | '-'
+            | '*'
+            | '/'
+            | '%'
+            | '='
+            | '<'
+            | '>'
+            | '!'
+            | '&'
+            | '|'
+            | '^'
+            | ':'
+            | '?'
     )
 }
 
@@ -335,7 +373,10 @@ mod tests {
 
     #[test]
     fn rewrites_simple_ternary() {
-        assert_eq!(rewrite_ternaries("time>1?0.1:0.2"), "if time>1 { 0.1 } else { 0.2 }");
+        assert_eq!(
+            rewrite_ternaries("time>1?0.1:0.2"),
+            "if time>1 { 0.1 } else { 0.2 }"
+        );
     }
 
     #[test]
@@ -351,7 +392,10 @@ mod tests {
         // no space is inserted between `=` and `if` (the original spacing
         // is discarded along with the trimmed condition text), but this is
         // still valid Rhai - the tokenizer doesn't need whitespace there.
-        assert_eq!(rewrite_ternaries("x = cond ? a : b"), "x =if cond { a } else { b }");
+        assert_eq!(
+            rewrite_ternaries("x = cond ? a : b"),
+            "x =if cond { a } else { b }"
+        );
     }
 
     #[test]
@@ -447,7 +491,10 @@ mod tests {
 
     #[test]
     fn moves_bare_single_param_arrow_header_outside_if() {
-        assert_eq!(rewrite_ternaries("x => x>0 ? 1 : -1"), "x =>if x>0 { 1 } else { -1 }");
+        assert_eq!(
+            rewrite_ternaries("x => x>0 ? 1 : -1"),
+            "x =>if x>0 { 1 } else { -1 }"
+        );
     }
 
     #[test]

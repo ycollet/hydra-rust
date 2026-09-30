@@ -13,7 +13,9 @@ fn collect_hydra_files(dir: &Path, out: &mut Vec<PathBuf>) {
         out.push(dir.to_path_buf());
         return;
     }
-    let Ok(entries) = fs::read_dir(dir) else { return };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
@@ -42,7 +44,9 @@ fn main() {
         eprintln!("usage: check_corpus <dir-of-.hydra-files> [out.json]");
         std::process::exit(1);
     };
-    let out_path = args.next().unwrap_or_else(|| "check_corpus_failures.json".to_string());
+    let out_path = args
+        .next()
+        .unwrap_or_else(|| "check_corpus_failures.json".to_string());
 
     let mut files = Vec::new();
     collect_hydra_files(Path::new(&dir), &mut files);
@@ -55,7 +59,9 @@ fn main() {
 
     let start = Instant::now();
     for path in &files {
-        let Ok(code) = fs::read_to_string(path) else { continue };
+        let Ok(code) = fs::read_to_string(path) else {
+            continue;
+        };
         match hydra_rust::eval(&code) {
             Ok(_) => ok += 1,
             Err(e) => {

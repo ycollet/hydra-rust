@@ -141,7 +141,12 @@ fn rewrite_one(chars: &[char], mask: &[bool], after_kw: usize, out: &mut String)
 /// default_text)` pairs, where `default_text` is the (trimmed) source text
 /// after a parameter's `=`, if it has one. `pub(crate)`: also used by
 /// `arrowfn` for the equivalent named-arrow-function declaration form.
-pub(crate) fn parse_params(chars: &[char], mask: &[bool], start: usize, end: usize) -> Vec<(String, Option<String>)> {
+pub(crate) fn parse_params(
+    chars: &[char],
+    mask: &[bool],
+    start: usize,
+    end: usize,
+) -> Vec<(String, Option<String>)> {
     let mut pieces = Vec::new();
     let mut depth = 0i32;
     let mut piece_start = start;
@@ -168,7 +173,13 @@ pub(crate) fn parse_params(chars: &[char], mask: &[bool], start: usize, end: usi
             let name: String = chars[piece_start..name_end].iter().collect();
             let name = name.trim().to_string();
             if !name.is_empty() {
-                let default = eq_pos.map(|p| chars[p + 1..i].iter().collect::<String>().trim().to_string());
+                let default = eq_pos.map(|p| {
+                    chars[p + 1..i]
+                        .iter()
+                        .collect::<String>()
+                        .trim()
+                        .to_string()
+                });
                 pieces.push((name, default));
             }
             piece_start = i + 1;
@@ -180,7 +191,13 @@ pub(crate) fn parse_params(chars: &[char], mask: &[bool], start: usize, end: usi
     pieces
 }
 
-pub(crate) fn matching_close(chars: &[char], mask: &[bool], open_idx: usize, open: char, close: char) -> Option<usize> {
+pub(crate) fn matching_close(
+    chars: &[char],
+    mask: &[bool],
+    open_idx: usize,
+    open: char,
+    close: char,
+) -> Option<usize> {
     let mut depth = 0i32;
     let mut i = open_idx;
     while i < chars.len() {
@@ -262,7 +279,10 @@ mod tests {
 
     #[test]
     fn handles_no_params() {
-        assert_eq!(rewrite_function_decls("function foo() { 1 }"), "fn foo() { 1 }");
+        assert_eq!(
+            rewrite_function_decls("function foo() { 1 }"),
+            "fn foo() { 1 }"
+        );
     }
 
     #[test]

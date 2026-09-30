@@ -1,61 +1,71 @@
-pub mod audio;
-pub mod broadcast;
-pub mod eval;
-pub mod imageload;
-pub mod midi;
-pub mod renderer;
-pub mod shader;
-pub mod source;
-pub mod stream;
-pub mod video;
 mod argtrunc;
 mod arrow;
 mod arrowfn;
 mod asi;
+pub mod audio;
 mod autolet;
+pub mod broadcast;
 mod closurefn;
+mod commaexpr;
+mod commastmt;
 mod destructure;
+pub mod eval;
 mod forloop;
 mod glsl;
 mod ifstmt;
 mod iife;
+pub mod imageload;
 mod increment;
 mod jsfunctions;
 mod jskeywords;
 mod kwargs;
 mod mathjs;
-mod commaexpr;
-mod commastmt;
+pub mod midi;
 mod numlit;
 mod objlit;
+pub mod osc;
 mod patcall;
 mod quotes;
+pub mod renderer;
+pub mod shader;
+pub mod source;
 mod srcscan;
+pub mod stream;
 mod ternary;
 mod text;
+pub mod video;
 mod whitespace;
 
-pub use eval::{eval, preprocess, EvalResult, RenderMode};
-#[cfg(any(feature = "webcam", feature = "image_url", feature = "video", feature = "stream"))]
-pub use eval::SourceRequest;
+#[cfg(feature = "audio")]
+pub use audio::AudioManager;
+#[cfg(feature = "stream")]
+pub use broadcast::BroadcastManager;
 #[cfg(feature = "audio")]
 pub use eval::AudioRequest;
-#[cfg(feature = "midi")]
-pub use eval::MidiRequest;
 #[cfg(feature = "stream")]
 pub use eval::BroadcastRequest;
-pub use renderer::{render_multipass, RenderSnapshot, RenderUniforms, ShaderRenderer};
+#[cfg(feature = "midi")]
+pub use eval::MidiRequest;
+#[cfg(feature = "osc")]
+pub use eval::OscRequest;
+#[cfg(any(
+    feature = "webcam",
+    feature = "image_url",
+    feature = "video",
+    feature = "stream"
+))]
+pub use eval::SourceRequest;
+pub use eval::{EvalResult, RenderMode, eval, preprocess};
+#[cfg(feature = "midi")]
+pub use midi::MidiManager;
+#[cfg(feature = "osc")]
+pub use osc::OscManager;
+pub use renderer::{RenderSnapshot, RenderUniforms, ShaderRenderer, render_multipass};
 pub use source::SourceFrame;
 #[cfg(feature = "webcam")]
 pub use source::{CameraInfo, CameraStatus, SourceManager};
-#[cfg(feature = "audio")]
-pub use audio::AudioManager;
-#[cfg(feature = "midi")]
-pub use midi::MidiManager;
-#[cfg(feature = "video")]
-pub use video::VideoManager;
 #[cfg(feature = "stream")]
 pub use stream::StreamManager;
-#[cfg(feature = "stream")]
-pub use broadcast::BroadcastManager;
 pub use text::TextData;
+#[cfg(feature = "video")]
+pub use video::VideoManager;

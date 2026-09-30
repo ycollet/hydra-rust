@@ -121,7 +121,7 @@ pub fn mask_strings_and_comments(chars: &[char]) -> Vec<bool> {
 
 #[cfg(test)]
 mod tests {
-    use super::{classify, mask_strings_and_comments, Region};
+    use super::{Region, classify, mask_strings_and_comments};
 
     fn mask_of(src: &str) -> Vec<bool> {
         let chars: Vec<char> = src.chars().collect();

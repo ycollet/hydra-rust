@@ -1,13 +1,14 @@
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use glow::{HasContext, PixelUnpackData};
 
 use crate::audio::NUM_FFT_BINS;
 use crate::eval::{BufferFilter, RenderMode};
 use crate::midi::{NUM_MIDI_CC, NUM_MIDI_ENVELOPES, NUM_MIDI_NOTES};
+use crate::osc::NUM_OSC_SLOTS;
 use crate::shader;
-use crate::source::{SourceFrame, NUM_SOURCES};
+use crate::source::{NUM_SOURCES, SourceFrame};
 use crate::text::TextData;
 
 #[derive(Clone, Copy)]
@@ -26,6 +27,7 @@ pub struct RenderUniforms {
     pub midi_envelope: [f32; NUM_MIDI_ENVELOPES],
     pub midi_aftertouch: [f32; NUM_MIDI_NOTES],
     pub midi_channel_aftertouch: f32,
+    pub osc: [f32; NUM_OSC_SLOTS],
 }
 
 const NUM_BUFFERS: usize = 4;
@@ -47,6 +49,7 @@ struct ProgramState {
     loc_midi_envelope: Option<glow::UniformLocation>,
     loc_midi_aftertouch: Option<glow::UniformLocation>,
     loc_midi_channel_aftertouch: Option<glow::UniformLocation>,
+    loc_osc: Option<glow::UniformLocation>,
     loc_buffers: [Option<glow::UniformLocation>; NUM_BUFFERS],
     loc_text0: Option<glow::UniformLocation>,
     loc_sources: [Option<glow::UniformLocation>; NUM_SOURCES],
@@ -193,8 +196,10 @@ impl ShaderRenderer {
         unsafe {
             for tex in self.snapshot.targets[buf].texture {
                 self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-                self.gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, f);
-                self.gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, f);
+                self.gl
+                    .tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, f);
+                self.gl
+                    .tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, f);
             }
             self.gl.bind_texture(glow::TEXTURE_2D, None);
         }
@@ -297,8 +302,7 @@ impl ShaderRenderer {
                 let full_src = shader::fragment_source(code);
                 match compile_program(&self.gl, &full_src) {
                     Ok(program) => {
-                        self.snapshot.programs[i] =
-                            Some(resolve_program_state(&self.gl, program));
+                        self.snapshot.programs[i] = Some(resolve_program_state(&self.gl, program));
                     }
                     Err(e) => errors.push(format!("buffer {i}: {e}")),
                 }
@@ -311,10 +315,26 @@ impl ShaderRenderer {
 
 fn set_texture_defaults(gl: &glow::Context) {
     unsafe {
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MIN_FILTER,
+            glow::LINEAR as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MAG_FILTER,
+            glow::LINEAR as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_WRAP_S,
+            glow::CLAMP_TO_EDGE as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_WRAP_T,
+            glow::CLAMP_TO_EDGE as i32,
+        );
     }
 }
 
@@ -336,6 +356,7 @@ fn resolve_program_state(gl: &glow::Context, program: glow::Program) -> ProgramS
             loc_midi_envelope: gl.get_uniform_location(program, "iMidiEnvelope"),
             loc_midi_aftertouch: gl.get_uniform_location(program, "iMidiAftertouch"),
             loc_midi_channel_aftertouch: gl.get_uniform_location(program, "iMidiChannelAftertouch"),
+            loc_osc: gl.get_uniform_location(program, "iOsc"),
             loc_buffers: [
                 gl.get_uniform_location(program, "iBuffer0"),
                 gl.get_uniform_location(program, "iBuffer1"),
@@ -461,6 +482,9 @@ pub fn render_multipass(
             if let Some(ref loc) = p.loc_midi_channel_aftertouch {
                 gl.uniform_1_f32(Some(loc), u.midi_channel_aftertouch);
             }
+            if let Some(ref loc) = p.loc_osc {
+                gl.uniform_1_f32_slice(Some(loc), &u.osc);
+            }
             if let Some(ref loc) = p.loc_resolution {
                 gl.uniform_2_f32(Some(loc), u.resolution[0], u.resolution[1]);
             }
@@ -471,10 +495,7 @@ pub fn render_multipass(
             for (j, loc) in p.loc_buffers.iter().enumerate() {
                 if let Some(loc) = loc {
                     gl.active_texture(glow::TEXTURE0 + j as u32);
-                    gl.bind_texture(
-                        glow::TEXTURE_2D,
-                        Some(snap.targets[j].texture[read]),
-                    );
+                    gl.bind_texture(glow::TEXTURE_2D, Some(snap.targets[j].texture[read]));
                     gl.uniform_1_i32(Some(loc), j as i32);
                 }
             }
@@ -500,8 +521,7 @@ pub fn render_multipass(
 
         ping.store(write == 0, Ordering::Relaxed);
 
-        let restored_fbo = std::num::NonZeroU32::new(saved_fbo as u32)
-            .map(glow::NativeFramebuffer);
+        let restored_fbo = std::num::NonZeroU32::new(saved_fbo as u32).map(glow::NativeFramebuffer);
         gl.bind_framebuffer(glow::FRAMEBUFFER, restored_fbo);
         gl.viewport(saved_vp[0], saved_vp[1], saved_vp[2], saved_vp[3]);
 
@@ -527,8 +547,9 @@ pub fn render_multipass(
                 // `floor(2*x)*2 + floor(2*(1-y))`, which works out to a diagonal
                 // o0/o2/o1/o3 assignment (top-right is o2, bottom-left is o1) rather
                 // than the row-major o0/o1/o2/o3 order it might look like at a glance.
-                for ((vx, vy), buf_idx) in
-                    [(0, hh), (hw, hh), (0, 0), (hw, 0)].iter().zip([0, 2, 1, 3])
+                for ((vx, vy), buf_idx) in [(0, hh), (hw, hh), (0, 0), (hw, 0)]
+                    .iter()
+                    .zip([0, 2, 1, 3])
                 {
                     gl.viewport(saved_vp[0] + vx, saved_vp[1] + vy, hw, hh);
                     draw_display_buffer(gl, snap, d, write, buf_idx);
@@ -558,10 +579,7 @@ fn draw_display_buffer(
     unsafe {
         if let Some(ref loc) = d.loc_buffers[0] {
             gl.active_texture(glow::TEXTURE0);
-            gl.bind_texture(
-                glow::TEXTURE_2D,
-                Some(snap.targets[buf_idx].texture[write]),
-            );
+            gl.bind_texture(glow::TEXTURE_2D, Some(snap.targets[buf_idx].texture[write]));
             gl.uniform_1_i32(Some(loc), 0);
         }
         gl.bind_vertex_array(Some(snap.vao));
@@ -598,9 +616,7 @@ fn create_fullscreen_quad(gl: &glow::Context) -> (glow::VertexArray, glow::Buffe
 }
 
 fn as_u8_slice(data: &[f32]) -> &[u8] {
-    unsafe {
-        std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(data))
-    }
+    unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(data)) }
 }
 
 fn compile_program(gl: &glow::Context, frag_src: &str) -> Result<glow::Program, String> {

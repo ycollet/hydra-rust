@@ -31,7 +31,9 @@ fn main() {
 
     let mut args = std::env::args().skip(1);
     let Some(port) = args.next().and_then(|s| s.parse::<u16>().ok()) else {
-        eprintln!("usage: webrtc_broadcast <listen-port> [--format <ffmpeg -f>] [--input <ffmpeg -i>]");
+        eprintln!(
+            "usage: webrtc_broadcast <listen-port> [--format <ffmpeg -f>] [--input <ffmpeg -i>]"
+        );
         std::process::exit(1);
     };
     let mut input_format: Option<String> = None;
@@ -78,20 +80,20 @@ async fn broadcast(
 
     use bytes::BytesMut;
     use ffmpeg_sidecar::command::FfmpegCommand;
-    use hydra_rust::stream::{ice_config, vp8_media_engine, VP8_PAYLOAD_TYPE};
+    use hydra_rust::stream::{VP8_PAYLOAD_TYPE, ice_config, vp8_media_engine};
     use rtc::media_stream::MediaStreamTrack;
     use rtc::peer_connection::sdp::RTCSessionDescription;
     use rtc::rtp_transceiver::rtp_sender::{
         RTCRtpCodec, RTCRtpCodingParameters, RTCRtpEncodingParameters, RtpCodecKind,
     };
     use rtc::shared::marshal::Unmarshal;
-    use webrtc::media_stream::track_local::static_rtp::TrackLocalStaticRTP;
     use webrtc::media_stream::track_local::TrackLocal;
+    use webrtc::media_stream::track_local::static_rtp::TrackLocalStaticRTP;
     use webrtc::peer_connection::{
         PeerConnection, PeerConnectionBuilder, PeerConnectionEventHandler, RTCIceGatheringState,
         RTCPeerConnectionState,
     };
-    use webrtc::runtime::{channel, AsyncUdpSocket, Sender};
+    use webrtc::runtime::{AsyncUdpSocket, Sender, channel};
 
     struct Handler {
         gather_complete_tx: Sender<()>,
@@ -115,7 +117,9 @@ async fn broadcast(
 
     let listener = TcpListener::bind(("0.0.0.0", port)).map_err(|e| e.to_string())?;
     println!("Listening on 0.0.0.0:{port} - waiting for an initStream receiver to connect...");
-    println!("(pass this machine's LAN IP and this port to s0.initStream(\"host:{port}\") elsewhere)");
+    println!(
+        "(pass this machine's LAN IP and this port to s0.initStream(\"host:{port}\") elsewhere)"
+    );
     let (tcp, peer_addr) = listener.accept().map_err(|e| e.to_string())?;
     println!("receiver connected from {peer_addr}");
     let mut reader = BufReader::new(tcp.try_clone().map_err(|e| e.to_string())?);
@@ -125,7 +129,10 @@ async fn broadcast(
     let config = ice_config().build();
     let (gather_complete_tx, mut gather_complete_rx) = channel::<()>(1);
     let (connected_tx, mut connected_rx) = channel::<()>(1);
-    let handler = Arc::new(Handler { gather_complete_tx, connected_tx });
+    let handler = Arc::new(Handler {
+        gather_complete_tx,
+        connected_tx,
+    });
 
     let video_codec = RTCRtpCodec {
         mime_type: rtc::peer_connection::configuration::media_engine::MIME_TYPE_VP8.to_owned(),
@@ -135,17 +142,21 @@ async fn broadcast(
         rtcp_feedback: vec![],
     };
     let ssrc = std::process::id().wrapping_mul(2_654_435_761);
-    let video_track: Arc<TrackLocalStaticRTP> = Arc::new(TrackLocalStaticRTP::new(MediaStreamTrack::new(
-        "hydra-rust-broadcast-stream".to_string(),
-        "hydra-rust-broadcast-video".to_string(),
-        "hydra-rust-broadcast".to_string(),
-        RtpCodecKind::Video,
-        vec![RTCRtpEncodingParameters {
-            rtp_coding_parameters: RTCRtpCodingParameters { ssrc: Some(ssrc), ..Default::default() },
-            codec: video_codec,
-            ..Default::default()
-        }],
-    )));
+    let video_track: Arc<TrackLocalStaticRTP> =
+        Arc::new(TrackLocalStaticRTP::new(MediaStreamTrack::new(
+            "hydra-rust-broadcast-stream".to_string(),
+            "hydra-rust-broadcast-video".to_string(),
+            "hydra-rust-broadcast".to_string(),
+            RtpCodecKind::Video,
+            vec![RTCRtpEncodingParameters {
+                rtp_coding_parameters: RTCRtpCodingParameters {
+                    ssrc: Some(ssrc),
+                    ..Default::default()
+                },
+                codec: video_codec,
+                ..Default::default()
+            }],
+        )));
 
     let peer_connection = PeerConnectionBuilder::new()
         .with_configuration(config)
@@ -163,21 +174,36 @@ async fn broadcast(
         .await
         .map_err(|e| format!("add track: {e}"))?;
 
-    let offer = peer_connection.create_offer(None).await.map_err(|e| e.to_string())?;
-    peer_connection.set_local_description(offer).await.map_err(|e| e.to_string())?;
+    let offer = peer_connection
+        .create_offer(None)
+        .await
+        .map_err(|e| e.to_string())?;
+    peer_connection
+        .set_local_description(offer)
+        .await
+        .map_err(|e| e.to_string())?;
     let _ = gather_complete_rx.recv().await;
     let local_desc = peer_connection
         .local_description()
         .await
         .ok_or("no local description after ICE gathering")?;
-    writeln!(writer, "{}", serde_json::to_string(&local_desc).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())?;
+    writeln!(
+        writer,
+        "{}",
+        serde_json::to_string(&local_desc).map_err(|e| e.to_string())?
+    )
+    .map_err(|e| e.to_string())?;
 
     let mut answer_line = String::new();
-    reader.read_line(&mut answer_line).map_err(|e| e.to_string())?;
+    reader
+        .read_line(&mut answer_line)
+        .map_err(|e| e.to_string())?;
     let answer: RTCSessionDescription =
         serde_json::from_str(answer_line.trim()).map_err(|e| e.to_string())?;
-    peer_connection.set_remote_description(answer).await.map_err(|e| e.to_string())?;
+    peer_connection
+        .set_remote_description(answer)
+        .await
+        .map_err(|e| e.to_string())?;
 
     println!("waiting for connection...");
     let _ = connected_rx.recv().await;
@@ -189,11 +215,15 @@ async fn broadcast(
         .map(|a| a.port())
         .map_err(|e| e.to_string())?;
     let std_sock = UdpSocket::bind(("127.0.0.1", rtp_port)).map_err(|e| e.to_string())?;
-    let sock: Arc<dyn AsyncUdpSocket> = runtime.wrap_udp_socket(std_sock).map_err(|e| e.to_string())?;
+    let sock: Arc<dyn AsyncUdpSocket> = runtime
+        .wrap_udp_socket(std_sock)
+        .map_err(|e| e.to_string())?;
 
     let mut command = FfmpegCommand::new();
     if input.is_empty() {
-        command.format("lavfi").input("testsrc=size=640x480:rate=25");
+        command
+            .format("lavfi")
+            .input("testsrc=size=640x480:rate=25");
     } else {
         if let Some(fmt) = &input_format {
             command.format(fmt);
@@ -202,7 +232,16 @@ async fn broadcast(
     }
     command
         .codec_video("libvpx")
-        .args(["-deadline", "realtime", "-cpu-used", "4", "-b:v", "1M", "-g", "25"])
+        .args([
+            "-deadline",
+            "realtime",
+            "-cpu-used",
+            "4",
+            "-b:v",
+            "1M",
+            "-g",
+            "25",
+        ])
         .format("rtp")
         .args(["-payload_type", &VP8_PAYLOAD_TYPE.to_string()])
         .output(format!("udp://127.0.0.1:{rtp_port}"));

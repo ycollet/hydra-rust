@@ -8,7 +8,7 @@ mod imp {
     use std::thread;
 
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-    use rustfft::{num_complex::Complex, Fft, FftPlanner};
+    use rustfft::{Fft, FftPlanner, num_complex::Complex};
 
     use super::NUM_FFT_BINS;
 
@@ -110,7 +110,10 @@ mod imp {
                     } else {
                         *buf.get(i - offset).unwrap_or(&0.0)
                     };
-                    *slot = Complex { re: sample * self.window[i], im: 0.0 };
+                    *slot = Complex {
+                        re: sample * self.window[i],
+                        im: 0.0,
+                    };
                 }
             }
 
@@ -127,7 +130,11 @@ mod imp {
             let mut out = [0.0f32; NUM_FFT_BINS];
             for i in 0..self.num_bins {
                 let raw = bins[i];
-                let gated = if raw < self.cutoff { 0.0 } else { raw * self.scale };
+                let gated = if raw < self.cutoff {
+                    0.0
+                } else {
+                    raw * self.scale
+                };
                 self.smoothed[i] = self.smoothed[i] * self.smooth + gated * (1.0 - self.smooth);
                 out[i] = self.smoothed[i];
             }
@@ -155,7 +162,9 @@ mod imp {
         let mut bins = vec![0.0f32; num_bins];
         for (b, out) in bins.iter_mut().enumerate() {
             let start = (((b as f32) / num_bins as f32) * log_max).exp().max(1.0) as usize;
-            let end = (((b + 1) as f32 / num_bins as f32) * log_max).exp().max(1.0) as usize;
+            let end = (((b + 1) as f32 / num_bins as f32) * log_max)
+                .exp()
+                .max(1.0) as usize;
             let start = start.min(usable.saturating_sub(1));
             let end = end.max(start + 1).min(usable);
             let slice = &spectrum[start..end];

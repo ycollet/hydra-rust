@@ -76,7 +76,12 @@ fn peek_next_significant(chars: &[char], region: &[Region], mut j: usize) -> Opt
     chars.get(j).copied()
 }
 
-fn should_insert_semicolon(last: Option<char>, chars: &[char], region: &[Region], next_pos: usize) -> bool {
+fn should_insert_semicolon(
+    last: Option<char>,
+    chars: &[char],
+    region: &[Region],
+    next_pos: usize,
+) -> bool {
     let Some(last) = last else { return false };
     if continues_line(last) {
         return false;
@@ -218,8 +223,13 @@ mod tests {
         // regression test: srcscan used to mark a line comment's
         // terminating newline as masked, which made asi's `'\n' => ...`
         // match arm unreachable for any line ending in `// comment`.
-        let out = insert_missing_semicolons("a.setScale(4) // comment one\na.setCutoff(7) // comment two");
-        assert_eq!(out, "a.setScale(4); // comment one\na.setCutoff(7) // comment two");
+        let out = insert_missing_semicolons(
+            "a.setScale(4) // comment one\na.setCutoff(7) // comment two",
+        );
+        assert_eq!(
+            out,
+            "a.setScale(4); // comment one\na.setCutoff(7) // comment two"
+        );
     }
 
     #[test]

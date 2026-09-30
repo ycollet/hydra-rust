@@ -141,7 +141,11 @@ fn try_rewrite(chars: &[char], mask: &[bool], i: usize) -> Option<(String, usize
 
         if chars.get(j) == Some(&'{') {
             let body_close = matching_close(chars, mask, j, '{', '}')?;
-            (names, block_body_with_asi(chars, j, body_close), body_close + 1)
+            (
+                names,
+                block_body_with_asi(chars, j, body_close),
+                body_close + 1,
+            )
         } else {
             let (expr, semi_end) = scan_expr_body(chars, mask, j);
             // Only for a bare-identifier target - a property-path target
@@ -152,7 +156,10 @@ fn try_rewrite(chars: &[char], mask: &[bool], i: usize) -> Option<(String, usize
                 return if is_assignment_shaped(&expr) {
                     Some((String::new(), semi_end))
                 } else {
-                    Some((format!("{let_prefix}{} = {};", target[0], expr.trim()), semi_end))
+                    Some((
+                        format!("{let_prefix}{} = {};", target[0], expr.trim()),
+                        semi_end,
+                    ))
                 };
             }
             (names, format!("{{ {} }}", expr.trim()), semi_end)
@@ -192,14 +199,21 @@ fn try_parse_function_expr(
         return None;
     }
     let close = matching_close(chars, mask, k, '(', ')')?;
-    let names: Vec<String> = parse_params(chars, mask, k + 1, close).into_iter().map(|(n, _)| n).collect();
+    let names: Vec<String> = parse_params(chars, mask, k + 1, close)
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect();
     let mut m = close + 1;
     skip_ws(chars, mask, &mut m);
     if chars.get(m) != Some(&'{') {
         return None;
     }
     let body_close = matching_close(chars, mask, m, '{', '}')?;
-    Some((names, block_body_with_asi(chars, m, body_close), body_close + 1))
+    Some((
+        names,
+        block_body_with_asi(chars, m, body_close),
+        body_close + 1,
+    ))
 }
 
 /// Extracts a `{...}` block's text (braces included) and runs `asi` on its
@@ -224,7 +238,11 @@ fn block_body_with_asi(chars: &[char], open: usize, close: usize) -> String {
 /// Parses an assignment target: a bare identifier, or a dotted property
 /// path (`a.b.c`) of any length. Returns the dot-separated segments and the
 /// index just past the last one.
-fn parse_dotted_target(chars: &[char], mask: &[bool], start: usize) -> Option<(Vec<String>, usize)> {
+fn parse_dotted_target(
+    chars: &[char],
+    mask: &[bool],
+    start: usize,
+) -> Option<(Vec<String>, usize)> {
     if !chars.get(start).is_some_and(|c| is_ident_start(*c)) {
         return None;
     }
@@ -308,12 +326,16 @@ fn is_assignment_shaped(body: &str) -> bool {
                 '=' if depth == 0 => {
                     let prev = if i > 0 { chars.get(i - 1) } else { None };
                     let next = chars.get(i + 1);
-                    if !matches!(prev, Some('=' | '!' | '<' | '>')) && !matches!(next, Some('=' | '>')) {
+                    if !matches!(prev, Some('=' | '!' | '<' | '>'))
+                        && !matches!(next, Some('=' | '>'))
+                    {
                         return true;
                     }
                 }
                 '+' | '-' | '*' | '/' | '%' | '^' | '&' | '|'
-                    if depth == 0 && chars.get(i + 1) == Some(&'=') && chars.get(i + 2) != Some(&'=') =>
+                    if depth == 0
+                        && chars.get(i + 1) == Some(&'=')
+                        && chars.get(i + 2) != Some(&'=') =>
                 {
                     return true;
                 }
@@ -385,7 +407,10 @@ mod tests {
 
     #[test]
     fn rewrites_single_param_named_arrow() {
-        assert_eq!(rewrite_named_arrows("let sq = (x) => x*x;"), "fn sq(x) { x*x }");
+        assert_eq!(
+            rewrite_named_arrows("let sq = (x) => x*x;"),
+            "fn sq(x) { x*x }"
+        );
     }
 
     #[test]
@@ -398,7 +423,10 @@ mod tests {
 
     #[test]
     fn falls_back_to_end_of_input_without_trailing_semicolon() {
-        assert_eq!(rewrite_named_arrows("let f = (a,b) => a+b"), "fn f(a,b) { a+b }");
+        assert_eq!(
+            rewrite_named_arrows("let f = (a,b) => a+b"),
+            "fn f(a,b) { a+b }"
+        );
     }
 
     #[test]
@@ -419,7 +447,9 @@ mod tests {
     #[test]
     fn inserts_missing_semicolons_in_a_function_expressions_block_body() {
         assert_eq!(
-            rewrite_named_arrows("update = function() {\n  let b1 = a.fft[0]\n  let b2 = a.fft[1]\n}"),
+            rewrite_named_arrows(
+                "update = function() {\n  let b1 = a.fft[0]\n  let b2 = a.fft[1]\n}"
+            ),
             "fn update() {\n  let b1 = a.fft[0];\n  let b2 = a.fft[1]\n}"
         );
     }
@@ -430,7 +460,10 @@ mod tests {
         // used directly in argument position - this pass owns the
         // assignment-target position now (arrow.rs only strips argument
         // position), so it does the equivalent substitution itself.
-        assert_eq!(rewrite_named_arrows("let pat = ()=>osc(30);"), "let pat = osc(30);");
+        assert_eq!(
+            rewrite_named_arrows("let pat = ()=>osc(30);"),
+            "let pat = osc(30);"
+        );
     }
 
     #[test]
@@ -468,7 +501,10 @@ mod tests {
 
     #[test]
     fn drops_a_deeply_dotted_property_assigned_arrow() {
-        assert_eq!(rewrite_named_arrows("p1.canvas.style.opacity = () => 1;"), "");
+        assert_eq!(
+            rewrite_named_arrows("p1.canvas.style.opacity = () => 1;"),
+            ""
+        );
     }
 
     #[test]
@@ -541,7 +577,10 @@ mod tests {
         // see the module doc comment. Block body, so (matching the arrow
         // form's own precedent) a trailing `;` after it is left alone
         // rather than consumed - a harmless empty statement in Rhai too.
-        assert_eq!(rewrite_named_arrows("img.onload = function() { draw(); };"), ";");
+        assert_eq!(
+            rewrite_named_arrows("img.onload = function() { draw(); };"),
+            ";"
+        );
     }
 
     #[test]
@@ -565,7 +604,10 @@ mod tests {
 
     #[test]
     fn falls_back_to_end_of_input_without_trailing_semicolon_for_function_expr() {
-        assert_eq!(rewrite_named_arrows("let f = function(a,b) { a+b }"), "fn f(a,b) { a+b }");
+        assert_eq!(
+            rewrite_named_arrows("let f = function(a,b) { a+b }"),
+            "fn f(a,b) { a+b }"
+        );
     }
 
     #[test]

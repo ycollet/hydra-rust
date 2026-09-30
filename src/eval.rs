@@ -6,8 +6,12 @@ use crate::argtrunc;
 use crate::arrow;
 use crate::arrowfn;
 use crate::asi;
+#[cfg(feature = "audio")]
+use crate::audio::NUM_FFT_BINS;
 use crate::autolet;
 use crate::closurefn;
+use crate::commaexpr;
+use crate::commastmt;
 use crate::destructure;
 use crate::forloop;
 use crate::ifstmt;
@@ -17,19 +21,17 @@ use crate::jsfunctions;
 use crate::jskeywords;
 use crate::kwargs;
 use crate::mathjs;
-use crate::commaexpr;
-use crate::commastmt;
+#[cfg(feature = "midi")]
+use crate::midi::{NUM_MIDI_CC, NUM_MIDI_ENVELOPES, NUM_MIDI_NOTES};
 use crate::numlit;
 use crate::objlit;
+#[cfg(feature = "osc")]
+use crate::osc::{DEFAULT_OSC_PORT, NUM_OSC_SLOTS};
 use crate::patcall;
 use crate::quotes;
 use crate::ternary;
 use crate::text::{self, TextData};
 use crate::whitespace;
-#[cfg(feature = "audio")]
-use crate::audio::NUM_FFT_BINS;
-#[cfg(feature = "midi")]
-use crate::midi::{NUM_MIDI_CC, NUM_MIDI_ENVELOPES, NUM_MIDI_NOTES};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub enum RenderMode {
@@ -51,7 +53,12 @@ pub enum BufferFilter {
     Nearest,
 }
 
-#[cfg(any(feature = "webcam", feature = "image_url", feature = "video", feature = "stream"))]
+#[cfg(any(
+    feature = "webcam",
+    feature = "image_url",
+    feature = "video",
+    feature = "stream"
+))]
 #[derive(Debug, Clone)]
 pub enum SourceRequest {
     #[cfg(feature = "webcam")]
@@ -90,14 +97,41 @@ pub enum AudioRequest {
 pub enum MidiRequest {
     Start,
     Pause,
-    SetCcSmooth { index: usize, factor: f32 },
-    AdsrSlot { slot: usize, note: i64, a: f32, d: f32, s: f32, r: f32 },
+    SetCcSmooth {
+        index: usize,
+        factor: f32,
+    },
+    AdsrSlot {
+        slot: usize,
+        note: i64,
+        a: f32,
+        d: f32,
+        s: f32,
+        r: f32,
+    },
     /// `midi.show()`/`midi.hide()` - toggles the host's on-screen MIDI
     /// monitor overlay (see `HydraApp::show_midi_overlay`). Shows the
     /// currently-held notes/velocities and non-zero CC values rather than
     /// real hydra-midi's own scrolling raw-message log - a "current
     /// state" snapshot is simpler to implement and just as useful for
     /// confirming a controller is connected and being read correctly.
+    Show,
+    Hide,
+}
+
+/// `_osc.show()`/`_osc.hide()` - toggles the host's on-screen OSC monitor
+/// overlay (see `HydraApp::show_osc_overlay`), same "current state"
+/// treatment `MidiRequest::Show`/`Hide` gives its own monitor.
+#[cfg(feature = "osc")]
+#[derive(Debug, Clone)]
+pub enum OscRequest {
+    Start(u16),
+    Pause,
+    Bind {
+        slot: usize,
+        address: String,
+        arg_index: usize,
+    },
     Show,
     Hide,
 }
@@ -124,12 +158,23 @@ pub struct EvalResult {
     /// `setNearest`/`setLinear`/`setMode` on - see `BufferFilter`'s own
     /// doc comment for why this doesn't reset like `render_mode` does.
     pub buffer_filter: [Option<BufferFilter>; 4],
-    #[cfg(any(feature = "webcam", feature = "image_url", feature = "video", feature = "stream"))]
+    #[cfg(any(
+        feature = "webcam",
+        feature = "image_url",
+        feature = "video",
+        feature = "stream"
+    ))]
     pub source_requests: Vec<SourceRequest>,
     #[cfg(feature = "audio")]
     pub audio_requests: Vec<AudioRequest>,
     #[cfg(feature = "midi")]
     pub midi_requests: Vec<MidiRequest>,
+    /// Set only if *this* evaluation's script called any `_osc` method -
+    /// mirrors `midi_requests`' own per-evaluation, drained-not-sticky
+    /// shape (the app-level `OscManager`'s bound slots/started state is
+    /// what's actually sticky).
+    #[cfg(feature = "osc")]
+    pub osc_requests: Vec<OscRequest>,
     /// Set only if *this* evaluation's script called `broadcastStream`/
     /// `stopBroadcast` - `None` if it didn't call either this time (the
     /// app-level `BroadcastManager` itself is what's actually sticky, same
@@ -152,6 +197,15 @@ struct AudioFft;
 #[cfg(feature = "midi")]
 #[derive(Debug, Clone, Copy)]
 struct Midi;
+
+/// The `_osc` object (`_osc.start()`, `.get(address)`, ...) - named with
+/// the leading underscore real hydra-osc/atom-hydra both use for their own
+/// OSC client instance (`_osc = new OSC()`), deliberately *not* `osc` -
+/// real hydra.js's `osc(freq, sync, offset)` is already the sine-oscillator
+/// source function, so a bare `osc` here would collide with it.
+#[cfg(feature = "osc")]
+#[derive(Debug, Clone, Copy)]
+struct Osc;
 
 /// Returned by `note(...)`: a chainable gate (1 while held, 0 otherwise).
 /// Also accepted directly wherever a `GlslExpr` is (see `as_arg`), so a bare
@@ -229,7 +283,12 @@ impl Pattern {
                     .unwrap_or_else(|_| d.as_int().map(|i| i as f64).unwrap_or(0.0))
             })
             .collect();
-        Self { values, speed: 1.0, offset: 0.0, smooth: 0.0 }
+        Self {
+            values,
+            speed: 1.0,
+            offset: 0.0,
+            smooth: 0.0,
+        }
     }
 
     /// `.fit(low, high)`: remaps each value from the array's own
@@ -240,14 +299,29 @@ impl Pattern {
     /// but drops `_offset` - matched here for fidelity.
     fn fit(&self, lo: f64, hi: f64) -> Self {
         let lowest = self.values.iter().cloned().fold(f64::INFINITY, f64::min);
-        let highest = self.values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let highest = self
+            .values
+            .iter()
+            .cloned()
+            .fold(f64::NEG_INFINITY, f64::max);
         let span = highest - lowest;
         let values = self
             .values
             .iter()
-            .map(|v| if span == 0.0 { lo } else { (v - lowest) * (hi - lo) / span + lo })
+            .map(|v| {
+                if span == 0.0 {
+                    lo
+                } else {
+                    (v - lowest) * (hi - lo) / span + lo
+                }
+            })
             .collect();
-        Self { values, speed: self.speed, offset: 0.0, smooth: self.smooth }
+        Self {
+            values,
+            speed: self.speed,
+            offset: 0.0,
+            smooth: self.smooth,
+        }
     }
 
     fn to_glsl(&self) -> String {
@@ -295,7 +369,12 @@ impl Pattern {
         self.values
             .iter()
             .enumerate()
-            .map(|(i, v)| format!("{} * step(abs(floor({wrapped_idx}) - {i}.0), 0.5)", fmt_f(*v)))
+            .map(|(i, v)| {
+                format!(
+                    "{} * step(abs(floor({wrapped_idx}) - {i}.0), 0.5)",
+                    fmt_f(*v)
+                )
+            })
             .collect::<Vec<_>>()
             .join(" + ")
     }
@@ -348,91 +427,409 @@ struct FnMeta {
 }
 
 const FUNCTIONS: &[FnMeta] = &[
-    FnMeta { name: "osc", kind: OpKind::Source, defaults: &[60.0, 0.1, 0.0] },
-    FnMeta { name: "noise", kind: OpKind::Source, defaults: &[10.0, 0.1] },
-    FnMeta { name: "voronoi", kind: OpKind::Source, defaults: &[5.0, 0.3, 0.3] },
-    FnMeta { name: "shape", kind: OpKind::Source, defaults: &[3.0, 0.3, 0.01] },
-    FnMeta { name: "gradient", kind: OpKind::Source, defaults: &[0.0] },
-    FnMeta { name: "solid", kind: OpKind::Source, defaults: &[0.0, 0.0, 0.0, 1.0] },
-    FnMeta { name: "rings", kind: OpKind::Source, defaults: &[8.0, 0.1] },
-    FnMeta { name: "checker", kind: OpKind::Source, defaults: &[4.0, 4.0] },
+    FnMeta {
+        name: "osc",
+        kind: OpKind::Source,
+        defaults: &[60.0, 0.1, 0.0],
+    },
+    FnMeta {
+        name: "noise",
+        kind: OpKind::Source,
+        defaults: &[10.0, 0.1],
+    },
+    FnMeta {
+        name: "voronoi",
+        kind: OpKind::Source,
+        defaults: &[5.0, 0.3, 0.3],
+    },
+    FnMeta {
+        name: "shape",
+        kind: OpKind::Source,
+        defaults: &[3.0, 0.3, 0.01],
+    },
+    FnMeta {
+        name: "gradient",
+        kind: OpKind::Source,
+        defaults: &[0.0],
+    },
+    FnMeta {
+        name: "solid",
+        kind: OpKind::Source,
+        defaults: &[0.0, 0.0, 0.0, 1.0],
+    },
+    FnMeta {
+        name: "rings",
+        kind: OpKind::Source,
+        defaults: &[8.0, 0.1],
+    },
+    FnMeta {
+        name: "checker",
+        kind: OpKind::Source,
+        defaults: &[4.0, 4.0],
+    },
     // Ported community-extension functions (see SPEC.md §4, loadScript).
-    FnMeta { name: "spiral", kind: OpKind::Source, defaults: &[1.0, 5.0, 0.1] },
-    FnMeta { name: "turb", kind: OpKind::Source, defaults: &[10.0, 0.1, 3.0] },
-    FnMeta { name: "uturb", kind: OpKind::Source, defaults: &[10.0, 0.1, 3.0] },
-    FnMeta { name: "unoise", kind: OpKind::Source, defaults: &[10.0, 0.1] },
-    FnMeta { name: "whitenoise", kind: OpKind::Source, defaults: &[10.0, 0.0] },
-    FnMeta { name: "colornoise", kind: OpKind::Source, defaults: &[10.0, 0.0] },
-    FnMeta { name: "warp", kind: OpKind::Source, defaults: &[10.0, 0.1, 2.0, 3.0, 1.0] },
-    FnMeta { name: "cwarp", kind: OpKind::Source, defaults: &[10.0, 0.1, 2.0, 3.0, 1.0, 0.5] },
-    FnMeta { name: "ncontour", kind: OpKind::Source, defaults: &[0.5, 0.1, 3.0, 5.0, 0.5, 2.0] },
-    FnMeta { name: "pulse", kind: OpKind::Source, defaults: &[0.5, 0.05, 0.001] },
-    FnMeta { name: "pulsetrain", kind: OpKind::Source, defaults: &[3.0, 0.5, 0.05, 0.001] },
-    FnMeta { name: "hextile", kind: OpKind::Source, defaults: &[10.0] },
-    FnMeta { name: "concentric", kind: OpKind::Source, defaults: &[100.0, 0.5, 0.5] },
-    FnMeta { name: "brick", kind: OpKind::Source, defaults: &[0.25, 0.08, 0.01] },
-    FnMeta { name: "wave", kind: OpKind::Source, defaults: &[0.0, 10.0, 3.0, 0.025] },
-    FnMeta { name: "lissa", kind: OpKind::Source, defaults: &[0.0, 10.0, 3.0, 0.025] },
-    FnMeta { name: "rotate", kind: OpKind::Geo, defaults: &[10.0, 0.0] },
-    FnMeta { name: "scale", kind: OpKind::Geo, defaults: &[1.5, 1.0, 1.0, 0.5, 0.5] },
-    FnMeta { name: "scroll", kind: OpKind::Geo, defaults: &[0.5, 0.5, 0.0, 0.0] },
-    FnMeta { name: "kaleid", kind: OpKind::Geo, defaults: &[4.0] },
-    FnMeta { name: "pixelate", kind: OpKind::Geo, defaults: &[20.0, 20.0] },
-    FnMeta { name: "repeat", kind: OpKind::Geo, defaults: &[3.0, 3.0, 0.0, 0.0] },
-    FnMeta { name: "scrollX", kind: OpKind::Geo, defaults: &[0.5, 0.0] },
-    FnMeta { name: "scrollY", kind: OpKind::Geo, defaults: &[0.5, 0.0] },
-    FnMeta { name: "repeatX", kind: OpKind::Geo, defaults: &[3.0, 0.0] },
-    FnMeta { name: "repeatY", kind: OpKind::Geo, defaults: &[3.0, 0.0] },
-    FnMeta { name: "polar", kind: OpKind::Geo, defaults: &[] },
-    FnMeta { name: "cart", kind: OpKind::Geo, defaults: &[] },
-    FnMeta { name: "fold", kind: OpKind::Geo, defaults: &[1.0] },
-    FnMeta { name: "inversion", kind: OpKind::Geo, defaults: &[] },
-    FnMeta { name: "mirrorX", kind: OpKind::Geo, defaults: &[0.0, 1.0] },
-    FnMeta { name: "mirrorY", kind: OpKind::Geo, defaults: &[0.0, 1.0] },
-    FnMeta { name: "mirrorX2", kind: OpKind::Geo, defaults: &[0.0, 1.0] },
-    FnMeta { name: "mirrorY2", kind: OpKind::Geo, defaults: &[0.0, 1.0] },
-    FnMeta { name: "mirrorWrap", kind: OpKind::Geo, defaults: &[] },
-    FnMeta { name: "mandeloffs", kind: OpKind::Geo, defaults: &[0.05, 0.0, 0.0] },
-    FnMeta { name: "color", kind: OpKind::Color, defaults: &[1.0, 1.0, 1.0, 1.0] },
-    FnMeta { name: "invert", kind: OpKind::Color, defaults: &[1.0] },
-    FnMeta { name: "contrast", kind: OpKind::Color, defaults: &[1.6] },
-    FnMeta { name: "brightness", kind: OpKind::Color, defaults: &[0.4] },
-    FnMeta { name: "saturate", kind: OpKind::Color, defaults: &[2.0] },
-    FnMeta { name: "hue", kind: OpKind::Color, defaults: &[0.4] },
-    FnMeta { name: "posterize", kind: OpKind::Color, defaults: &[3.0, 0.6] },
-    FnMeta { name: "luma", kind: OpKind::Color, defaults: &[0.5, 0.1] },
-    FnMeta { name: "colorama", kind: OpKind::Color, defaults: &[0.005] },
-    FnMeta { name: "shift", kind: OpKind::Color, defaults: &[0.5, 0.0, 0.0, 0.0] },
-    FnMeta { name: "thresh", kind: OpKind::Color, defaults: &[0.5, 0.04] },
-    FnMeta { name: "r", kind: OpKind::Color, defaults: &[1.0, 0.0] },
-    FnMeta { name: "g", kind: OpKind::Color, defaults: &[1.0, 0.0] },
-    FnMeta { name: "b", kind: OpKind::Color, defaults: &[1.0, 0.0] },
-    FnMeta { name: "a", kind: OpKind::Color, defaults: &[1.0, 0.0] },
-    FnMeta { name: "sum", kind: OpKind::Color, defaults: &[1.0, 1.0, 1.0, 1.0] },
-    FnMeta { name: "add", kind: OpKind::Blend, defaults: &[1.0] },
-    FnMeta { name: "mult", kind: OpKind::Blend, defaults: &[1.0] },
-    FnMeta { name: "blend", kind: OpKind::Blend, defaults: &[0.5] },
-    FnMeta { name: "diff", kind: OpKind::Blend, defaults: &[] },
-    FnMeta { name: "layer", kind: OpKind::Blend, defaults: &[] },
-    FnMeta { name: "mask", kind: OpKind::Blend, defaults: &[] },
-    FnMeta { name: "sub", kind: OpKind::Blend, defaults: &[1.0] },
-    FnMeta { name: "colreflect", kind: OpKind::Blend, defaults: &[1.0] },
-    FnMeta { name: "modulate", kind: OpKind::Modulate, defaults: &[0.1] },
-    FnMeta { name: "modulateScale", kind: OpKind::Modulate, defaults: &[1.0, 1.0] },
-    FnMeta { name: "modulateRotate", kind: OpKind::Modulate, defaults: &[1.0, 0.0] },
-    FnMeta { name: "modulateRepeat", kind: OpKind::Modulate, defaults: &[3.0, 3.0, 0.5, 0.5] },
-    FnMeta { name: "modulateRepeatX", kind: OpKind::Modulate, defaults: &[3.0, 0.5] },
-    FnMeta { name: "modulateRepeatY", kind: OpKind::Modulate, defaults: &[3.0, 0.5] },
-    FnMeta { name: "modulateKaleid", kind: OpKind::Modulate, defaults: &[4.0] },
-    FnMeta { name: "modulateScrollX", kind: OpKind::Modulate, defaults: &[0.5, 0.0] },
-    FnMeta { name: "modulateScrollY", kind: OpKind::Modulate, defaults: &[0.5, 0.0] },
-    FnMeta { name: "modulatePixelate", kind: OpKind::Modulate, defaults: &[10.0, 3.0] },
-    FnMeta { name: "modulateHue", kind: OpKind::Modulate, defaults: &[1.0] },
+    FnMeta {
+        name: "spiral",
+        kind: OpKind::Source,
+        defaults: &[1.0, 5.0, 0.1],
+    },
+    FnMeta {
+        name: "turb",
+        kind: OpKind::Source,
+        defaults: &[10.0, 0.1, 3.0],
+    },
+    FnMeta {
+        name: "uturb",
+        kind: OpKind::Source,
+        defaults: &[10.0, 0.1, 3.0],
+    },
+    FnMeta {
+        name: "unoise",
+        kind: OpKind::Source,
+        defaults: &[10.0, 0.1],
+    },
+    FnMeta {
+        name: "whitenoise",
+        kind: OpKind::Source,
+        defaults: &[10.0, 0.0],
+    },
+    FnMeta {
+        name: "colornoise",
+        kind: OpKind::Source,
+        defaults: &[10.0, 0.0],
+    },
+    FnMeta {
+        name: "warp",
+        kind: OpKind::Source,
+        defaults: &[10.0, 0.1, 2.0, 3.0, 1.0],
+    },
+    FnMeta {
+        name: "cwarp",
+        kind: OpKind::Source,
+        defaults: &[10.0, 0.1, 2.0, 3.0, 1.0, 0.5],
+    },
+    FnMeta {
+        name: "ncontour",
+        kind: OpKind::Source,
+        defaults: &[0.5, 0.1, 3.0, 5.0, 0.5, 2.0],
+    },
+    FnMeta {
+        name: "pulse",
+        kind: OpKind::Source,
+        defaults: &[0.5, 0.05, 0.001],
+    },
+    FnMeta {
+        name: "pulsetrain",
+        kind: OpKind::Source,
+        defaults: &[3.0, 0.5, 0.05, 0.001],
+    },
+    FnMeta {
+        name: "hextile",
+        kind: OpKind::Source,
+        defaults: &[10.0],
+    },
+    FnMeta {
+        name: "concentric",
+        kind: OpKind::Source,
+        defaults: &[100.0, 0.5, 0.5],
+    },
+    FnMeta {
+        name: "brick",
+        kind: OpKind::Source,
+        defaults: &[0.25, 0.08, 0.01],
+    },
+    FnMeta {
+        name: "wave",
+        kind: OpKind::Source,
+        defaults: &[0.0, 10.0, 3.0, 0.025],
+    },
+    FnMeta {
+        name: "lissa",
+        kind: OpKind::Source,
+        defaults: &[0.0, 10.0, 3.0, 0.025],
+    },
+    FnMeta {
+        name: "rotate",
+        kind: OpKind::Geo,
+        defaults: &[10.0, 0.0],
+    },
+    FnMeta {
+        name: "scale",
+        kind: OpKind::Geo,
+        defaults: &[1.5, 1.0, 1.0, 0.5, 0.5],
+    },
+    FnMeta {
+        name: "scroll",
+        kind: OpKind::Geo,
+        defaults: &[0.5, 0.5, 0.0, 0.0],
+    },
+    FnMeta {
+        name: "kaleid",
+        kind: OpKind::Geo,
+        defaults: &[4.0],
+    },
+    FnMeta {
+        name: "pixelate",
+        kind: OpKind::Geo,
+        defaults: &[20.0, 20.0],
+    },
+    FnMeta {
+        name: "repeat",
+        kind: OpKind::Geo,
+        defaults: &[3.0, 3.0, 0.0, 0.0],
+    },
+    FnMeta {
+        name: "scrollX",
+        kind: OpKind::Geo,
+        defaults: &[0.5, 0.0],
+    },
+    FnMeta {
+        name: "scrollY",
+        kind: OpKind::Geo,
+        defaults: &[0.5, 0.0],
+    },
+    FnMeta {
+        name: "repeatX",
+        kind: OpKind::Geo,
+        defaults: &[3.0, 0.0],
+    },
+    FnMeta {
+        name: "repeatY",
+        kind: OpKind::Geo,
+        defaults: &[3.0, 0.0],
+    },
+    FnMeta {
+        name: "polar",
+        kind: OpKind::Geo,
+        defaults: &[],
+    },
+    FnMeta {
+        name: "cart",
+        kind: OpKind::Geo,
+        defaults: &[],
+    },
+    FnMeta {
+        name: "fold",
+        kind: OpKind::Geo,
+        defaults: &[1.0],
+    },
+    FnMeta {
+        name: "inversion",
+        kind: OpKind::Geo,
+        defaults: &[],
+    },
+    FnMeta {
+        name: "mirrorX",
+        kind: OpKind::Geo,
+        defaults: &[0.0, 1.0],
+    },
+    FnMeta {
+        name: "mirrorY",
+        kind: OpKind::Geo,
+        defaults: &[0.0, 1.0],
+    },
+    FnMeta {
+        name: "mirrorX2",
+        kind: OpKind::Geo,
+        defaults: &[0.0, 1.0],
+    },
+    FnMeta {
+        name: "mirrorY2",
+        kind: OpKind::Geo,
+        defaults: &[0.0, 1.0],
+    },
+    FnMeta {
+        name: "mirrorWrap",
+        kind: OpKind::Geo,
+        defaults: &[],
+    },
+    FnMeta {
+        name: "mandeloffs",
+        kind: OpKind::Geo,
+        defaults: &[0.05, 0.0, 0.0],
+    },
+    FnMeta {
+        name: "color",
+        kind: OpKind::Color,
+        defaults: &[1.0, 1.0, 1.0, 1.0],
+    },
+    FnMeta {
+        name: "invert",
+        kind: OpKind::Color,
+        defaults: &[1.0],
+    },
+    FnMeta {
+        name: "contrast",
+        kind: OpKind::Color,
+        defaults: &[1.6],
+    },
+    FnMeta {
+        name: "brightness",
+        kind: OpKind::Color,
+        defaults: &[0.4],
+    },
+    FnMeta {
+        name: "saturate",
+        kind: OpKind::Color,
+        defaults: &[2.0],
+    },
+    FnMeta {
+        name: "hue",
+        kind: OpKind::Color,
+        defaults: &[0.4],
+    },
+    FnMeta {
+        name: "posterize",
+        kind: OpKind::Color,
+        defaults: &[3.0, 0.6],
+    },
+    FnMeta {
+        name: "luma",
+        kind: OpKind::Color,
+        defaults: &[0.5, 0.1],
+    },
+    FnMeta {
+        name: "colorama",
+        kind: OpKind::Color,
+        defaults: &[0.005],
+    },
+    FnMeta {
+        name: "shift",
+        kind: OpKind::Color,
+        defaults: &[0.5, 0.0, 0.0, 0.0],
+    },
+    FnMeta {
+        name: "thresh",
+        kind: OpKind::Color,
+        defaults: &[0.5, 0.04],
+    },
+    FnMeta {
+        name: "r",
+        kind: OpKind::Color,
+        defaults: &[1.0, 0.0],
+    },
+    FnMeta {
+        name: "g",
+        kind: OpKind::Color,
+        defaults: &[1.0, 0.0],
+    },
+    FnMeta {
+        name: "b",
+        kind: OpKind::Color,
+        defaults: &[1.0, 0.0],
+    },
+    FnMeta {
+        name: "a",
+        kind: OpKind::Color,
+        defaults: &[1.0, 0.0],
+    },
+    FnMeta {
+        name: "sum",
+        kind: OpKind::Color,
+        defaults: &[1.0, 1.0, 1.0, 1.0],
+    },
+    FnMeta {
+        name: "add",
+        kind: OpKind::Blend,
+        defaults: &[1.0],
+    },
+    FnMeta {
+        name: "mult",
+        kind: OpKind::Blend,
+        defaults: &[1.0],
+    },
+    FnMeta {
+        name: "blend",
+        kind: OpKind::Blend,
+        defaults: &[0.5],
+    },
+    FnMeta {
+        name: "diff",
+        kind: OpKind::Blend,
+        defaults: &[],
+    },
+    FnMeta {
+        name: "layer",
+        kind: OpKind::Blend,
+        defaults: &[],
+    },
+    FnMeta {
+        name: "mask",
+        kind: OpKind::Blend,
+        defaults: &[],
+    },
+    FnMeta {
+        name: "sub",
+        kind: OpKind::Blend,
+        defaults: &[1.0],
+    },
+    FnMeta {
+        name: "colreflect",
+        kind: OpKind::Blend,
+        defaults: &[1.0],
+    },
+    FnMeta {
+        name: "modulate",
+        kind: OpKind::Modulate,
+        defaults: &[0.1],
+    },
+    FnMeta {
+        name: "modulateScale",
+        kind: OpKind::Modulate,
+        defaults: &[1.0, 1.0],
+    },
+    FnMeta {
+        name: "modulateRotate",
+        kind: OpKind::Modulate,
+        defaults: &[1.0, 0.0],
+    },
+    FnMeta {
+        name: "modulateRepeat",
+        kind: OpKind::Modulate,
+        defaults: &[3.0, 3.0, 0.5, 0.5],
+    },
+    FnMeta {
+        name: "modulateRepeatX",
+        kind: OpKind::Modulate,
+        defaults: &[3.0, 0.5],
+    },
+    FnMeta {
+        name: "modulateRepeatY",
+        kind: OpKind::Modulate,
+        defaults: &[3.0, 0.5],
+    },
+    FnMeta {
+        name: "modulateKaleid",
+        kind: OpKind::Modulate,
+        defaults: &[4.0],
+    },
+    FnMeta {
+        name: "modulateScrollX",
+        kind: OpKind::Modulate,
+        defaults: &[0.5, 0.0],
+    },
+    FnMeta {
+        name: "modulateScrollY",
+        kind: OpKind::Modulate,
+        defaults: &[0.5, 0.0],
+    },
+    FnMeta {
+        name: "modulatePixelate",
+        kind: OpKind::Modulate,
+        defaults: &[10.0, 3.0],
+    },
+    FnMeta {
+        name: "modulateHue",
+        kind: OpKind::Modulate,
+        defaults: &[1.0],
+    },
 ];
 
 impl Node {
     fn source(func: &'static str, args: Vec<Arg>) -> Self {
-        Self { ops: vec![Op::Source { func, args }] }
+        Self {
+            ops: vec![Op::Source { func, args }],
+        }
     }
 
     fn push_geo(mut self, func: &'static str, args: Vec<Arg>) -> Self {
@@ -513,6 +910,11 @@ fn midi_cc_smoothed_glsl(index: i64) -> String {
     format!("iMidiCCSmoothed[{}]", midi_clamp(index, NUM_MIDI_CC))
 }
 
+#[cfg(feature = "osc")]
+fn osc_glsl(slot: usize) -> String {
+    format!("iOsc[{slot}]")
+}
+
 /// `note: None` -> real hydra-midi's channel-wide aftertouch; `Some(n)` ->
 /// per-note polyphonic aftertouch.
 #[cfg(feature = "midi")]
@@ -530,16 +932,18 @@ fn midi_envelope_glsl(slot: usize) -> String {
 
 /// Real hydra-midi's `range(min=0, max=1)`: linearly remaps a value already
 /// assumed to be in `[0, 1]` (every reactive value this module produces is)
-/// into `[min, max]`.
-#[cfg(feature = "midi")]
+/// into `[min, max]`. Also used by `_osc.get(...)`'s own `.range()` (OSC
+/// values aren't guaranteed `[0, 1]`, but the remap itself is generic).
+#[cfg(any(feature = "midi", feature = "osc"))]
 fn midi_range(expr: String, lo: Dynamic, hi: Dynamic) -> GlslExpr {
     let lo = fmt_f(dyn_to_f64(lo));
     let hi = fmt_f(dyn_to_f64(hi));
     GlslExpr(format!("(({expr}) * ({hi} - {lo}) + {lo})"))
 }
 
-/// Real hydra-midi's `scale(factor)`: multiplies the upstream value.
-#[cfg(feature = "midi")]
+/// Real hydra-midi's `scale(factor)`: multiplies the upstream value. Also
+/// used by `_osc.get(...)`'s own `.scale()` (see `midi_range` above).
+#[cfg(any(feature = "midi", feature = "osc"))]
 fn midi_scale(expr: String, factor: Dynamic) -> GlslExpr {
     GlslExpr(format!("(({expr}) * {})", fmt_f(dyn_to_f64(factor))))
 }
@@ -615,14 +1019,18 @@ fn as_node(d: Dynamic) -> Result<Node, Box<rhai::EvalAltResult>> {
     } else if let Ok(idx) = d.as_int() {
         Ok(idx_to_source(idx))
     } else if let Ok(v) = d.as_float() {
-        Ok(Node::source("solid", vec![Arg::Lit(v), Arg::Lit(v), Arg::Lit(v), Arg::Lit(1.0)]))
+        Ok(Node::source(
+            "solid",
+            vec![Arg::Lit(v), Arg::Lit(v), Arg::Lit(v), Arg::Lit(1.0)],
+        ))
     } else {
         Err(format!("expected a source or a chain, found {}", d.type_name()).into())
     }
 }
 
 fn dyn_to_f64(d: Dynamic) -> f64 {
-    d.as_float().unwrap_or_else(|_| d.as_int().map(|i| i as f64).unwrap_or(0.0))
+    d.as_float()
+        .unwrap_or_else(|_| d.as_int().map(|i| i as f64).unwrap_or(0.0))
 }
 
 /// Like `dyn_to_f64`, but returns `None` for anything that isn't a plain
@@ -639,7 +1047,11 @@ fn dyn_as_static_u32(d: &Dynamic) -> Option<u32> {
 }
 
 fn fmt_f(v: f64) -> String {
-    if v.fract() == 0.0 { format!("{v:.1}") } else { format!("{v}") }
+    if v.fract() == 0.0 {
+        format!("{v:.1}")
+    } else {
+        format!("{v}")
+    }
 }
 
 fn fmt_arg(a: &Arg) -> String {
@@ -664,7 +1076,12 @@ const MAX_DEPTH: usize = 16;
 
 impl Emitter {
     fn new() -> Self {
-        Self { lines: Vec::new(), st_counter: 0, var_counter: 0, depth: 0 }
+        Self {
+            lines: Vec::new(),
+            st_counter: 0,
+            var_counter: 0,
+            depth: 0,
+        }
     }
 
     fn next_st(&mut self) -> String {
@@ -711,9 +1128,8 @@ impl Emitter {
                     let new_st = self.next_st();
                     let a = fmt_args(args);
                     let sep = if a.is_empty() { "" } else { ", " };
-                    self.lines.push(format!(
-                        "  vec2 {new_st} = {func}({current_st}{sep}{a});"
-                    ));
+                    self.lines
+                        .push(format!("  vec2 {new_st} = {func}({current_st}{sep}{a});"));
                     current_st = new_st;
                 }
                 Op::Modulate { func, other, args } => {
@@ -730,7 +1146,9 @@ impl Emitter {
             }
         }
 
-        let Op::Source { func, args } = source else { unreachable!() };
+        let Op::Source { func, args } = source else {
+            unreachable!()
+        };
         let current_var = self.next_var();
 
         if *func == "src" {
@@ -770,9 +1188,8 @@ impl Emitter {
                     let new_var = self.next_var();
                     let a = fmt_args(args);
                     let sep = if a.is_empty() { "" } else { ", " };
-                    self.lines.push(format!(
-                        "  vec4 {new_var} = {func}({prev_var}{sep}{a});"
-                    ));
+                    self.lines
+                        .push(format!("  vec4 {new_var} = {func}({prev_var}{sep}{a});"));
                     prev_var = new_var;
                 }
                 Op::Blend { func, other, args } => {
@@ -809,7 +1226,12 @@ struct PatchState {
     text_data: Option<TextData>,
     render_resolution: Option<(u32, u32)>,
     buffer_filter: [Option<BufferFilter>; 4],
-    #[cfg(any(feature = "webcam", feature = "image_url", feature = "video", feature = "stream"))]
+    #[cfg(any(
+        feature = "webcam",
+        feature = "image_url",
+        feature = "video",
+        feature = "stream"
+    ))]
     source_requests: Vec<SourceRequest>,
     #[cfg(feature = "audio")]
     audio_requests: Vec<AudioRequest>,
@@ -817,6 +1239,10 @@ struct PatchState {
     midi_requests: Vec<MidiRequest>,
     #[cfg(feature = "midi")]
     next_midi_envelope_slot: usize,
+    #[cfg(feature = "osc")]
+    osc_requests: Vec<OscRequest>,
+    #[cfg(feature = "osc")]
+    next_osc_slot: usize,
     #[cfg(feature = "stream")]
     broadcast_request: Option<BroadcastRequest>,
 }
@@ -1001,7 +1427,9 @@ fn register_glsl_ops(engine: &mut Engine) {
     engine.register_fn("max", |a: f64, b: i64| -> f64 { a.max(b as f64) });
     engine.register_fn("max", |a: i64, b: f64| -> f64 { (a as f64).max(b) });
     engine.register_fn("atan", |a: f64, b: f64| -> f64 { a.atan2(b) });
-    engine.register_fn("atan", |a: i64, b: i64| -> f64 { (a as f64).atan2(b as f64) });
+    engine.register_fn("atan", |a: i64, b: i64| -> f64 {
+        (a as f64).atan2(b as f64)
+    });
     engine.register_fn("atan", |a: f64, b: i64| -> f64 { a.atan2(b as f64) });
     engine.register_fn("atan", |a: i64, b: f64| -> f64 { (a as f64).atan2(b) });
 
@@ -1019,7 +1447,9 @@ fn register_glsl_ops(engine: &mut Engine) {
     // actual ranged random that real hydra.js doesn't have either.
     engine.register_fn("random", || -> f64 { next_random_f64() });
     engine.register_fn("random", |_a: Dynamic| -> f64 { next_random_f64() });
-    engine.register_fn("random", |_a: Dynamic, _b: Dynamic| -> f64 { next_random_f64() });
+    engine.register_fn("random", |_a: Dynamic, _b: Dynamic| -> f64 {
+        next_random_f64()
+    });
 }
 
 /// One-shot, dependency-free pseudo-random `f64` in `[0, 1)`, mixed from the
@@ -1110,12 +1540,16 @@ fn register_patterns(engine: &mut Engine) {
     engine.register_fn("ease", |p: Pattern, _name: Dynamic| -> Pattern { p });
     // fit(low=0, high=1): remaps the array's own [min,max] into [low,high]
     // (real hydra.js: array-utils.js's `Array.prototype.fit`).
-    engine.register_fn("fit", |arr: Array| -> Pattern { Pattern::from_array(arr).fit(0.0, 1.0) });
+    engine.register_fn("fit", |arr: Array| -> Pattern {
+        Pattern::from_array(arr).fit(0.0, 1.0)
+    });
     engine.register_fn("fit", |p: Pattern| -> Pattern { p.fit(0.0, 1.0) });
     engine.register_fn("fit", |arr: Array, lo: Dynamic| -> Pattern {
         Pattern::from_array(arr).fit(dyn_to_f64(lo), 1.0)
     });
-    engine.register_fn("fit", |p: Pattern, lo: Dynamic| -> Pattern { p.fit(dyn_to_f64(lo), 1.0) });
+    engine.register_fn("fit", |p: Pattern, lo: Dynamic| -> Pattern {
+        p.fit(dyn_to_f64(lo), 1.0)
+    });
     engine.register_fn("fit", |arr: Array, lo: Dynamic, hi: Dynamic| -> Pattern {
         Pattern::from_array(arr).fit(dyn_to_f64(lo), dyn_to_f64(hi))
     });
@@ -1171,7 +1605,12 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
         text_data: None,
         render_resolution: None,
         buffer_filter: [None; 4],
-        #[cfg(any(feature = "webcam", feature = "image_url", feature = "video", feature = "stream"))]
+        #[cfg(any(
+            feature = "webcam",
+            feature = "image_url",
+            feature = "video",
+            feature = "stream"
+        ))]
         source_requests: Vec::new(),
         #[cfg(feature = "audio")]
         audio_requests: Vec::new(),
@@ -1179,6 +1618,10 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
         midi_requests: Vec::new(),
         #[cfg(feature = "midi")]
         next_midi_envelope_slot: 0,
+        #[cfg(feature = "osc")]
+        osc_requests: Vec::new(),
+        #[cfg(feature = "osc")]
+        next_osc_slot: 0,
         #[cfg(feature = "stream")]
         broadcast_request: None,
     }));
@@ -1255,11 +1698,14 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
             Node::source("text_src", vec![])
         });
         let s = state.clone();
-        engine.register_fn(name, move |txt: ImmutableString, _config: Dynamic| -> Node {
-            let data = text::rasterize(&txt);
-            s.lock().unwrap().text_data = Some(data);
-            Node::source("text_src", vec![])
-        });
+        engine.register_fn(
+            name,
+            move |txt: ImmutableString, _config: Dynamic| -> Node {
+                let data = text::rasterize(&txt);
+                s.lock().unwrap().text_data = Some(data);
+                Node::source("text_src", vec![])
+            },
+        );
     }
     {
         let s = state.clone();
@@ -1278,9 +1724,10 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
         engine.register_fn("hush", move || {
             let mut st = s.lock().unwrap();
             st.buffers = [None, None, None, None];
-            st.buffers[0] = Some(Node::source("solid", vec![
-                Arg::Lit(0.0), Arg::Lit(0.0), Arg::Lit(0.0), Arg::Lit(1.0),
-            ]));
+            st.buffers[0] = Some(Node::source(
+                "solid",
+                vec![Arg::Lit(0.0), Arg::Lit(0.0), Arg::Lit(0.0), Arg::Lit(1.0)],
+            ));
         });
     }
 
@@ -1295,10 +1742,13 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
             engine.register_fn("initCam", move |slot: i64| -> Node {
                 if slot >= 100 {
                     let idx = (slot - 100) as usize;
-                    s.lock().unwrap().source_requests.push(SourceRequest::InitCam {
-                        slot: idx,
-                        camera_index: 0,
-                    });
+                    s.lock()
+                        .unwrap()
+                        .source_requests
+                        .push(SourceRequest::InitCam {
+                            slot: idx,
+                            camera_index: 0,
+                        });
                 }
                 idx_to_source(slot)
             });
@@ -1309,10 +1759,13 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
             engine.register_fn("initCam", move |slot: i64, cam: i64| -> Node {
                 if slot >= 100 {
                     let idx = (slot - 100) as usize;
-                    s.lock().unwrap().source_requests.push(SourceRequest::InitCam {
-                        slot: idx,
-                        camera_index: cam as u32,
-                    });
+                    s.lock()
+                        .unwrap()
+                        .source_requests
+                        .push(SourceRequest::InitCam {
+                            slot: idx,
+                            camera_index: cam as u32,
+                        });
                 }
                 idx_to_source(slot)
             });
@@ -1324,7 +1777,10 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
         engine.register_get("fft", |_a: &mut Audio| -> AudioFft { AudioFft });
 
         engine.register_indexer_get(|_f: &mut AudioFft, i: i64| -> GlslExpr {
-            GlslExpr(format!("iFft[{}]", (i.max(0) as usize).min(NUM_FFT_BINS - 1)))
+            GlslExpr(format!(
+                "iFft[{}]",
+                (i.max(0) as usize).min(NUM_FFT_BINS - 1)
+            ))
         });
         engine.register_indexer_get(|_f: &mut AudioFft, e: GlslExpr| -> GlslExpr {
             GlslExpr(format!("iFft[int(mod({}, {}.0))]", e.0, NUM_FFT_BINS))
@@ -1334,25 +1790,37 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
             let s = state.clone();
             engine.register_fn("setBins", move |_a: Audio, n: Dynamic| {
                 let n = dyn_to_f64(n).max(1.0) as usize;
-                s.lock().unwrap().audio_requests.push(AudioRequest::SetBins(n));
+                s.lock()
+                    .unwrap()
+                    .audio_requests
+                    .push(AudioRequest::SetBins(n));
             });
         }
         {
             let s = state.clone();
             engine.register_fn("setCutoff", move |_a: Audio, c: Dynamic| {
-                s.lock().unwrap().audio_requests.push(AudioRequest::SetCutoff(dyn_to_f64(c) as f32));
+                s.lock()
+                    .unwrap()
+                    .audio_requests
+                    .push(AudioRequest::SetCutoff(dyn_to_f64(c) as f32));
             });
         }
         {
             let s = state.clone();
             engine.register_fn("setScale", move |_a: Audio, sc: Dynamic| {
-                s.lock().unwrap().audio_requests.push(AudioRequest::SetScale(dyn_to_f64(sc) as f32));
+                s.lock()
+                    .unwrap()
+                    .audio_requests
+                    .push(AudioRequest::SetScale(dyn_to_f64(sc) as f32));
             });
         }
         {
             let s = state.clone();
             engine.register_fn("setSmooth", move |_a: Audio, sm: Dynamic| {
-                s.lock().unwrap().audio_requests.push(AudioRequest::SetSmooth(dyn_to_f64(sm) as f32));
+                s.lock()
+                    .unwrap()
+                    .audio_requests
+                    .push(AudioRequest::SetSmooth(dyn_to_f64(sm) as f32));
             });
         }
         // Real hydra.js's a.show()/a.hide() toggle an on-screen debug graph
@@ -1381,14 +1849,23 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
     #[cfg(feature = "midi")]
     {
         engine.register_fn("note", |n: Dynamic| -> MidiNote {
-            MidiNote { note: note_number_from_dynamic(n) }
+            MidiNote {
+                note: note_number_from_dynamic(n),
+            }
         });
         engine.register_fn("note", |n: Dynamic, _channel: Dynamic| -> MidiNote {
-            MidiNote { note: note_number_from_dynamic(n) }
+            MidiNote {
+                note: note_number_from_dynamic(n),
+            }
         });
-        engine.register_fn("note", |n: Dynamic, _channel: Dynamic, _input: Dynamic| -> MidiNote {
-            MidiNote { note: note_number_from_dynamic(n) }
-        });
+        engine.register_fn(
+            "note",
+            |n: Dynamic, _channel: Dynamic, _input: Dynamic| -> MidiNote {
+                MidiNote {
+                    note: note_number_from_dynamic(n),
+                }
+            },
+        );
         engine.register_fn("_note", |n: Dynamic| -> GlslExpr {
             GlslExpr(midi_note_glsl(note_number_from_dynamic(n)))
         });
@@ -1398,9 +1875,12 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
         engine.register_fn("_noteVelocity", |n: Dynamic| -> GlslExpr {
             GlslExpr(midi_velocity_glsl(note_number_from_dynamic(n)))
         });
-        engine.register_fn("_noteVelocity", |n: Dynamic, _channel: Dynamic| -> GlslExpr {
-            GlslExpr(midi_velocity_glsl(note_number_from_dynamic(n)))
-        });
+        engine.register_fn(
+            "_noteVelocity",
+            |n: Dynamic, _channel: Dynamic| -> GlslExpr {
+                GlslExpr(midi_velocity_glsl(note_number_from_dynamic(n)))
+            },
+        );
         engine.register_fn("velocity", |n: MidiNote| -> GlslExpr {
             GlslExpr(midi_velocity_glsl(n.note))
         });
@@ -1425,13 +1905,24 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
             );
         }
 
-        engine.register_fn("cc", |i: Dynamic| -> MidiCc { MidiCc { index: dyn_to_f64(i) as i64 } });
+        engine.register_fn("cc", |i: Dynamic| -> MidiCc {
+            MidiCc {
+                index: dyn_to_f64(i) as i64,
+            }
+        });
         engine.register_fn("cc", |i: Dynamic, _channel: Dynamic| -> MidiCc {
-            MidiCc { index: dyn_to_f64(i) as i64 }
+            MidiCc {
+                index: dyn_to_f64(i) as i64,
+            }
         });
-        engine.register_fn("cc", |i: Dynamic, _channel: Dynamic, _input: Dynamic| -> MidiCc {
-            MidiCc { index: dyn_to_f64(i) as i64 }
-        });
+        engine.register_fn(
+            "cc",
+            |i: Dynamic, _channel: Dynamic, _input: Dynamic| -> MidiCc {
+                MidiCc {
+                    index: dyn_to_f64(i) as i64,
+                }
+            },
+        );
         engine.register_fn("_cc", |i: Dynamic| -> GlslExpr {
             GlslExpr(midi_cc_glsl(dyn_to_f64(i) as i64))
         });
@@ -1441,20 +1932,26 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
         {
             let s = state.clone();
             engine.register_fn("smooth", move |c: MidiCc| -> GlslExpr {
-                s.lock().unwrap().midi_requests.push(MidiRequest::SetCcSmooth {
-                    index: c.index as usize,
-                    factor: crate::midi::DEFAULT_CC_SMOOTH,
-                });
+                s.lock()
+                    .unwrap()
+                    .midi_requests
+                    .push(MidiRequest::SetCcSmooth {
+                        index: c.index as usize,
+                        factor: crate::midi::DEFAULT_CC_SMOOTH,
+                    });
                 GlslExpr(midi_cc_smoothed_glsl(c.index))
             });
         }
         {
             let s = state.clone();
             engine.register_fn("smooth", move |c: MidiCc, factor: Dynamic| -> GlslExpr {
-                s.lock().unwrap().midi_requests.push(MidiRequest::SetCcSmooth {
-                    index: c.index as usize,
-                    factor: dyn_to_f64(factor) as f32,
-                });
+                s.lock()
+                    .unwrap()
+                    .midi_requests
+                    .push(MidiRequest::SetCcSmooth {
+                        index: c.index as usize,
+                        factor: dyn_to_f64(factor) as f32,
+                    });
                 GlslExpr(midi_cc_smoothed_glsl(c.index))
             });
         }
@@ -1467,14 +1964,23 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
         // merged-channel treatment `note`/`cc` already get.
         engine.register_fn("aft", || -> MidiAft { MidiAft { note: None } });
         engine.register_fn("aft", |n: Dynamic| -> MidiAft {
-            MidiAft { note: Some(note_number_from_dynamic(n)) }
+            MidiAft {
+                note: Some(note_number_from_dynamic(n)),
+            }
         });
         engine.register_fn("aft", |n: Dynamic, _channel: Dynamic| -> MidiAft {
-            MidiAft { note: Some(note_number_from_dynamic(n)) }
+            MidiAft {
+                note: Some(note_number_from_dynamic(n)),
+            }
         });
-        engine.register_fn("aft", |n: Dynamic, _channel: Dynamic, _input: Dynamic| -> MidiAft {
-            MidiAft { note: Some(note_number_from_dynamic(n)) }
-        });
+        engine.register_fn(
+            "aft",
+            |n: Dynamic, _channel: Dynamic, _input: Dynamic| -> MidiAft {
+                MidiAft {
+                    note: Some(note_number_from_dynamic(n)),
+                }
+            },
+        );
         engine.register_fn("_aft", || -> GlslExpr { GlslExpr(midi_aft_glsl(None)) });
         engine.register_fn("_aft", |n: Dynamic| -> GlslExpr {
             GlslExpr(midi_aft_glsl(Some(note_number_from_dynamic(n))))
@@ -1488,18 +1994,25 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
         // back, matching real hydra-midi's own `range`/`scale` transforms
         // (which apply the same way regardless of what's upstream in the
         // chain).
-        engine.register_fn("range", |e: GlslExpr, lo: Dynamic, hi: Dynamic| -> GlslExpr {
-            midi_range(e.0, lo, hi)
-        });
-        engine.register_fn("range", |n: MidiNote, lo: Dynamic, hi: Dynamic| -> GlslExpr {
-            midi_range(midi_note_glsl(n.note), lo, hi)
-        });
+        engine.register_fn(
+            "range",
+            |e: GlslExpr, lo: Dynamic, hi: Dynamic| -> GlslExpr { midi_range(e.0, lo, hi) },
+        );
+        engine.register_fn(
+            "range",
+            |n: MidiNote, lo: Dynamic, hi: Dynamic| -> GlslExpr {
+                midi_range(midi_note_glsl(n.note), lo, hi)
+            },
+        );
         engine.register_fn("range", |c: MidiCc, lo: Dynamic, hi: Dynamic| -> GlslExpr {
             midi_range(midi_cc_glsl(c.index), lo, hi)
         });
-        engine.register_fn("range", |a: MidiAft, lo: Dynamic, hi: Dynamic| -> GlslExpr {
-            midi_range(midi_aft_glsl(a.note), lo, hi)
-        });
+        engine.register_fn(
+            "range",
+            |a: MidiAft, lo: Dynamic, hi: Dynamic| -> GlslExpr {
+                midi_range(midi_aft_glsl(a.note), lo, hi)
+            },
+        );
         engine.register_fn("scale", |e: GlslExpr, factor: Dynamic| -> GlslExpr {
             midi_scale(e.0, factor)
         });
@@ -1553,6 +2066,106 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
         engine.register_fn("input", |_m: Midi, _n: Dynamic| {});
     }
 
+    // OSC input - see src/osc.rs's module doc comment for the faithfulness
+    // notes (value-accessor `.get()` instead of real hydra-osc/atom-hydra's
+    // `.on(address, callback)` event style, and why the object is `_osc`
+    // rather than `osc`).
+    #[cfg(feature = "osc")]
+    {
+        // `.range(lo,hi)`/`.scale(factor)` on the `GlslExpr` `_osc.get(...)`
+        // returns - registered here too (not just under the `midi`
+        // feature's identical registration above) so they still work with
+        // `osc` enabled and `midi` disabled. Harmless if both features are
+        // on: same signature, same implementation, last registration wins.
+        engine.register_fn(
+            "range",
+            |e: GlslExpr, lo: Dynamic, hi: Dynamic| -> GlslExpr { midi_range(e.0, lo, hi) },
+        );
+        engine.register_fn("scale", |e: GlslExpr, factor: Dynamic| -> GlslExpr {
+            midi_scale(e.0, factor)
+        });
+
+        {
+            let s = state.clone();
+            engine.register_fn(
+                "get",
+                move |_o: Osc, address: ImmutableString| -> GlslExpr {
+                    let mut st = s.lock().unwrap();
+                    let slot = st.next_osc_slot;
+                    st.next_osc_slot = (slot + 1) % NUM_OSC_SLOTS;
+                    st.osc_requests.push(OscRequest::Bind {
+                        slot,
+                        address: address.to_string(),
+                        arg_index: 0,
+                    });
+                    GlslExpr(osc_glsl(slot))
+                },
+            );
+        }
+        {
+            let s = state.clone();
+            engine.register_fn(
+                "get",
+                move |_o: Osc, address: ImmutableString, arg_index: Dynamic| -> GlslExpr {
+                    let mut st = s.lock().unwrap();
+                    let slot = st.next_osc_slot;
+                    st.next_osc_slot = (slot + 1) % NUM_OSC_SLOTS;
+                    st.osc_requests.push(OscRequest::Bind {
+                        slot,
+                        address: address.to_string(),
+                        arg_index: dyn_to_f64(arg_index).max(0.0) as usize,
+                    });
+                    GlslExpr(osc_glsl(slot))
+                },
+            );
+        }
+        {
+            let s = state.clone();
+            // Real atom-hydra's `_osc` is constructed with an explicit
+            // port (`new OscLoader(port)`); here that's `_osc.start(port)`
+            // instead, defaulting to the same `57101` atom-hydra's own
+            // `lib/main.js` uses when no argument is given.
+            engine.register_fn("start", move |_o: Osc| -> Osc {
+                s.lock()
+                    .unwrap()
+                    .osc_requests
+                    .push(OscRequest::Start(DEFAULT_OSC_PORT));
+                Osc
+            });
+        }
+        {
+            let s = state.clone();
+            engine.register_fn("start", move |_o: Osc, port: Dynamic| -> Osc {
+                s.lock()
+                    .unwrap()
+                    .osc_requests
+                    .push(OscRequest::Start(dyn_to_f64(port) as u16));
+                Osc
+            });
+        }
+        {
+            let s = state.clone();
+            engine.register_fn("pause", move |_o: Osc| {
+                s.lock().unwrap().osc_requests.push(OscRequest::Pause);
+            });
+        }
+        // `_osc.show()`/`.hide()` toggle an on-screen OSC monitor overlay
+        // listing every address received so far and its latest arguments -
+        // see `OscRequest::Show`/`Hide`'s own doc comment.
+        {
+            let s = state.clone();
+            engine.register_fn("show", move |_o: Osc| {
+                s.lock().unwrap().osc_requests.push(OscRequest::Show);
+            });
+        }
+        {
+            let s = state.clone();
+            engine.register_fn("hide", move |_o: Osc| {
+                s.lock().unwrap().osc_requests.push(OscRequest::Hide);
+            });
+        }
+    }
+
     // initVideo/initScreen/initGif (external video/GIF/display capture) and
     // setResolution have no implementation here (no video, GIF, or
     // screen-capture pipeline, and no script-driven canvas resize) - these
@@ -1570,10 +2183,13 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
         let s = state.clone();
         engine.register_fn("initImage", move |idx: i64, url: ImmutableString| -> Node {
             if idx >= 100 {
-                s.lock().unwrap().source_requests.push(SourceRequest::InitImage {
-                    slot: (idx - 100) as usize,
-                    url: url.to_string(),
-                });
+                s.lock()
+                    .unwrap()
+                    .source_requests
+                    .push(SourceRequest::InitImage {
+                        slot: (idx - 100) as usize,
+                        url: url.to_string(),
+                    });
             }
             idx_to_source(idx)
         });
@@ -1591,10 +2207,13 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
         let s = state.clone();
         engine.register_fn("initVideo", move |idx: i64, url: ImmutableString| -> Node {
             if idx >= 100 {
-                s.lock().unwrap().source_requests.push(SourceRequest::InitVideo {
-                    slot: (idx - 100) as usize,
-                    url: url.to_string(),
-                });
+                s.lock()
+                    .unwrap()
+                    .source_requests
+                    .push(SourceRequest::InitVideo {
+                        slot: (idx - 100) as usize,
+                        url: url.to_string(),
+                    });
             }
             idx_to_source(idx)
         });
@@ -1613,10 +2232,13 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
         let s = state.clone();
         engine.register_fn("initGif", move |idx: i64, url: ImmutableString| -> Node {
             if idx >= 100 {
-                s.lock().unwrap().source_requests.push(SourceRequest::InitGif {
-                    slot: (idx - 100) as usize,
-                    url: url.to_string(),
-                });
+                s.lock()
+                    .unwrap()
+                    .source_requests
+                    .push(SourceRequest::InitGif {
+                        slot: (idx - 100) as usize,
+                        url: url.to_string(),
+                    });
             }
             idx_to_source(idx)
         });
@@ -1635,19 +2257,27 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
     #[cfg(feature = "stream")]
     {
         let s = state.clone();
-        engine.register_fn("initStream", move |idx: i64, url: ImmutableString| -> Node {
-            if idx >= 100 {
-                s.lock().unwrap().source_requests.push(SourceRequest::InitStream {
-                    slot: (idx - 100) as usize,
-                    addr: url.to_string(),
-                });
-            }
-            idx_to_source(idx)
-        });
+        engine.register_fn(
+            "initStream",
+            move |idx: i64, url: ImmutableString| -> Node {
+                if idx >= 100 {
+                    s.lock()
+                        .unwrap()
+                        .source_requests
+                        .push(SourceRequest::InitStream {
+                            slot: (idx - 100) as usize,
+                            addr: url.to_string(),
+                        });
+                }
+                idx_to_source(idx)
+            },
+        );
     }
     #[cfg(not(feature = "stream"))]
     engine.register_fn("initStream", |idx: i64, url: ImmutableString| -> Node {
-        log::warn!("initStream({idx}, \"{url}\") ignored: WebRTC/live-stream sources are not supported");
+        log::warn!(
+            "initStream({idx}, \"{url}\") ignored: WebRTC/live-stream sources are not supported"
+        );
         idx_to_source(idx)
     });
     // broadcastStream/stopBroadcast are hydra-rust-specific - not real
@@ -1660,7 +2290,8 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
     {
         let s = state.clone();
         engine.register_fn("broadcastStream", move |port: i64| {
-            s.lock().unwrap().broadcast_request = Some(BroadcastRequest::Start(port.clamp(1, 65535) as u16));
+            s.lock().unwrap().broadcast_request =
+                Some(BroadcastRequest::Start(port.clamp(1, 65535) as u16));
         });
         let s = state.clone();
         engine.register_fn("stopBroadcast", move || {
@@ -1690,8 +2321,7 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
         let s = state.clone();
         engine.register_fn("setResolution", move |w: Dynamic, h: Dynamic| {
             if let (Some(w), Some(h)) = (dyn_as_static_u32(&w), dyn_as_static_u32(&h)) {
-                s.lock().unwrap().render_resolution =
-                    Some((w.clamp(1, 4096), h.clamp(1, 4096)));
+                s.lock().unwrap().render_resolution = Some((w.clamp(1, 4096), h.clamp(1, 4096)));
             }
         });
     }
@@ -1725,7 +2355,9 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
                 "nearest" => Some(BufferFilter::Nearest),
                 "linear" => Some(BufferFilter::Linear),
                 _ => {
-                    log::warn!("o{buf}.setMode(\"{mode}\") ignored: expected \"nearest\" or \"linear\"");
+                    log::warn!(
+                        "o{buf}.setMode(\"{mode}\") ignored: expected \"nearest\" or \"linear\""
+                    );
                     None
                 }
             };
@@ -1771,14 +2403,23 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
     engine.register_fn("fill", |_p: Map, _color: Dynamic| {});
     engine.register_fn("fill", |_p: Map, _r: Dynamic, _g: Dynamic, _b: Dynamic| {});
     engine.register_fn("stroke", |_p: Map, _color: Dynamic| {});
-    engine.register_fn("stroke", |_p: Map, _r: Dynamic, _g: Dynamic, _b: Dynamic| {});
+    engine.register_fn(
+        "stroke",
+        |_p: Map, _r: Dynamic, _g: Dynamic, _b: Dynamic| {},
+    );
     engine.register_fn("strokeWeight", |_p: Map, _weight: Dynamic| {});
     engine.register_fn("noStroke", |_p: Map| {});
     engine.register_fn("noFill", |_p: Map| {});
-    engine.register_fn("text", |_p: Map, _str: ImmutableString, _x: Dynamic, _y: Dynamic| {});
+    engine.register_fn(
+        "text",
+        |_p: Map, _str: ImmutableString, _x: Dynamic, _y: Dynamic| {},
+    );
     engine.register_fn("textFont", |_p: Map, _name: ImmutableString| {});
     engine.register_fn("color", |_p: Map, _r: Dynamic, _g: Dynamic, _b: Dynamic| {});
-    engine.register_fn("color", |_p: Map, _r: Dynamic, _g: Dynamic, _b: Dynamic, _a: Dynamic| {});
+    engine.register_fn(
+        "color",
+        |_p: Map, _r: Dynamic, _g: Dynamic, _b: Dynamic, _a: Dynamic| {},
+    );
     // p5.js's `color(r,g,b[,a])`/`color(gray)` free function (global mode,
     // no `p1.` instance prefix) - a *different* function from hydra's own
     // `.color()` chain method (always Node-receiver, registered via
@@ -1788,8 +2429,13 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
     // sketches only ever pass the result along to `fill`/`stroke`, which
     // already accept any `Dynamic` color argument.
     engine.register_fn("color", |_gray: Dynamic| -> Map { Map::new() });
-    engine.register_fn("color", |_r: Dynamic, _g: Dynamic, _b: Dynamic| -> Map { Map::new() });
-    engine.register_fn("color", |_r: Dynamic, _g: Dynamic, _b: Dynamic, _a: Dynamic| -> Map { Map::new() });
+    engine.register_fn("color", |_r: Dynamic, _g: Dynamic, _b: Dynamic| -> Map {
+        Map::new()
+    });
+    engine.register_fn(
+        "color",
+        |_r: Dynamic, _g: Dynamic, _b: Dynamic, _a: Dynamic| -> Map { Map::new() },
+    );
     // `new THREE.PerspectiveCamera(fov, aspect, near, far)` - three.js's
     // camera constructor, seen after `THREE` itself degrades to a plain
     // string (`let THREE = await import(url)`, with `await`/`import`
@@ -1802,9 +2448,12 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
     // map so later property/method access on the camera is harmless too.
     engine.register_fn(
         "PerspectiveCamera",
-        |_receiver: Dynamic, _fov: Dynamic, _aspect: Dynamic, _near: Dynamic, _far: Dynamic| -> Map {
-            Map::new()
-        },
+        |_receiver: Dynamic,
+         _fov: Dynamic,
+         _aspect: Dynamic,
+         _near: Dynamic,
+         _far: Dynamic|
+         -> Map { Map::new() },
     );
     engine.register_fn(
         "PerspectiveCamera",
@@ -1816,7 +2465,9 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
     // real three.js setup code. Optional config object accepted and
     // ignored, same as `P5(...)`'s own optional config.
     engine.register_fn("WebGLRenderer", |_receiver: Dynamic| -> Map { Map::new() });
-    engine.register_fn("WebGLRenderer", |_receiver: Dynamic, _config: Map| -> Map { Map::new() });
+    engine.register_fn("WebGLRenderer", |_receiver: Dynamic, _config: Map| -> Map {
+        Map::new()
+    });
     engine.register_fn("WebGLRenderer", || -> Map { Map::new() });
     engine.register_fn("WebGLRenderer", |_config: Map| -> Map { Map::new() });
     // `renderer.setSize(width, height)` - the very next call in the same
@@ -1857,16 +2508,27 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
     // and further real hydra.js-side method calls on it are harmless
     // instead of "Variable not found"/"Function not found", matching the
     // `P5()`/`hydraText` treatment.
-    engine.register_fn("createElement", |_doc: Map, _tag: ImmutableString| -> Map { Map::new() });
-    engine.register_fn("getElementById", |_doc: Map, _id: ImmutableString| -> Map { Map::new() });
-    engine.register_fn("querySelector", |_doc: Map, _selector: ImmutableString| -> Map { Map::new() });
+    engine.register_fn("createElement", |_doc: Map, _tag: ImmutableString| -> Map {
+        Map::new()
+    });
+    engine.register_fn("getElementById", |_doc: Map, _id: ImmutableString| -> Map {
+        Map::new()
+    });
+    engine.register_fn(
+        "querySelector",
+        |_doc: Map, _selector: ImmutableString| -> Map { Map::new() },
+    );
     // Returns a one-element array (not empty) so a real sketch's common
     // `document.getElementsByTagName('canvas')[0]` indexing doesn't itself
     // hard-fail on an out-of-bounds access.
-    engine.register_fn("getElementsByTagName", |_doc: Map, _tag: ImmutableString| -> Array {
-        Array::from([Dynamic::from(Map::new())])
-    });
-    engine.register_fn("addEventListener", |_doc: Map, _event: ImmutableString, _handler: Dynamic| {});
+    engine.register_fn(
+        "getElementsByTagName",
+        |_doc: Map, _tag: ImmutableString| -> Array { Array::from([Dynamic::from(Map::new())]) },
+    );
+    engine.register_fn(
+        "addEventListener",
+        |_doc: Map, _event: ImmutableString, _handler: Dynamic| {},
+    );
     // `canvasEl.getContext("2d")` - the resulting 2D drawing context is
     // itself just another settable stand-in map (its own properties like
     // `.fillStyle`/`.font` need no per-property registration, same as
@@ -1874,20 +2536,36 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
     // the real Canvas 2D API exactly (`fillText`'s optional trailing
     // `maxWidth`, `measureText` returning a `TextMetrics`-like stand-in
     // in case `.width` is read off it).
-    engine.register_fn("getContext", |_el: Map, _kind: ImmutableString| -> Map { Map::new() });
-    engine.register_fn("fillText", |_ctx: Map, _text: ImmutableString, _x: Dynamic, _y: Dynamic| {});
+    engine.register_fn("getContext", |_el: Map, _kind: ImmutableString| -> Map {
+        Map::new()
+    });
+    engine.register_fn(
+        "fillText",
+        |_ctx: Map, _text: ImmutableString, _x: Dynamic, _y: Dynamic| {},
+    );
     engine.register_fn(
         "fillText",
         |_ctx: Map, _text: ImmutableString, _x: Dynamic, _y: Dynamic, _max_width: Dynamic| {},
     );
-    engine.register_fn("strokeText", |_ctx: Map, _text: ImmutableString, _x: Dynamic, _y: Dynamic| {});
-    engine.register_fn("fillRect", |_ctx: Map, _x: Dynamic, _y: Dynamic, _w: Dynamic, _h: Dynamic| {});
-    engine.register_fn("clearRect", |_ctx: Map, _x: Dynamic, _y: Dynamic, _w: Dynamic, _h: Dynamic| {});
+    engine.register_fn(
+        "strokeText",
+        |_ctx: Map, _text: ImmutableString, _x: Dynamic, _y: Dynamic| {},
+    );
+    engine.register_fn(
+        "fillRect",
+        |_ctx: Map, _x: Dynamic, _y: Dynamic, _w: Dynamic, _h: Dynamic| {},
+    );
+    engine.register_fn(
+        "clearRect",
+        |_ctx: Map, _x: Dynamic, _y: Dynamic, _w: Dynamic, _h: Dynamic| {},
+    );
     engine.register_fn("save", |_ctx: Map| {});
     engine.register_fn("restore", |_ctx: Map| {});
     engine.register_fn("translate", |_ctx: Map, _x: Dynamic, _y: Dynamic| {});
     engine.register_fn("scale", |_ctx: Map, _x: Dynamic, _y: Dynamic| {});
-    engine.register_fn("measureText", |_ctx: Map, _text: ImmutableString| -> Map { Map::new() });
+    engine.register_fn("measureText", |_ctx: Map, _text: ImmutableString| -> Map {
+        Map::new()
+    });
     engine.register_fn(
         "createLinearGradient",
         |_ctx: Map, _x0: Dynamic, _y0: Dynamic, _x1: Dynamic, _y1: Dynamic| -> Map { Map::new() },
@@ -1903,8 +2581,12 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
     engine.register_fn("setLinear", |_c: Map| {});
     engine.register_fn("setNearest", |_c: Map| {});
 
-    engine.register_get("x", |_m: &mut Mouse| -> GlslExpr { GlslExpr("iMouse.x".to_string()) });
-    engine.register_get("y", |_m: &mut Mouse| -> GlslExpr { GlslExpr("iMouse.y".to_string()) });
+    engine.register_get("x", |_m: &mut Mouse| -> GlslExpr {
+        GlslExpr("iMouse.x".to_string())
+    });
+    engine.register_get("y", |_m: &mut Mouse| -> GlslExpr {
+        GlslExpr("iMouse.y".to_string())
+    });
     engine.register_get("innerWidth", |_w: &mut Window| -> GlslExpr {
         GlslExpr("iResolution.x".to_string())
     });
@@ -1966,6 +2648,8 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
     scope.push("a", Audio);
     #[cfg(feature = "midi")]
     scope.push("midi", Midi);
+    #[cfg(feature = "osc")]
+    scope.push("_osc", Osc);
 
     let result = engine
         .eval_with_scope::<Dynamic>(&mut scope, code)
@@ -1990,12 +2674,19 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
         text_data: patch.text_data.take(),
         render_resolution: patch.render_resolution,
         buffer_filter: patch.buffer_filter,
-        #[cfg(any(feature = "webcam", feature = "image_url", feature = "video", feature = "stream"))]
+        #[cfg(any(
+            feature = "webcam",
+            feature = "image_url",
+            feature = "video",
+            feature = "stream"
+        ))]
         source_requests: std::mem::take(&mut patch.source_requests),
         #[cfg(feature = "audio")]
         audio_requests: std::mem::take(&mut patch.audio_requests),
         #[cfg(feature = "midi")]
         midi_requests: std::mem::take(&mut patch.midi_requests),
+        #[cfg(feature = "osc")]
+        osc_requests: std::mem::take(&mut patch.osc_requests),
         #[cfg(feature = "stream")]
         broadcast_request: patch.broadcast_request,
     })
@@ -2019,21 +2710,36 @@ fn register_source(engine: &mut Engine, meta: &FnMeta) {
     }
     if n >= 3 {
         engine.register_fn(name, move |a: Dynamic, b: Dynamic, c: Dynamic| {
-            Node::source(name, fill_args(&[as_arg(a), as_arg(b), as_arg(c)], defaults))
+            Node::source(
+                name,
+                fill_args(&[as_arg(a), as_arg(b), as_arg(c)], defaults),
+            )
         });
     }
     if n >= 4 {
-        engine.register_fn(name, move |a: Dynamic, b: Dynamic, c: Dynamic, d: Dynamic| {
-            Node::source(name, fill_args(&[as_arg(a), as_arg(b), as_arg(c), as_arg(d)], defaults))
-        });
+        engine.register_fn(
+            name,
+            move |a: Dynamic, b: Dynamic, c: Dynamic, d: Dynamic| {
+                Node::source(
+                    name,
+                    fill_args(&[as_arg(a), as_arg(b), as_arg(c), as_arg(d)], defaults),
+                )
+            },
+        );
     }
     if n >= 5 {
-        engine.register_fn(name, move |a: Dynamic, b: Dynamic, c: Dynamic, d: Dynamic, e: Dynamic| {
-            Node::source(
-                name,
-                fill_args(&[as_arg(a), as_arg(b), as_arg(c), as_arg(d), as_arg(e)], defaults),
-            )
-        });
+        engine.register_fn(
+            name,
+            move |a: Dynamic, b: Dynamic, c: Dynamic, d: Dynamic, e: Dynamic| {
+                Node::source(
+                    name,
+                    fill_args(
+                        &[as_arg(a), as_arg(b), as_arg(c), as_arg(d), as_arg(e)],
+                        defaults,
+                    ),
+                )
+            },
+        );
     }
     if n >= 6 {
         engine.register_fn(
@@ -2042,7 +2748,14 @@ fn register_source(engine: &mut Engine, meta: &FnMeta) {
                 Node::source(
                     name,
                     fill_args(
-                        &[as_arg(a), as_arg(b), as_arg(c), as_arg(d), as_arg(e), as_arg(f)],
+                        &[
+                            as_arg(a),
+                            as_arg(b),
+                            as_arg(c),
+                            as_arg(d),
+                            as_arg(e),
+                            as_arg(f),
+                        ],
                         defaults,
                     ),
                 )
@@ -2056,7 +2769,9 @@ fn register_geo(engine: &mut Engine, meta: &FnMeta) {
     let defaults = meta.defaults;
     let n = defaults.len();
 
-    engine.register_fn(name, move |node: Node| node.push_geo(name, fill_args(&[], defaults)));
+    engine.register_fn(name, move |node: Node| {
+        node.push_geo(name, fill_args(&[], defaults))
+    });
     if n >= 1 {
         engine.register_fn(name, move |node: Node, a: Dynamic| {
             node.push_geo(name, fill_args(&[as_arg(a)], defaults))
@@ -2068,15 +2783,24 @@ fn register_geo(engine: &mut Engine, meta: &FnMeta) {
         });
     }
     if n >= 3 {
-        engine.register_fn(name, move |node: Node, a: Dynamic, b: Dynamic, c: Dynamic| {
-            node.push_geo(name, fill_args(&[as_arg(a), as_arg(b), as_arg(c)], defaults))
-        });
+        engine.register_fn(
+            name,
+            move |node: Node, a: Dynamic, b: Dynamic, c: Dynamic| {
+                node.push_geo(
+                    name,
+                    fill_args(&[as_arg(a), as_arg(b), as_arg(c)], defaults),
+                )
+            },
+        );
     }
     if n >= 4 {
         engine.register_fn(
             name,
             move |node: Node, a: Dynamic, b: Dynamic, c: Dynamic, d: Dynamic| {
-                node.push_geo(name, fill_args(&[as_arg(a), as_arg(b), as_arg(c), as_arg(d)], defaults))
+                node.push_geo(
+                    name,
+                    fill_args(&[as_arg(a), as_arg(b), as_arg(c), as_arg(d)], defaults),
+                )
             },
         );
     }
@@ -2086,7 +2810,10 @@ fn register_geo(engine: &mut Engine, meta: &FnMeta) {
             move |node: Node, a: Dynamic, b: Dynamic, c: Dynamic, d: Dynamic, e: Dynamic| {
                 node.push_geo(
                     name,
-                    fill_args(&[as_arg(a), as_arg(b), as_arg(c), as_arg(d), as_arg(e)], defaults),
+                    fill_args(
+                        &[as_arg(a), as_arg(b), as_arg(c), as_arg(d), as_arg(e)],
+                        defaults,
+                    ),
                 )
             },
         );
@@ -2098,7 +2825,9 @@ fn register_color(engine: &mut Engine, meta: &FnMeta) {
     let defaults = meta.defaults;
     let n = defaults.len();
 
-    engine.register_fn(name, move |node: Node| node.push_color(name, fill_args(&[], defaults)));
+    engine.register_fn(name, move |node: Node| {
+        node.push_color(name, fill_args(&[], defaults))
+    });
     if n >= 1 {
         engine.register_fn(name, move |node: Node, a: Dynamic| {
             node.push_color(name, fill_args(&[as_arg(a)], defaults))
@@ -2110,9 +2839,15 @@ fn register_color(engine: &mut Engine, meta: &FnMeta) {
         });
     }
     if n >= 3 {
-        engine.register_fn(name, move |node: Node, a: Dynamic, b: Dynamic, c: Dynamic| {
-            node.push_color(name, fill_args(&[as_arg(a), as_arg(b), as_arg(c)], defaults))
-        });
+        engine.register_fn(
+            name,
+            move |node: Node, a: Dynamic, b: Dynamic, c: Dynamic| {
+                node.push_color(
+                    name,
+                    fill_args(&[as_arg(a), as_arg(b), as_arg(c)], defaults),
+                )
+            },
+        );
     }
     if n >= 4 {
         engine.register_fn(
@@ -2132,13 +2867,19 @@ fn register_blend(engine: &mut Engine, meta: &FnMeta) {
     let defaults = meta.defaults;
     let n = defaults.len();
 
-    engine.register_fn(name, move |node: Node, other: Dynamic| -> Result<Node, Box<rhai::EvalAltResult>> {
-        Ok(node.push_blend(name, as_node(other)?, fill_args(&[], defaults)))
-    });
+    engine.register_fn(
+        name,
+        move |node: Node, other: Dynamic| -> Result<Node, Box<rhai::EvalAltResult>> {
+            Ok(node.push_blend(name, as_node(other)?, fill_args(&[], defaults)))
+        },
+    );
     if n >= 1 {
         engine.register_fn(
             name,
-            move |node: Node, other: Dynamic, a: Dynamic| -> Result<Node, Box<rhai::EvalAltResult>> {
+            move |node: Node,
+                  other: Dynamic,
+                  a: Dynamic|
+                  -> Result<Node, Box<rhai::EvalAltResult>> {
                 Ok(node.push_blend(name, as_node(other)?, fill_args(&[as_arg(a)], defaults)))
             },
         );
@@ -2150,13 +2891,19 @@ fn register_modulate(engine: &mut Engine, meta: &FnMeta) {
     let defaults = meta.defaults;
     let n = defaults.len();
 
-    engine.register_fn(name, move |node: Node, other: Dynamic| -> Result<Node, Box<rhai::EvalAltResult>> {
-        Ok(node.push_modulate(name, as_node(other)?, fill_args(&[], defaults)))
-    });
+    engine.register_fn(
+        name,
+        move |node: Node, other: Dynamic| -> Result<Node, Box<rhai::EvalAltResult>> {
+            Ok(node.push_modulate(name, as_node(other)?, fill_args(&[], defaults)))
+        },
+    );
     if n >= 1 {
         engine.register_fn(
             name,
-            move |node: Node, other: Dynamic, a: Dynamic| -> Result<Node, Box<rhai::EvalAltResult>> {
+            move |node: Node,
+                  other: Dynamic,
+                  a: Dynamic|
+                  -> Result<Node, Box<rhai::EvalAltResult>> {
                 Ok(node.push_modulate(name, as_node(other)?, fill_args(&[as_arg(a)], defaults)))
             },
         );
@@ -2164,7 +2911,11 @@ fn register_modulate(engine: &mut Engine, meta: &FnMeta) {
     if n >= 2 {
         engine.register_fn(
             name,
-            move |node: Node, other: Dynamic, a: Dynamic, b: Dynamic| -> Result<Node, Box<rhai::EvalAltResult>> {
+            move |node: Node,
+                  other: Dynamic,
+                  a: Dynamic,
+                  b: Dynamic|
+                  -> Result<Node, Box<rhai::EvalAltResult>> {
                 Ok(node.push_modulate(
                     name,
                     as_node(other)?,
@@ -2176,7 +2927,12 @@ fn register_modulate(engine: &mut Engine, meta: &FnMeta) {
     if n >= 3 {
         engine.register_fn(
             name,
-            move |node: Node, other: Dynamic, a: Dynamic, b: Dynamic, c: Dynamic| -> Result<Node, Box<rhai::EvalAltResult>> {
+            move |node: Node,
+                  other: Dynamic,
+                  a: Dynamic,
+                  b: Dynamic,
+                  c: Dynamic|
+                  -> Result<Node, Box<rhai::EvalAltResult>> {
                 Ok(node.push_modulate(
                     name,
                     as_node(other)?,
@@ -2188,7 +2944,13 @@ fn register_modulate(engine: &mut Engine, meta: &FnMeta) {
     if n >= 4 {
         engine.register_fn(
             name,
-            move |node: Node, other: Dynamic, a: Dynamic, b: Dynamic, c: Dynamic, d: Dynamic| -> Result<Node, Box<rhai::EvalAltResult>> {
+            move |node: Node,
+                  other: Dynamic,
+                  a: Dynamic,
+                  b: Dynamic,
+                  c: Dynamic,
+                  d: Dynamic|
+                  -> Result<Node, Box<rhai::EvalAltResult>> {
                 Ok(node.push_modulate(
                     name,
                     as_node(other)?,
@@ -2229,7 +2991,10 @@ mod tests {
 
     #[test]
     fn dyn_as_static_u32_rejects_a_reactive_expression() {
-        assert_eq!(dyn_as_static_u32(&Dynamic::from(GlslExpr("iResolution.x".into()))), None);
+        assert_eq!(
+            dyn_as_static_u32(&Dynamic::from(GlslExpr("iResolution.x".into()))),
+            None
+        );
     }
 
     // --- fill_args ---
@@ -2414,7 +3179,11 @@ mod tests {
 
     #[test]
     fn pattern_fit_remaps_values_into_the_given_range() {
-        let arr: Array = vec![Dynamic::from_float(0.0), Dynamic::from_float(5.0), Dynamic::from_float(10.0)];
+        let arr: Array = vec![
+            Dynamic::from_float(0.0),
+            Dynamic::from_float(5.0),
+            Dynamic::from_float(10.0),
+        ];
         let p = Pattern::from_array(arr).fit(0.0, 1.0);
         assert_eq!(p.values, vec![0.0, 0.5, 1.0]);
     }
@@ -2444,7 +3213,10 @@ mod tests {
     fn compile_node_emits_a_plain_source_call() {
         let node = Node::source("osc", vec![Arg::Lit(60.0), Arg::Lit(0.1), Arg::Lit(0.0)]);
         let glsl = compile_node(&node).unwrap();
-        assert!(glsl.contains("fn mainImage(") || glsl.contains("void mainImage("), "{glsl}");
+        assert!(
+            glsl.contains("fn mainImage(") || glsl.contains("void mainImage("),
+            "{glsl}"
+        );
         assert!(glsl.contains("osc(st, 60.0, 0.1, 0.0)"), "{glsl}");
     }
 
@@ -2518,17 +3290,30 @@ mod tests {
 
     #[test]
     fn compile_node_rejects_a_chain_with_two_sources() {
-        let node = Node { ops: vec![
-            Op::Source { func: "osc", args: vec![] },
-            Op::Source { func: "noise", args: vec![] },
-        ] };
+        let node = Node {
+            ops: vec![
+                Op::Source {
+                    func: "osc",
+                    args: vec![],
+                },
+                Op::Source {
+                    func: "noise",
+                    args: vec![],
+                },
+            ],
+        };
         let err = compile_node(&node).unwrap_err();
         assert!(err.contains("exactly one source"), "{err}");
     }
 
     #[test]
     fn compile_node_rejects_a_chain_with_no_source() {
-        let node = Node { ops: vec![Op::Color { func: "invert", args: vec![] }] };
+        let node = Node {
+            ops: vec![Op::Color {
+                func: "invert",
+                args: vec![],
+            }],
+        };
         let err = compile_node(&node).unwrap_err();
         assert!(err.contains("must start with a source"), "{err}");
     }
@@ -2592,5 +3377,53 @@ mod tests {
     fn note_number_from_dynamic_passes_bare_numbers_through() {
         assert_eq!(note_number_from_dynamic(Dynamic::from_int(60)), 60);
         assert_eq!(note_number_from_dynamic(Dynamic::from_float(60.0)), 60);
+    }
+
+    // --- `_osc` (OSC input) ---
+
+    #[test]
+    #[cfg(feature = "osc")]
+    fn osc_get_compiles_to_an_iosc_uniform_read() {
+        let result = eval("solid(1,1,1,_osc.get(\"/hue\")).out()").unwrap();
+        let glsl = result.shaders[0].as_ref().unwrap();
+        assert!(glsl.contains("iOsc[0]"), "{glsl}");
+    }
+
+    #[test]
+    #[cfg(feature = "osc")]
+    fn osc_get_with_an_explicit_arg_index_still_reads_iosc() {
+        let result = eval("solid(1,1,1,_osc.get(\"/xyz\", 2)).out()").unwrap();
+        let glsl = result.shaders[0].as_ref().unwrap();
+        assert!(glsl.contains("iOsc["), "{glsl}");
+    }
+
+    #[test]
+    #[cfg(feature = "osc")]
+    fn each_osc_get_call_site_claims_its_own_slot() {
+        let result =
+            eval("solid(1,1,1,_osc.get(\"/a\")).out(o0); solid(1,1,1,_osc.get(\"/b\")).out(o1)")
+                .unwrap();
+        let a = result.shaders[0].as_ref().unwrap();
+        let b = result.shaders[1].as_ref().unwrap();
+        assert!(a.contains("iOsc[0]"), "{a}");
+        assert!(b.contains("iOsc[1]"), "{b}");
+    }
+
+    #[test]
+    #[cfg(feature = "osc")]
+    fn osc_start_pause_show_hide_are_accepted_without_erroring() {
+        assert!(eval("_osc.start()").is_ok());
+        assert!(eval("_osc.start(9000)").is_ok());
+        assert!(eval("_osc.pause()").is_ok());
+        assert!(eval("_osc.show()").is_ok());
+        assert!(eval("_osc.hide()").is_ok());
+    }
+
+    #[test]
+    #[cfg(feature = "osc")]
+    fn osc_get_supports_range_and_scale_chaining() {
+        let result = eval("solid(1,1,1,_osc.get(\"/hue\").range(0,1)).out()").unwrap();
+        let glsl = result.shaders[0].as_ref().unwrap();
+        assert!(glsl.contains("iOsc[0]"), "{glsl}");
     }
 }

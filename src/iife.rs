@@ -53,7 +53,13 @@ fn skip_ws(chars: &[char], mask: &[bool], j: &mut usize) {
     }
 }
 
-fn matching_close(chars: &[char], mask: &[bool], open_idx: usize, open: char, close: char) -> Option<usize> {
+fn matching_close(
+    chars: &[char],
+    mask: &[bool],
+    open_idx: usize,
+    open: char,
+    close: char,
+) -> Option<usize> {
     let mut depth = 0i32;
     let mut i = open_idx;
     while i < chars.len() {
@@ -82,7 +88,8 @@ fn match_iife(chars: &[char], mask: &[bool], i: usize) -> Option<(usize, usize, 
     }
     let mut j = i + 1;
     skip_ws(chars, mask, &mut j);
-    let body_open = match_arrow_head(chars, mask, j).or_else(|| match_function_head(chars, mask, j))?;
+    let body_open =
+        match_arrow_head(chars, mask, j).or_else(|| match_function_head(chars, mask, j))?;
     let body_close = matching_close(chars, mask, body_open, '{', '}')?;
     let body_start = body_open + 1;
     let body_end = body_close;
@@ -108,7 +115,10 @@ fn match_iife(chars: &[char], mask: &[bool], i: usize) -> Option<(usize, usize, 
         }
         k += 1;
         let word_start = k;
-        while chars.get(k).is_some_and(|c| c.is_alphanumeric() || *c == '_') {
+        while chars
+            .get(k)
+            .is_some_and(|c| c.is_alphanumeric() || *c == '_')
+        {
             k += 1;
         }
         let word: String = chars[word_start..k].iter().collect();
@@ -119,7 +129,9 @@ fn match_iife(chars: &[char], mask: &[bool], i: usize) -> Option<(usize, usize, 
         if chars.get(k) != Some(&'(') {
             break;
         }
-        let Some(close) = matching_close(chars, mask, k, '(', ')') else { break };
+        let Some(close) = matching_close(chars, mask, k, '(', ')') else {
+            break;
+        };
         j = close + 1;
     }
 
@@ -203,14 +215,20 @@ mod tests {
 
     #[test]
     fn unwraps_function_expression_iife() {
-        assert_eq!(unwrap_iife("(function() {osc(60).out()})()"), "osc(60).out()");
+        assert_eq!(
+            unwrap_iife("(function() {osc(60).out()})()"),
+            "osc(60).out()"
+        );
     }
 
     #[test]
     fn unwraps_named_function_expression_iife() {
         // an IIFE's own name (if any) is never referenced again either
         // way - only useful for the function's own stack traces.
-        assert_eq!(unwrap_iife("(function main() {osc(60).out()})()"), "osc(60).out()");
+        assert_eq!(
+            unwrap_iife("(function main() {osc(60).out()})()"),
+            "osc(60).out()"
+        );
     }
 
     #[test]

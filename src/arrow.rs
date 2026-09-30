@@ -117,7 +117,10 @@ fn skip_destructure_pattern(chars: &[char], mask: &[bool], j: usize) -> Option<u
     loop {
         skip_ws(chars, mask, &mut k);
         let start = k;
-        while chars.get(k).is_some_and(|c| c.is_alphanumeric() || *c == '_') {
+        while chars
+            .get(k)
+            .is_some_and(|c| c.is_alphanumeric() || *c == '_')
+        {
             k += 1;
         }
         if k == start {
@@ -155,7 +158,10 @@ mod tests {
 
     #[test]
     fn strips_simple_arrow() {
-        assert_eq!(strip_zero_arg_arrows("rotate(()=>time*0.1)"), "rotate(time*0.1)");
+        assert_eq!(
+            strip_zero_arg_arrows("rotate(()=>time*0.1)"),
+            "rotate(time*0.1)"
+        );
     }
 
     #[test]
@@ -184,7 +190,10 @@ mod tests {
     fn strips_arrow_with_spaces() {
         // whitespace around the removed `()=>` tokens is harmless to Rhai
         // and isn't specifically collapsed
-        assert_eq!(strip_zero_arg_arrows("rotate( () => time )"), "rotate(  time )");
+        assert_eq!(
+            strip_zero_arg_arrows("rotate( () => time )"),
+            "rotate(  time )"
+        );
     }
 
     #[test]

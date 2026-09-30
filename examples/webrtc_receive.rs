@@ -63,7 +63,10 @@ fn main() {
         let Some(frame) = mgr.poll(0) else { continue };
         count += 1;
         if count % 10 == 1 {
-            println!("received {count} frame(s) so far - latest {}x{}", frame.width, frame.height);
+            println!(
+                "received {count} frame(s) so far - latest {}x{}",
+                frame.width, frame.height
+            );
         }
         if !saved && let Some(path) = &save_path {
             match save_ppm(path, &frame) {

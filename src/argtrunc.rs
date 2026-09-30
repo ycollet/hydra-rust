@@ -146,7 +146,13 @@ fn process(chars: &[char], mask: &[bool]) -> String {
 /// brackets and strings/comments), keeps only the first `max_args` of them
 /// (each recursively re-processed, so nested calls get truncated too), and
 /// rejoins them with `,`.
-fn truncate_arg_list(chars: &[char], mask: &[bool], start: usize, end: usize, max_args: usize) -> String {
+fn truncate_arg_list(
+    chars: &[char],
+    mask: &[bool],
+    start: usize,
+    end: usize,
+    max_args: usize,
+) -> String {
     let args = split_top_level(chars, mask, start, end);
     args.into_iter()
         .take(max_args)
@@ -262,7 +268,10 @@ mod tests {
 
     #[test]
     fn does_not_split_nested_call_args() {
-        assert_eq!(truncate_extra_args("rotate(0.1,noise(4,0.1))"), "rotate(0.1,noise(4,0.1))");
+        assert_eq!(
+            truncate_extra_args("rotate(0.1,noise(4,0.1))"),
+            "rotate(0.1,noise(4,0.1))"
+        );
     }
 
     #[test]
@@ -275,12 +284,18 @@ mod tests {
 
     #[test]
     fn handles_method_chain_form() {
-        assert_eq!(truncate_extra_args("osc(60).rotate(4,0.1,0).out()"), "osc(60).rotate(4,0.1).out()");
+        assert_eq!(
+            truncate_extra_args("osc(60).rotate(4,0.1,0).out()"),
+            "osc(60).rotate(4,0.1).out()"
+        );
     }
 
     #[test]
     fn truncates_blend_other_plus_extras() {
-        assert_eq!(truncate_extra_args("osc(1).modulate(o1,0.5,9)"), "osc(1).modulate(o1,0.5)");
+        assert_eq!(
+            truncate_extra_args("osc(1).modulate(o1,0.5,9)"),
+            "osc(1).modulate(o1,0.5)"
+        );
     }
 
     #[test]
@@ -294,7 +309,10 @@ mod tests {
         // the ported hydra.js function takes no arguments - without a
         // MAX_ARGS entry this was a hard "Function not found" instead of
         // JS's usual silently-ignored extra argument.
-        assert_eq!(truncate_extra_args("src(o0).inversion(6)"), "src(o0).inversion()");
+        assert_eq!(
+            truncate_extra_args("src(o0).inversion(6)"),
+            "src(o0).inversion()"
+        );
     }
 
     #[test]

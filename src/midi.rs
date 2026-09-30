@@ -42,7 +42,11 @@ mod imp {
     use super::{NUM_MIDI_CC, NUM_MIDI_ENVELOPES, NUM_MIDI_NOTES};
 
     fn ramp_factor(elapsed: f32, duration: f32) -> f32 {
-        if duration <= 0.0 { 1.0 } else { (elapsed / duration).clamp(0.0, 1.0) }
+        if duration <= 0.0 {
+            1.0
+        } else {
+            (elapsed / duration).clamp(0.0, 1.0)
+        }
     }
 
     fn linear_ramp(factor: f32, from: f32, to: f32) -> f32 {
@@ -261,7 +265,9 @@ mod imp {
             };
             for port in probe.ports() {
                 let name = probe.port_name(&port).unwrap_or_else(|_| "unknown".into());
-                let Ok(mut input) = MidiInput::new("hydra-rust") else { continue };
+                let Ok(mut input) = MidiInput::new("hydra-rust") else {
+                    continue;
+                };
                 input.ignore(midir::Ignore::None);
                 let state = self.state.clone();
                 match input.connect(
@@ -299,7 +305,10 @@ mod imp {
                 return;
             }
             let mut state = self.state.lock().unwrap();
-            state.slots[slot] = Some(EnvelopeSlot { note, envelope: Envelope::new(a, d, s, r) });
+            state.slots[slot] = Some(EnvelopeSlot {
+                note,
+                envelope: Envelope::new(a, d, s, r),
+            });
         }
 
         pub fn poll(&mut self) -> MidiFrame {
@@ -346,7 +355,9 @@ mod imp {
     }
 
     fn handle_message(state: &Arc<Mutex<SharedState>>, message: &[u8]) {
-        let Some(&status) = message.first() else { return };
+        let Some(&status) = message.first() else {
+            return;
+        };
         let kind = status & 0xF0;
         let mut state = state.lock().unwrap();
         match kind {
@@ -365,7 +376,7 @@ mod imp {
 
     #[cfg(test)]
     mod tests {
-        use super::{handle_message, Envelope, SharedState};
+        use super::{Envelope, SharedState, handle_message};
         use std::sync::{Arc, Mutex};
 
         #[test]

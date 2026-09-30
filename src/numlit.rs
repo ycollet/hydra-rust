@@ -57,7 +57,10 @@ mod tests {
 
     #[test]
     fn leaves_method_calls_alone() {
-        assert_eq!(insert_leading_zero("osc(60).rotate(0.1)"), "osc(60).rotate(0.1)");
+        assert_eq!(
+            insert_leading_zero("osc(60).rotate(0.1)"),
+            "osc(60).rotate(0.1)"
+        );
     }
 
     #[test]
@@ -67,6 +70,9 @@ mod tests {
 
     #[test]
     fn ignores_dot_in_comments() {
-        assert_eq!(insert_leading_zero("osc(60) // see .5 above"), "osc(60) // see .5 above");
+        assert_eq!(
+            insert_leading_zero("osc(60) // see .5 above"),
+            "osc(60) // see .5 above"
+        );
     }
 }

@@ -107,7 +107,10 @@ fn reserved_key_at<'a>(chars: &[char], mask: &[bool], i: usize) -> Option<&'a st
         if chars[i..i + wlen].iter().collect::<String>() != word {
             continue;
         }
-        if chars.get(i + wlen).is_some_and(|c| c.is_alphanumeric() || *c == '_') {
+        if chars
+            .get(i + wlen)
+            .is_some_and(|c| c.is_alphanumeric() || *c == '_')
+        {
             continue;
         }
         let mut k = i + wlen;

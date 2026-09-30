@@ -73,12 +73,21 @@ pub fn rewrite_argument_position_closures(src: &str) -> String {
 fn match_arrow_header(chars: &[char], mask: &[bool], i: usize) -> Option<(Vec<String>, usize)> {
     let (names, mut j) = if chars.get(i) == Some(&'(') {
         let close = matching_close(chars, mask, i, '(', ')')?;
-        if chars[i + 1..close].iter().enumerate().any(|(k, c)| *c == '{' && !mask[i + 1 + k]) {
+        if chars[i + 1..close]
+            .iter()
+            .enumerate()
+            .any(|(k, c)| *c == '{' && !mask[i + 1 + k])
+        {
             return None; // a destructuring pattern - not handled here
         }
         let params = parse_params(chars, mask, i + 1, close);
-        (params.into_iter().map(|(n, _)| n).collect::<Vec<_>>(), close + 1)
-    } else if chars.get(i).is_some_and(|c| is_ident_start(*c)) && !preceded_by_ident_or_dot(chars, i) {
+        (
+            params.into_iter().map(|(n, _)| n).collect::<Vec<_>>(),
+            close + 1,
+        )
+    } else if chars.get(i).is_some_and(|c| is_ident_start(*c))
+        && !preceded_by_ident_or_dot(chars, i)
+    {
         let end = ident_end(chars, i);
         (vec![chars[i..end].iter().collect()], end)
     } else {
@@ -140,7 +149,10 @@ mod tests {
 
     #[test]
     fn rewrites_a_bare_single_param_callback() {
-        assert_eq!(rewrite_argument_position_closures(".fast(x=>x*2)"), ".fast(|x|x*2)");
+        assert_eq!(
+            rewrite_argument_position_closures(".fast(x=>x*2)"),
+            ".fast(|x|x*2)"
+        );
     }
 
     #[test]
@@ -154,7 +166,9 @@ mod tests {
     #[test]
     fn rewrites_a_block_bodied_multi_param_callback() {
         assert_eq!(
-            rewrite_argument_position_closures("arr.reduce((a,v,i) => { if(i<4) return 0; return a+v; })"),
+            rewrite_argument_position_closures(
+                "arr.reduce((a,v,i) => { if(i<4) return 0; return a+v; })"
+            ),
             "arr.reduce(|a,v,i| { if(i<4) return 0; return a+v; })"
         );
     }

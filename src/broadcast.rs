@@ -47,15 +47,15 @@ mod imp {
         RTCRtpCodec, RTCRtpCodingParameters, RTCRtpEncodingParameters, RtpCodecKind,
     };
     use rtc::shared::marshal::Unmarshal;
-    use webrtc::media_stream::track_local::static_rtp::TrackLocalStaticRTP;
     use webrtc::media_stream::track_local::TrackLocal;
+    use webrtc::media_stream::track_local::static_rtp::TrackLocalStaticRTP;
     use webrtc::peer_connection::{
         PeerConnection, PeerConnectionBuilder, PeerConnectionEventHandler, RTCIceGatheringState,
         RTCPeerConnectionState,
     };
-    use webrtc::runtime::{channel, AsyncUdpSocket, Runtime, Sender};
+    use webrtc::runtime::{AsyncUdpSocket, Runtime, Sender, channel};
 
-    use crate::stream::{ice_config, vp8_media_engine, VP8_CLOCK_RATE, VP8_PAYLOAD_TYPE};
+    use crate::stream::{VP8_CLOCK_RATE, VP8_PAYLOAD_TYPE, ice_config, vp8_media_engine};
 
     type FrameSlot = Mutex<Option<(u32, u32, Vec<u8>)>>;
 
@@ -137,7 +137,10 @@ mod imp {
                 .spawn(move || run_broadcast(port, frame_slot, stop_flag))
                 .expect("spawn broadcast thread");
 
-            self.state = Some(BroadcastState { stopped, latest_frame });
+            self.state = Some(BroadcastState {
+                stopped,
+                latest_frame,
+            });
         }
 
         /// Convenience wrapper around `push_captured_frame` for callers that
@@ -192,7 +195,13 @@ mod imp {
     /// function purely so this bit of indexing logic is testable without a
     /// real WebRTC track.
     fn indices_to_prune(write_results: &[Result<(), ()>]) -> Vec<usize> {
-        write_results.iter().enumerate().filter(|(_, r)| r.is_err()).map(|(i, _)| i).rev().collect()
+        write_results
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.is_err())
+            .map(|(i, _)| i)
+            .rev()
+            .collect()
     }
 
     /// Runs on its own dedicated OS thread for as long as the broadcast is
@@ -204,7 +213,9 @@ mod imp {
         };
         let runtime_for_session = runtime.clone();
         runtime.block_on(Box::pin(async move {
-            if let Err(e) = broadcast_session(port, latest_frame, stopped, runtime_for_session).await {
+            if let Err(e) =
+                broadcast_session(port, latest_frame, stopped, runtime_for_session).await
+            {
                 log::warn!("broadcastStream: session ended: {e}");
             }
         }));
@@ -216,11 +227,14 @@ mod imp {
         stopped: Arc<AtomicBool>,
         runtime: Arc<dyn Runtime>,
     ) -> Result<(), String> {
-        let listener = TcpListener::bind(("0.0.0.0", port)).map_err(|e| format!("bind {port}: {e}"))?;
+        let listener =
+            TcpListener::bind(("0.0.0.0", port)).map_err(|e| format!("bind {port}: {e}"))?;
         // Non-blocking so the accept loop below can also check `stopped`
         // periodically - a plain blocking `accept()` has no way to be
         // cancelled once nothing is connecting.
-        listener.set_nonblocking(true).map_err(|e| format!("set nonblocking: {e}"))?;
+        listener
+            .set_nonblocking(true)
+            .map_err(|e| format!("set nonblocking: {e}"))?;
         log::info!("broadcastStream: listening on 0.0.0.0:{port}");
 
         let viewers: Arc<Viewers> = Arc::new(Mutex::new(Vec::new()));
@@ -235,7 +249,9 @@ mod imp {
             .map(|a| a.port())
             .map_err(|e| e.to_string())?;
         let std_sock = UdpSocket::bind(("127.0.0.1", rtp_port)).map_err(|e| e.to_string())?;
-        let sock: Arc<dyn AsyncUdpSocket> = runtime.wrap_udp_socket(std_sock).map_err(|e| e.to_string())?;
+        let sock: Arc<dyn AsyncUdpSocket> = runtime
+            .wrap_udp_socket(std_sock)
+            .map_err(|e| e.to_string())?;
 
         // Fans ffmpeg's encoded RTP out to every currently-connected
         // viewer, pruning any whose write failed (disconnected) - runs on
@@ -247,13 +263,21 @@ mod imp {
         runtime.spawn(Box::pin(async move {
             let mut buf = vec![0u8; 1500];
             loop {
-                let Ok((n, _)) = sock.recv_from(&mut buf).await else { break };
+                let Ok((n, _)) = sock.recv_from(&mut buf).await else {
+                    break;
+                };
                 let mut bytes = BytesMut::from(&buf[..n]);
-                let Ok(mut packet) = rtc::rtp::packet::Packet::unmarshal(&mut bytes) else { continue };
+                let Ok(mut packet) = rtc::rtp::packet::Packet::unmarshal(&mut bytes) else {
+                    continue;
+                };
                 packet.header.ssrc = ssrc;
 
-                let current: Vec<Arc<TrackLocalStaticRTP>> =
-                    viewers_for_fanout.lock().unwrap().iter().map(|v| v.track.clone()).collect();
+                let current: Vec<Arc<TrackLocalStaticRTP>> = viewers_for_fanout
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.track.clone())
+                    .collect();
                 let mut results = Vec::with_capacity(current.len());
                 for track in &current {
                     results.push(track.write_rtp(packet.clone()).await.map_err(|_| ()));
@@ -280,7 +304,8 @@ mod imp {
         let runtime_for_feed = runtime.clone();
         runtime.spawn(Box::pin(async move {
             let mut current_dims: Option<(u32, u32)> = None;
-            let mut ffmpeg: Option<(ffmpeg_sidecar::child::FfmpegChild, std::process::ChildStdin)> = None;
+            let mut ffmpeg: Option<(ffmpeg_sidecar::child::FfmpegChild, std::process::ChildStdin)> =
+                None;
 
             while !stopped_for_feed.load(Ordering::Relaxed) {
                 runtime_for_feed.sleep(Duration::from_millis(20)).await;
@@ -294,7 +319,9 @@ mod imp {
                     continue;
                 }
 
-                let Some((w, h, pixels)) = latest_frame_for_feed.lock().unwrap().take() else { continue };
+                let Some((w, h, pixels)) = latest_frame_for_feed.lock().unwrap().take() else {
+                    continue;
+                };
 
                 if current_dims != Some((w, h)) {
                     if let Some((mut child, _)) = ffmpeg.take() {
@@ -393,7 +420,10 @@ mod imp {
         let config = ice_config().build();
         let (gather_complete_tx, mut gather_complete_rx) = channel::<()>(1);
         let (connected_tx, mut connected_rx) = channel::<()>(1);
-        let handler = Arc::new(Handler { gather_complete_tx, connected_tx });
+        let handler = Arc::new(Handler {
+            gather_complete_tx,
+            connected_tx,
+        });
 
         let video_codec = RTCRtpCodec {
             mime_type: rtc::peer_connection::configuration::media_engine::MIME_TYPE_VP8.to_owned(),
@@ -402,17 +432,21 @@ mod imp {
             sdp_fmtp_line: "".to_owned(),
             rtcp_feedback: vec![],
         };
-        let track: Arc<TrackLocalStaticRTP> = Arc::new(TrackLocalStaticRTP::new(MediaStreamTrack::new(
-            "hydra-rust-broadcast-stream".to_string(),
-            "hydra-rust-broadcast-video".to_string(),
-            "hydra-rust-broadcast".to_string(),
-            RtpCodecKind::Video,
-            vec![RTCRtpEncodingParameters {
-                rtp_coding_parameters: RTCRtpCodingParameters { ssrc: Some(ssrc), ..Default::default() },
-                codec: video_codec,
-                ..Default::default()
-            }],
-        )));
+        let track: Arc<TrackLocalStaticRTP> =
+            Arc::new(TrackLocalStaticRTP::new(MediaStreamTrack::new(
+                "hydra-rust-broadcast-stream".to_string(),
+                "hydra-rust-broadcast-video".to_string(),
+                "hydra-rust-broadcast".to_string(),
+                RtpCodecKind::Video,
+                vec![RTCRtpEncodingParameters {
+                    rtp_coding_parameters: RTCRtpCodingParameters {
+                        ssrc: Some(ssrc),
+                        ..Default::default()
+                    },
+                    codec: video_codec,
+                    ..Default::default()
+                }],
+            )));
 
         let peer_connection: Arc<dyn PeerConnection> = Arc::new(
             PeerConnectionBuilder::new()
@@ -432,26 +466,44 @@ mod imp {
             .await
             .map_err(|e| format!("add track: {e}"))?;
 
-        let offer = peer_connection.create_offer(None).await.map_err(|e| e.to_string())?;
-        peer_connection.set_local_description(offer).await.map_err(|e| e.to_string())?;
+        let offer = peer_connection
+            .create_offer(None)
+            .await
+            .map_err(|e| e.to_string())?;
+        peer_connection
+            .set_local_description(offer)
+            .await
+            .map_err(|e| e.to_string())?;
         let _ = gather_complete_rx.recv().await;
         let local_desc = peer_connection
             .local_description()
             .await
             .ok_or("no local description after ICE gathering")?;
-        writeln!(writer, "{}", serde_json::to_string(&local_desc).map_err(|e| e.to_string())?)
-            .map_err(|e| e.to_string())?;
+        writeln!(
+            writer,
+            "{}",
+            serde_json::to_string(&local_desc).map_err(|e| e.to_string())?
+        )
+        .map_err(|e| e.to_string())?;
 
         let mut answer_line = String::new();
-        reader.read_line(&mut answer_line).map_err(|e| e.to_string())?;
+        reader
+            .read_line(&mut answer_line)
+            .map_err(|e| e.to_string())?;
         let answer: RTCSessionDescription =
             serde_json::from_str(answer_line.trim()).map_err(|e| e.to_string())?;
-        peer_connection.set_remote_description(answer).await.map_err(|e| e.to_string())?;
+        peer_connection
+            .set_remote_description(answer)
+            .await
+            .map_err(|e| e.to_string())?;
 
         let _ = connected_rx.recv().await;
         log::info!("broadcastStream: viewer negotiated and connected");
 
-        viewers.lock().unwrap().push(Viewer { peer_connection, track });
+        viewers.lock().unwrap().push(Viewer {
+            peer_connection,
+            track,
+        });
         Ok(())
     }
 
@@ -495,7 +547,16 @@ mod imp {
         }
         command
             .codec_video("libvpx")
-            .args(["-deadline", "realtime", "-cpu-used", "4", "-b:v", "1M", "-g", &ENCODE_FPS.to_string()])
+            .args([
+                "-deadline",
+                "realtime",
+                "-cpu-used",
+                "4",
+                "-b:v",
+                "1M",
+                "-g",
+                &ENCODE_FPS.to_string(),
+            ])
             .format("rtp")
             .args(["-payload_type", &VP8_PAYLOAD_TYPE.to_string()])
             .output(format!("udp://127.0.0.1:{rtp_port}"));

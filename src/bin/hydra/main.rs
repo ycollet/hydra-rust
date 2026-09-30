@@ -82,7 +82,10 @@ mod tests {
     fn bare_positional_argument_sets_input() {
         assert_eq!(
             parse_args(s(&["some.hydra"])),
-            CliArgs { input: Some("some.hydra".into()), ..Default::default() }
+            CliArgs {
+                input: Some("some.hydra".into()),
+                ..Default::default()
+            }
         );
     }
 

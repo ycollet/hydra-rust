@@ -4,31 +4,43 @@ use std::time::Instant;
 
 use eframe::egui;
 use egui::{Color32, FontId, TextBuffer};
-#[cfg(any(feature = "webcam", feature = "image_url", feature = "video", feature = "stream"))]
-use hydra_rust::eval::SourceRequest;
-#[cfg(feature = "audio")]
-use hydra_rust::eval::AudioRequest;
-use hydra_rust::renderer::{self, RenderUniforms, ShaderRenderer};
-#[cfg(feature = "webcam")]
-use hydra_rust::source::{CameraStatus, SourceManager, NUM_SOURCES};
-#[cfg(all(any(feature = "image_url", feature = "video", feature = "stream"), not(feature = "webcam")))]
-use hydra_rust::source::NUM_SOURCES;
 #[cfg(feature = "audio")]
 use hydra_rust::audio::AudioManager;
+#[cfg(feature = "stream")]
+use hydra_rust::broadcast::{BroadcastManager, push_captured_frame};
+#[cfg(feature = "audio")]
+use hydra_rust::eval::AudioRequest;
+#[cfg(feature = "stream")]
+use hydra_rust::eval::BroadcastRequest;
+#[cfg(feature = "midi")]
+use hydra_rust::eval::MidiRequest;
+#[cfg(feature = "osc")]
+use hydra_rust::eval::OscRequest;
+#[cfg(any(
+    feature = "webcam",
+    feature = "image_url",
+    feature = "video",
+    feature = "stream"
+))]
+use hydra_rust::eval::SourceRequest;
 #[cfg(feature = "image_url")]
 use hydra_rust::imageload::ImageManager;
 #[cfg(feature = "midi")]
-use hydra_rust::eval::MidiRequest;
-#[cfg(feature = "midi")]
 use hydra_rust::midi::MidiManager;
-#[cfg(feature = "video")]
-use hydra_rust::video::VideoManager;
+#[cfg(feature = "osc")]
+use hydra_rust::osc::OscManager;
+use hydra_rust::renderer::{self, RenderUniforms, ShaderRenderer};
+#[cfg(all(
+    any(feature = "image_url", feature = "video", feature = "stream"),
+    not(feature = "webcam")
+))]
+use hydra_rust::source::NUM_SOURCES;
+#[cfg(feature = "webcam")]
+use hydra_rust::source::{CameraStatus, NUM_SOURCES, SourceManager};
 #[cfg(feature = "stream")]
 use hydra_rust::stream::StreamManager;
-#[cfg(feature = "stream")]
-use hydra_rust::broadcast::{push_captured_frame, BroadcastManager};
-#[cfg(feature = "stream")]
-use hydra_rust::eval::BroadcastRequest;
+#[cfg(feature = "video")]
+use hydra_rust::video::VideoManager;
 use serde::{Deserialize, Serialize};
 
 use crate::highlight::HydraHighlighter;
@@ -79,7 +91,9 @@ struct Bank {
 
 impl Default for Bank {
     fn default() -> Self {
-        Self { slots: empty_slots() }
+        Self {
+            slots: empty_slots(),
+        }
     }
 }
 
@@ -186,6 +200,11 @@ pub struct HydraApp {
     last_midi_velocity: [f32; hydra_rust::midi::NUM_MIDI_NOTES],
     #[cfg(feature = "midi")]
     last_midi_cc: [f32; hydra_rust::midi::NUM_MIDI_CC],
+    #[cfg(feature = "osc")]
+    osc_manager: OscManager,
+    /// Toggled by a script's `_osc.show()`/`_osc.hide()` - see `show_osc_overlay`.
+    #[cfg(feature = "osc")]
+    osc_overlay_visible: bool,
     #[cfg(feature = "video")]
     video_manager: VideoManager,
     #[cfg(feature = "stream")]
@@ -254,6 +273,10 @@ impl HydraApp {
             last_midi_velocity: [0.0; hydra_rust::midi::NUM_MIDI_NOTES],
             #[cfg(feature = "midi")]
             last_midi_cc: [0.0; hydra_rust::midi::NUM_MIDI_CC],
+            #[cfg(feature = "osc")]
+            osc_manager: OscManager::new(),
+            #[cfg(feature = "osc")]
+            osc_overlay_visible: false,
             #[cfg(feature = "video")]
             video_manager: VideoManager::new(),
             #[cfg(feature = "stream")]
@@ -315,7 +338,10 @@ impl HydraApp {
         // There's no per-slot keybinding to defer to the way `-bs` defers
         // to `Alt+X`, so this just happens immediately instead.
         if let Some(path) = slot_save {
-            let file = SlotFile { version: 1, code: app.code.clone() };
+            let file = SlotFile {
+                version: 1,
+                code: app.code.clone(),
+            };
             if let Ok(json) = serde_json::to_string_pretty(&file) {
                 let _ = std::fs::write(&path, json);
             }
@@ -370,7 +396,10 @@ impl HydraApp {
                 .save_file()
         });
         if let Some(p) = path {
-            let file = BankFile { version: 1, slots: self.banks[self.current_bank].slots.clone() };
+            let file = BankFile {
+                version: 1,
+                slots: self.banks[self.current_bank].slots.clone(),
+            };
             if let Ok(json) = serde_json::to_string_pretty(&file) {
                 let _ = std::fs::write(&p, json);
             }
@@ -380,7 +409,9 @@ impl HydraApp {
     /// Imports a `.bhr` file into the active bank, replacing its 16 slots -
     /// mirrors `load_file`.
     fn import_bank(&mut self) {
-        if let Some(p) = rfd::FileDialog::new().add_filter("Hydra Bank", &["bhr"]).pick_file()
+        if let Some(p) = rfd::FileDialog::new()
+            .add_filter("Hydra Bank", &["bhr"])
+            .pick_file()
             && let Ok(contents) = std::fs::read_to_string(&p)
             && let Ok(file) = serde_json::from_str::<BankFile>(&contents)
         {
@@ -395,7 +426,12 @@ impl HydraApp {
         };
         if self.code.is_empty() {
             let _ = renderer.compile_buffers(
-                &[Some(hydra_rust::shader::DEFAULT_SHADER.to_owned()), None, None, None],
+                &[
+                    Some(hydra_rust::shader::DEFAULT_SHADER.to_owned()),
+                    None,
+                    None,
+                    None,
+                ],
                 Default::default(),
             );
             self.error = None;
@@ -419,7 +455,12 @@ impl HydraApp {
                     Some(BroadcastRequest::Stop) => self.broadcast_manager.stop(),
                     None => {}
                 }
-                #[cfg(any(feature = "webcam", feature = "image_url", feature = "video", feature = "stream"))]
+                #[cfg(any(
+                    feature = "webcam",
+                    feature = "image_url",
+                    feature = "video",
+                    feature = "stream"
+                ))]
                 for req in &result.source_requests {
                     match req {
                         #[cfg(feature = "webcam")]
@@ -454,7 +495,10 @@ impl HydraApp {
                     // Merely having the `audio` feature compiled in must
                     // not, by itself, start capturing audio.
                     let uses_audio = !result.audio_requests.is_empty()
-                        || result.shaders.iter().any(|s| s.as_deref().is_some_and(|s| s.contains("iFft[")));
+                        || result
+                            .shaders
+                            .iter()
+                            .any(|s| s.as_deref().is_some_and(|s| s.contains("iFft[")));
                     if uses_audio {
                         self.audio_manager.ensure_started();
                     }
@@ -481,11 +525,36 @@ impl HydraApp {
                         MidiRequest::SetCcSmooth { index, factor } => {
                             self.midi_manager.set_cc_smooth(*index, *factor);
                         }
-                        MidiRequest::AdsrSlot { slot, note, a, d, s, r } => {
-                            self.midi_manager.set_adsr_slot(*slot, *note, *a, *d, *s, *r);
+                        MidiRequest::AdsrSlot {
+                            slot,
+                            note,
+                            a,
+                            d,
+                            s,
+                            r,
+                        } => {
+                            self.midi_manager
+                                .set_adsr_slot(*slot, *note, *a, *d, *s, *r);
                         }
                         MidiRequest::Show => self.midi_overlay_visible = true,
                         MidiRequest::Hide => self.midi_overlay_visible = false,
+                    }
+                }
+                #[cfg(feature = "osc")]
+                for req in &result.osc_requests {
+                    match req {
+                        OscRequest::Start(port) => self.osc_manager.ensure_started(*port),
+                        OscRequest::Pause => self.osc_manager.pause(),
+                        OscRequest::Bind {
+                            slot,
+                            address,
+                            arg_index,
+                        } => {
+                            self.osc_manager
+                                .bind_slot(*slot, address.clone(), *arg_index);
+                        }
+                        OscRequest::Show => self.osc_overlay_visible = true,
+                        OscRequest::Hide => self.osc_overlay_visible = false,
                     }
                 }
                 if compile_errors.is_empty() {
@@ -623,6 +692,11 @@ impl HydraApp {
             }
         };
 
+        #[cfg(feature = "osc")]
+        let osc_frame_values = self.osc_manager.poll().values;
+        #[cfg(not(feature = "osc"))]
+        let osc_frame_values = [0.0; hydra_rust::osc::NUM_OSC_SLOTS];
+
         // A script's broadcastStream(port) reads the just-rendered frame
         // back off the GPU, at the real window resolution (not buf_w/buf_h -
         // matches real hydra.js's own canvas.captureStream(), which
@@ -633,7 +707,9 @@ impl HydraApp {
         // the results.
         #[cfg(feature = "stream")]
         let broadcast_sink = if self.broadcast_manager.is_active()
-            && self.last_broadcast_capture.is_none_or(|t| t.elapsed() >= std::time::Duration::from_millis(40))
+            && self
+                .last_broadcast_capture
+                .is_none_or(|t| t.elapsed() >= std::time::Duration::from_millis(40))
         {
             self.last_broadcast_capture = Some(Instant::now());
             self.broadcast_manager.frame_sink()
@@ -658,6 +734,7 @@ impl HydraApp {
             midi_envelope: midi_frame.envelope,
             midi_aftertouch: midi_frame.aftertouch,
             midi_channel_aftertouch: midi_frame.channel_aftertouch,
+            osc: osc_frame_values,
         };
 
         let cb = eframe::egui_glow::CallbackFn::new(move |_info, painter| {
@@ -742,7 +819,12 @@ impl HydraApp {
                             CameraStatus::Opening { camera_index } => {
                                 ui.small(format!("s{slot}: opening cam {camera_index}..."));
                             }
-                            CameraStatus::Active { camera_name, width, height, .. } => {
+                            CameraStatus::Active {
+                                camera_name,
+                                width,
+                                height,
+                                ..
+                            } => {
                                 ui.small(format!("s{slot}: {camera_name} ({width}x{height})"));
                             }
                             CameraStatus::Error { message, .. } => {
@@ -772,8 +854,9 @@ impl HydraApp {
                         } else {
                             Color32::from_gray(90)
                         };
-                        let response = ui
-                            .add(egui::Button::new(egui::RichText::new(label).color(color)).small());
+                        let response = ui.add(
+                            egui::Button::new(egui::RichText::new(label).color(color)).small(),
+                        );
                         if response.clicked() {
                             // Mirror the Alt(+Shift)+<hex> keyboard shortcuts: a plain click
                             // recalls the slot, Shift+click saves the editor's current code
@@ -794,7 +877,12 @@ impl HydraApp {
                 ui.add_space(12.0);
                 ui.separator();
                 if let Some(ref p) = self.current_file {
-                    ui.small(p.file_name().unwrap_or_default().to_string_lossy().to_string());
+                    ui.small(
+                        p.file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .to_string(),
+                    );
                 }
                 ui.add_space(4.0);
                 ui.small("Tab — toggle this panel");
@@ -859,8 +947,10 @@ impl HydraApp {
                                 .color(Color32::from_gray(200)),
                         );
                         let n = hydra_rust::audio::NUM_FFT_BINS;
-                        let (rect, _) =
-                            ui.allocate_exact_size(egui::vec2(8.0 * n as f32 * 2.0, 40.0), egui::Sense::hover());
+                        let (rect, _) = ui.allocate_exact_size(
+                            egui::vec2(8.0 * n as f32 * 2.0, 40.0),
+                            egui::Sense::hover(),
+                        );
                         let painter = ui.painter();
                         let bar_w = rect.width() / n as f32;
                         for (i, v) in self.last_fft.iter().enumerate() {
@@ -920,8 +1010,47 @@ impl HydraApp {
             });
     }
 
+    /// A script's `_osc.show()`/`_osc.hide()` toggle this - lists every
+    /// OSC address received so far and its latest arguments, the same
+    /// "current state" snapshot treatment `show_midi_overlay` gives MIDI.
+    #[cfg(feature = "osc")]
+    fn show_osc_overlay(&self, ctx: &egui::Context) {
+        if !self.osc_overlay_visible {
+            return;
+        }
+        egui::Area::new(egui::Id::new("osc_monitor_overlay"))
+            .anchor(egui::Align2::RIGHT_BOTTOM, [-20.0, -20.0])
+            .interactable(false)
+            .show(ctx, |ui| {
+                egui::Frame::NONE
+                    .fill(Color32::from_rgba_unmultiplied(0, 0, 0, 160))
+                    .inner_margin(egui::Margin::symmetric(8, 6))
+                    .show(ui, |ui| {
+                        ui.label(
+                            egui::RichText::new("OSC")
+                                .small()
+                                .color(Color32::from_gray(200)),
+                        );
+                        let entries = self.osc_manager.snapshot();
+                        if entries.is_empty() {
+                            ui.small("(no input yet)");
+                        }
+                        for (address, args) in entries {
+                            let args_str = args
+                                .iter()
+                                .map(|v| format!("{v:.3}"))
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            ui.small(format!("{address}: [{args_str}]"));
+                        }
+                    });
+            });
+    }
+
     fn show_error_toast(&mut self, ctx: &egui::Context) {
-        let Some((msg, when)) = &self.error else { return };
+        let Some((msg, when)) = &self.error else {
+            return;
+        };
         let elapsed = when.elapsed().as_secs_f32();
         if elapsed > 5.0 {
             self.error = None;
@@ -1014,7 +1143,12 @@ impl eframe::App for HydraApp {
 
         let is_mac = ctx.os().is_mac();
         let cmd = |i: &egui::InputState, key: egui::Key| {
-            i.key_pressed(key) && if is_mac { i.modifiers.mac_cmd } else { i.modifiers.ctrl }
+            i.key_pressed(key)
+                && if is_mac {
+                    i.modifiers.mac_cmd
+                } else {
+                    i.modifiers.ctrl
+                }
         };
 
         if ctx.input(|i| cmd(i, egui::Key::Enter)) {
@@ -1029,7 +1163,11 @@ impl eframe::App for HydraApp {
         if ctx.input(|i| {
             i.key_pressed(egui::Key::H)
                 && i.modifiers.shift
-                && if is_mac { i.modifiers.mac_cmd } else { i.modifiers.ctrl }
+                && if is_mac {
+                    i.modifiers.mac_cmd
+                } else {
+                    i.modifiers.ctrl
+                }
         }) {
             self.editor_visible = !self.editor_visible;
         }
@@ -1106,6 +1244,8 @@ impl eframe::App for HydraApp {
         self.show_audio_overlay(ctx);
         #[cfg(feature = "midi")]
         self.show_midi_overlay(ctx);
+        #[cfg(feature = "osc")]
+        self.show_osc_overlay(ctx);
     }
 
     fn on_exit(&mut self, _gl: Option<&glow::Context>) {
@@ -1158,7 +1298,10 @@ mod tests {
 
     #[test]
     fn slot_file_round_trips_through_json() {
-        let file = SlotFile { version: 1, code: "osc(60).out()".to_string() };
+        let file = SlotFile {
+            version: 1,
+            code: "osc(60).out()".to_string(),
+        };
         let json = serde_json::to_string(&file).unwrap();
         let parsed: SlotFile = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.version, 1);

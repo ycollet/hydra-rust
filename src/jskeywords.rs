@@ -40,12 +40,20 @@ pub fn rewrite_keywords(src: &str) -> String {
         // valid operator... Should it be '=='?"); Rhai's `==`/`!=` already
         // compare by value+type for these dynamically-typed scripts, so
         // dropping the extra `=` is a safe, direct translation.
-        if !mask[i] && chars[i] == '=' && chars.get(i + 1) == Some(&'=') && chars.get(i + 2) == Some(&'=') {
+        if !mask[i]
+            && chars[i] == '='
+            && chars.get(i + 1) == Some(&'=')
+            && chars.get(i + 2) == Some(&'=')
+        {
             out.push_str("==");
             i += 3;
             continue;
         }
-        if !mask[i] && chars[i] == '!' && chars.get(i + 1) == Some(&'=') && chars.get(i + 2) == Some(&'=') {
+        if !mask[i]
+            && chars[i] == '!'
+            && chars.get(i + 1) == Some(&'=')
+            && chars.get(i + 2) == Some(&'=')
+        {
             out.push_str("!=");
             i += 3;
             continue;

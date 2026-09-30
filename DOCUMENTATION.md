@@ -2,7 +2,7 @@
 
 A complete, example-driven reference for every function `hydra_rust::eval()` registers —
 core functions (always available) and feature-gated ones (`webcam`, `audio`, `image_url`,
-`midi`, `video`), plus the standalone `hydra` binary's scene-bank system. Each entry lists
+`midi`, `osc`, `video`), plus the standalone `hydra` binary's scene-bank system. Each entry lists
 its parameters (with defaults) and a small runnable example.
 
 This complements [SPEC.md](SPEC.md), which documents the *language* (the JS-compatibility
@@ -31,6 +31,7 @@ directly. Most omit `.out()` where a bare terminating source/chain would implici
 - [Feature: `audio`](#feature-audio)
 - [Feature: `image_url`](#feature-image_url)
 - [Feature: `midi`](#feature-midi)
+- [Feature: `osc`](#feature-osc)
 - [Feature: `video`](#feature-video)
 - [Feature: `stream`](#feature-stream)
 - [Scene banks (standalone binary)](#scene-banks-standalone-binary)
@@ -326,6 +327,41 @@ and input devices are merged into one rather than filtered separately.
 | `midi.pause()` | Disconnects from all MIDI input devices | `midi.pause()` |
 | `midi.show()` / `.hide()` | Shows/hides an on-screen overlay listing currently-held notes (with velocity) and non-zero CC values — a "current state" snapshot rather than real hydra-midi's own scrolling raw-message log | `midi.show()` |
 | `midi.channel(n)` / `.input(n)` | Accepted, logged, ignored — channels/inputs are merged (see above) | `midi.channel(0)` |
+
+## Feature: `osc`
+
+```bash
+cargo run --features osc --bin hydra
+```
+
+A native UDP OSC listener, modeled on the [hydra-osc](https://github.com/ojack/hydra-osc)
+example (a browser/WebSocket bridge to a local UDP `osc-js` server) and atom-hydra's more
+complete [`osc-loader.js`](https://github.com/hydra-synth/atom-hydra/blob/master/lib/osc-loader.js)
+(a Node child-process UDP bridge, default port `57101` — matched here). Exposed as `_osc`
+rather than `osc`: real hydra.js's `osc(freq, sync, offset)` is already the sine-oscillator
+source function, so a bare `osc` identifier would collide with it.
+
+Real hydra-osc/atom-hydra expose an `EventEmitter`-style `_osc.on(address, callback)`, running
+an arbitrary per-message JS callback. hydra-rust scripts compile to one static GLSL expression
+per chain (the same reason MIDI's `.value(fn)` isn't implemented either — see the `midi`
+feature section above) — there's nowhere to run a per-frame Rhai closure. Instead,
+`_osc.get(address[, argIndex])` returns a reactive value read directly into a GLSL uniform,
+the same value-not-callback shape `note()`/`cc()` already use for MIDI. Each distinct
+`_osc.get(...)` call site claims one slot from a small fixed pool (32 total), assigned
+round-robin at eval time — unlike MIDI's 0-127 note/CC numbers, OSC addresses are arbitrary
+strings with no natural small index to key a uniform array on directly. OSC bundles are
+applied message-by-message, in order; their own timetags aren't specially honored.
+
+| Function | Description | Example |
+|---|---|---|
+| `_osc.get(address)` | The most recent first argument (index `0`) received at that OSC address, or `0` if none has arrived yet | `osc(60, 0.1, _osc.get("/hue")).out()` |
+| `_osc.get(address, argIndex)` | The most recent `argIndex`'th argument (0-based) received at that address | `osc().rotate(_osc.get("/xyz", 1)).out()` |
+| `.range(lo, hi)` (on `_osc.get(...)`) | Linearly remaps a value into `[lo, hi]`, same generic transform MIDI's `note`/`cc`/`aft` chains use | `osc().rotate(_osc.get("/x").range(0, 6.28)).out()` |
+| `.scale(factor)` (on `_osc.get(...)`) | Multiplies a value | `osc(1, 1, _osc.get("/x").scale(0.5)).out()` |
+| `_osc.start()` | Binds a UDP socket on the default port (`57101`) and starts listening — required before `.get()` reacts to anything. Returns `_osc` again, so `_osc.start().show()` still parses | `_osc.start()` |
+| `_osc.start(port)` | Same, on an explicit port | `_osc.start(9000)` |
+| `_osc.pause()` | Stops listening and releases the UDP socket | `_osc.pause()` |
+| `_osc.show()` / `.hide()` | Shows/hides an on-screen overlay listing every OSC address received so far and its latest arguments — a "current state" snapshot, the same treatment `midi.show()` gives its own monitor | `_osc.show()` |
 
 ## Feature: `video`
 

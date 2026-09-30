@@ -160,7 +160,9 @@ mod tests {
     #[test]
     fn splits_a_chain_that_also_includes_a_method_call() {
         assert_eq!(
-            rewrite_top_level_comma_statements("loadScript(\"a\"),canvas.setRelativeSize(1),canvas.foo()"),
+            rewrite_top_level_comma_statements(
+                "loadScript(\"a\"),canvas.setRelativeSize(1),canvas.foo()"
+            ),
             "loadScript(\"a\");canvas.setRelativeSize(1);canvas.foo()"
         );
     }

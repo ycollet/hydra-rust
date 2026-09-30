@@ -34,10 +34,7 @@ pub fn insert_missing_let(src: &str) -> String {
                 _ => {}
             }
         }
-        if !mask[i]
-            && is_ident_start(chars[i])
-            && !preceded_by_ident_or_dot(&chars, i)
-        {
+        if !mask[i] && is_ident_start(chars[i]) && !preceded_by_ident_or_dot(&chars, i) {
             let end = ident_end(&chars, i);
             let ident: String = chars[i..end].iter().collect();
 
@@ -76,7 +73,10 @@ fn preceded_by_decl_keyword(chars: &[char], ident_start: usize) -> bool {
     for kw in ["let", "const"] {
         let kw_chars: Vec<char> = kw.chars().collect();
         let len = kw_chars.len();
-        if p >= len && chars[p - len..p] == kw_chars[..] && (p == len || !is_ident_char(chars[p - len - 1])) {
+        if p >= len
+            && chars[p - len..p] == kw_chars[..]
+            && (p == len || !is_ident_char(chars[p - len - 1]))
+        {
             return true;
         }
     }
@@ -115,7 +115,10 @@ mod tests {
 
     #[test]
     fn inserts_let_on_first_assignment() {
-        assert_eq!(insert_missing_let("speed = 0.8\nosc(60).out()"), "let speed = 0.8\nosc(60).out()");
+        assert_eq!(
+            insert_missing_let("speed = 0.8\nosc(60).out()"),
+            "let speed = 0.8\nosc(60).out()"
+        );
     }
 
     #[test]

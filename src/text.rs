@@ -52,11 +52,7 @@ pub fn rasterize(text: &str) -> TextData {
                     }
                     let gx = bounds.min.x as i32 + px as i32;
                     let gy = bounds.min.y as i32 + py as i32;
-                    if gx >= 0
-                        && gx < TEX_SIZE as i32
-                        && gy >= 0
-                        && gy < TEX_SIZE as i32
-                    {
+                    if gx >= 0 && gx < TEX_SIZE as i32 && gy >= 0 && gy < TEX_SIZE as i32 {
                         let i = ((gy as u32 * TEX_SIZE + gx as u32) * 4) as usize;
                         pixels[i] = 255;
                         pixels[i + 1] = 255;
@@ -69,7 +65,11 @@ pub fn rasterize(text: &str) -> TextData {
         }
     }
 
-    TextData { pixels, width: TEX_SIZE, height: TEX_SIZE }
+    TextData {
+        pixels,
+        width: TEX_SIZE,
+        height: TEX_SIZE,
+    }
 }
 
 fn auto_scale(font: &FontArc, lines: &[&str], line_count: usize) -> PxScale {

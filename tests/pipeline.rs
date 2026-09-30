@@ -8,11 +8,13 @@
 //! declaration's own unit tests never see it interacting with
 //! `jsfunctions`); see `named_arg_call_does_not_corrupt_a_sibling_function_declaration`.
 
-use hydra_rust::{eval, RenderMode};
+use hydra_rust::{RenderMode, eval};
 
 fn ok_shader0(src: &str) -> String {
     match eval(src) {
-        Ok(r) => r.shaders[0].clone().expect("buffer 0 should have been written"),
+        Ok(r) => r.shaders[0]
+            .clone()
+            .expect("buffer 0 should have been written"),
         Err(e) => panic!("eval() failed for {src:?}: {e}"),
     }
 }
@@ -190,7 +192,8 @@ fn a_brace_less_js_if_statement_compiles() {
     // real JS routinely omits `{ }` for a short guard clause (`if (t < 1)
     // return [1, 0, 0];`) - Rhai's own `if` has no bare-statement form at
     // all ("Expecting '{' to start a statement block").
-    let src = "if (time < 1) render(o0); else if (time < 2) render(o1); else render(o2);\nosc(60).out()";
+    let src =
+        "if (time < 1) render(o0); else if (time < 2) render(o1); else render(o2);\nosc(60).out()";
     assert!(eval(src).is_ok());
 }
 
@@ -372,9 +375,8 @@ fn midi_note_and_cc_compile_to_the_expected_uniform_references() {
     // methods (.velocity()/.adsr()/.range()/.scale()/.smooth()), plus the
     // plain _note()/_cc()/_noteVelocity() forms used inside a stripped
     // `()=>` wrapper.
-    let glsl = ok_shader0(
-        "osc(60, note(\"C4\").velocity(), cc(1).range(0,1)).luma(_note(60)*0.5).out()",
-    );
+    let glsl =
+        ok_shader0("osc(60, note(\"C4\").velocity(), cc(1).range(0,1)).luma(_note(60)*0.5).out()");
     assert!(glsl.contains("iMidiVelocity[60]"), "{glsl}");
     assert!(glsl.contains("iMidiCC[1]"), "{glsl}");
     assert!(glsl.contains("iMidiNote[60]"), "{glsl}");
@@ -395,12 +397,21 @@ fn midi_aftertouch_compiles_to_the_expected_uniform_references() {
 #[cfg(feature = "midi")]
 fn midi_adsr_and_smooth_register_a_request_and_reference_their_own_slot() {
     use hydra_rust::eval::MidiRequest;
-    let result = eval("solid(1, 0, note(60).adsr(50,100,0.7,300)).diff(osc(cc(1).smooth(0.2))).out()").unwrap();
+    let result =
+        eval("solid(1, 0, note(60).adsr(50,100,0.7,300)).diff(osc(cc(1).smooth(0.2))).out()")
+            .unwrap();
     let glsl = result.shaders[0].as_ref().unwrap();
     assert!(glsl.contains("iMidiEnvelope[0]"), "{glsl}");
     assert!(glsl.contains("iMidiCCSmoothed[1]"), "{glsl}");
     assert!(
-        result.midi_requests.iter().any(|r| matches!(r, MidiRequest::AdsrSlot { slot: 0, note: 60, .. })),
+        result.midi_requests.iter().any(|r| matches!(
+            r,
+            MidiRequest::AdsrSlot {
+                slot: 0,
+                note: 60,
+                ..
+            }
+        )),
         "{:?}",
         result.midi_requests
     );
@@ -423,8 +434,18 @@ fn midi_start_requires_no_other_setup_to_evaluate() {
     // app.rs), so this is safe to run offline/in CI.
     use hydra_rust::eval::MidiRequest;
     let result = eval("midi.start().show()\nmidi.channel(0)\nosc(60).out()").unwrap();
-    assert!(result.midi_requests.iter().any(|r| matches!(r, MidiRequest::Start)));
-    assert!(result.midi_requests.iter().any(|r| matches!(r, MidiRequest::Show)));
+    assert!(
+        result
+            .midi_requests
+            .iter()
+            .any(|r| matches!(r, MidiRequest::Start))
+    );
+    assert!(
+        result
+            .midi_requests
+            .iter()
+            .any(|r| matches!(r, MidiRequest::Show))
+    );
 }
 
 #[test]
@@ -432,8 +453,18 @@ fn midi_start_requires_no_other_setup_to_evaluate() {
 fn midi_show_and_hide_queue_requests_without_touching_real_midi() {
     use hydra_rust::eval::MidiRequest;
     let result = eval("midi.hide()\nosc(60).out()").unwrap();
-    assert!(result.midi_requests.iter().any(|r| matches!(r, MidiRequest::Hide)));
-    assert!(!result.midi_requests.iter().any(|r| matches!(r, MidiRequest::Show)));
+    assert!(
+        result
+            .midi_requests
+            .iter()
+            .any(|r| matches!(r, MidiRequest::Hide))
+    );
+    assert!(
+        !result
+            .midi_requests
+            .iter()
+            .any(|r| matches!(r, MidiRequest::Show))
+    );
 }
 
 #[test]
@@ -445,10 +476,20 @@ fn audio_show_and_hide_queue_requests_without_touching_the_microphone() {
     // the same way the a.set*() setters already are.
     use hydra_rust::eval::AudioRequest;
     let result = eval("a.show()\nosc(60, 0.1, a.fft[0]).out()").unwrap();
-    assert!(result.audio_requests.iter().any(|r| matches!(r, AudioRequest::Show)));
+    assert!(
+        result
+            .audio_requests
+            .iter()
+            .any(|r| matches!(r, AudioRequest::Show))
+    );
 
     let result = eval("a.hide()\nosc(60).out()").unwrap();
-    assert!(result.audio_requests.iter().any(|r| matches!(r, AudioRequest::Hide)));
+    assert!(
+        result
+            .audio_requests
+            .iter()
+            .any(|r| matches!(r, AudioRequest::Hide))
+    );
 }
 
 #[test]
@@ -465,7 +506,11 @@ fn stroke_text_variants_alias_the_same_rendering_as_text() {
     // hydra-text.js's strokeText/fillStrokeText/strokeFillText - not a
     // faithful stroke-vs-fill render, but shouldn't hard-fail, and should
     // accept the optional config argument real sketches often pass.
-    for call in ["strokeText(\"hi\")", "fillStrokeText(\"hi\", hydraText)", "strokeFillText(\"hi\")"] {
+    for call in [
+        "strokeText(\"hi\")",
+        "fillStrokeText(\"hi\", hydraText)",
+        "strokeFillText(\"hi\")",
+    ] {
         let src = format!("solid(0,0,0,1).diff({call}).out()");
         assert!(eval(&src).is_ok(), "{call} failed");
     }
@@ -627,10 +672,16 @@ fn broadcast_stream_and_stop_broadcast_queue_requests() {
     // BroadcastManager, wired up in app.rs, well after eval() returns.
     use hydra_rust::eval::BroadcastRequest;
     let result = eval("broadcastStream(9000)\nosc(60).out()").unwrap();
-    assert!(matches!(result.broadcast_request, Some(BroadcastRequest::Start(9000))));
+    assert!(matches!(
+        result.broadcast_request,
+        Some(BroadcastRequest::Start(9000))
+    ));
 
     let result = eval("stopBroadcast()\nosc(60).out()").unwrap();
-    assert!(matches!(result.broadcast_request, Some(BroadcastRequest::Stop)));
+    assert!(matches!(
+        result.broadcast_request,
+        Some(BroadcastRequest::Stop)
+    ));
 
     // a script that calls neither leaves it None, not a leftover value from
     // some previous evaluation - PatchState is fresh every eval() call.
@@ -649,7 +700,8 @@ fn set_resolution_with_a_reactive_arg_is_treated_as_no_override() {
     // window.innerWidth/innerHeight compile to a reactive GLSL expression,
     // not a plain number - there's no per-frame callback to re-evaluate it
     // against, so this must NOT be mistaken for a real (0, 0) override.
-    let result = eval("setResolution(window.innerWidth, window.innerHeight)\nosc(60).out()").unwrap();
+    let result =
+        eval("setResolution(window.innerWidth, window.innerHeight)\nosc(60).out()").unwrap();
     assert!(result.render_resolution.is_none());
 }
 

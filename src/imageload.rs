@@ -14,7 +14,7 @@ mod imp {
     use std::thread;
     use std::time::{Duration, Instant};
 
-    use crate::source::{SourceFrame, NUM_SOURCES};
+    use crate::source::{NUM_SOURCES, SourceFrame};
 
     enum DecodedMedia {
         Static(SourceFrame),
@@ -49,12 +49,14 @@ mod imp {
             self.animated[slot] = None;
             thread::Builder::new()
                 .name(format!("hydra-image-{slot}"))
-                .spawn(move || match fetch_bytes(&url).and_then(|b| decode_static(&b)) {
-                    Ok(frame) => {
-                        let _ = tx.send(DecodedMedia::Static(frame));
-                    }
-                    Err(e) => log::warn!("initImage: failed to load {url:?}: {e}"),
-                })
+                .spawn(
+                    move || match fetch_bytes(&url).and_then(|b| decode_static(&b)) {
+                        Ok(frame) => {
+                            let _ = tx.send(DecodedMedia::Static(frame));
+                        }
+                        Err(e) => log::warn!("initImage: failed to load {url:?}: {e}"),
+                    },
+                )
                 .expect("spawn image-load thread");
         }
 
@@ -67,12 +69,14 @@ mod imp {
             self.animated[slot] = None;
             thread::Builder::new()
                 .name(format!("hydra-gif-{slot}"))
-                .spawn(move || match fetch_bytes(&url).and_then(|b| decode_gif_frames(&b)) {
-                    Ok(frames) => {
-                        let _ = tx.send(DecodedMedia::Animated(frames));
-                    }
-                    Err(e) => log::warn!("initGif: failed to load {url:?}: {e}"),
-                })
+                .spawn(
+                    move || match fetch_bytes(&url).and_then(|b| decode_gif_frames(&b)) {
+                        Ok(frames) => {
+                            let _ = tx.send(DecodedMedia::Animated(frames));
+                        }
+                        Err(e) => log::warn!("initGif: failed to load {url:?}: {e}"),
+                    },
+                )
                 .expect("spawn gif-load thread");
         }
 
@@ -123,7 +127,11 @@ mod imp {
     /// `frames`, total `total_duration_ms`) should be showing at
     /// `elapsed_ms` since it started - wrapping around once the whole
     /// animation has looped.
-    fn frame_index_at(elapsed_ms: u32, total_duration_ms: u32, frames: &[(SourceFrame, u32)]) -> usize {
+    fn frame_index_at(
+        elapsed_ms: u32,
+        total_duration_ms: u32,
+        frames: &[(SourceFrame, u32)],
+    ) -> usize {
         let position = elapsed_ms % total_duration_ms;
         let mut acc = 0u32;
         for (i, (_, delay)) in frames.iter().enumerate() {
@@ -140,15 +148,19 @@ mod imp {
             .map_err(|e| format!("decode error: {e}"))?
             .into_rgb8();
         let (width, height) = img.dimensions();
-        Ok(SourceFrame { pixels: img.into_raw(), width, height })
+        Ok(SourceFrame {
+            pixels: img.into_raw(),
+            width,
+            height,
+        })
     }
 
     fn decode_gif_frames(bytes: &[u8]) -> Result<Vec<(SourceFrame, u32)>, String> {
-        use image::codecs::gif::GifDecoder;
         use image::AnimationDecoder;
+        use image::codecs::gif::GifDecoder;
 
-        let decoder =
-            GifDecoder::new(std::io::Cursor::new(bytes)).map_err(|e| format!("gif decode error: {e}"))?;
+        let decoder = GifDecoder::new(std::io::Cursor::new(bytes))
+            .map_err(|e| format!("gif decode error: {e}"))?;
         let frames = decoder
             .into_frames()
             .collect_frames()
@@ -165,7 +177,14 @@ mod imp {
                 let delay_ms = Duration::from(f.delay()).as_millis().max(1) as u32;
                 let rgb = image::DynamicImage::ImageRgba8(f.into_buffer()).into_rgb8();
                 let (width, height) = rgb.dimensions();
-                (SourceFrame { pixels: rgb.into_raw(), width, height }, delay_ms)
+                (
+                    SourceFrame {
+                        pixels: rgb.into_raw(),
+                        width,
+                        height,
+                    },
+                    delay_ms,
+                )
             })
             .collect())
     }
@@ -187,7 +206,11 @@ mod imp {
         use super::*;
 
         fn solid_frame(w: u32, h: u32, v: u8) -> SourceFrame {
-            SourceFrame { pixels: vec![v; (w * h * 3) as usize], width: w, height: h }
+            SourceFrame {
+                pixels: vec![v; (w * h * 3) as usize],
+                width: w,
+                height: h,
+            }
         }
 
         #[test]
@@ -198,7 +221,10 @@ mod imp {
             }
             let mut png_bytes = Vec::new();
             image::DynamicImage::ImageRgb8(img.clone())
-                .write_to(&mut std::io::Cursor::new(&mut png_bytes), image::ImageFormat::Png)
+                .write_to(
+                    &mut std::io::Cursor::new(&mut png_bytes),
+                    image::ImageFormat::Png,
+                )
                 .unwrap();
 
             let frame = decode_static(&png_bytes).unwrap();
@@ -228,8 +254,11 @@ mod imp {
 
         #[test]
         fn frame_index_at_picks_the_frame_covering_the_elapsed_time() {
-            let frames =
-                vec![(solid_frame(1, 1, 0), 100), (solid_frame(1, 1, 1), 100), (solid_frame(1, 1, 2), 100)];
+            let frames = vec![
+                (solid_frame(1, 1, 0), 100),
+                (solid_frame(1, 1, 1), 100),
+                (solid_frame(1, 1, 2), 100),
+            ];
             assert_eq!(frame_index_at(0, 300, &frames), 0);
             assert_eq!(frame_index_at(99, 300, &frames), 0);
             assert_eq!(frame_index_at(100, 300, &frames), 1);
@@ -261,7 +290,9 @@ mod imp {
                         img,
                         0,
                         0,
-                        image::Delay::from_saturating_duration(std::time::Duration::from_millis(10)),
+                        image::Delay::from_saturating_duration(std::time::Duration::from_millis(
+                            10,
+                        )),
                     );
                     encoder.encode_frame(frame).unwrap();
                 }

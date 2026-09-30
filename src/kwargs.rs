@@ -230,7 +230,10 @@ mod tests {
     fn strips_single_named_arg() {
         // like argtrunc, rejoining arguments doesn't preserve original
         // inter-argument whitespace - harmless, Rhai doesn't care.
-        assert_eq!(strip_named_args("noise(scale=153.413, offset=0.165)"), "noise(153.413,0.165)");
+        assert_eq!(
+            strip_named_args("noise(scale=153.413, offset=0.165)"),
+            "noise(153.413,0.165)"
+        );
     }
 
     #[test]
