@@ -260,10 +260,21 @@ mod imp {
                 match result {
                     Ok(Ok(buf)) => match buf.decode_image::<RgbFormat>() {
                         Ok(img) => {
+                            let width = img.width();
+                            let height = img.height();
+                            let mut pixels = img.into_raw();
+                            // nokhwa's AVFoundation (macOS) backend hands back frames in
+                            // the opposite row order from its V4L2 (Linux) backend - the
+                            // downstream shader's source-sampling Y-flip (eval.rs,
+                            // `1.0 - st.y`) was tuned against the latter, so on macOS it
+                            // ends up double-flipping instead of cancelling out. Flip the
+                            // raw rows here so both platforms feed the same convention.
+                            #[cfg(target_os = "macos")]
+                            flip_rows_vertically(&mut pixels, width, height, 3);
                             let frame = SourceFrame {
-                                width: img.width(),
-                                height: img.height(),
-                                pixels: img.into_raw(),
+                                width,
+                                height,
+                                pixels,
                             };
                             match message_tx.try_send(SlotMessage::Frame(frame)) {
                                 Ok(()) | Err(TrySendError::Full(_)) => {}
@@ -301,6 +312,22 @@ mod imp {
             let _ = cam.stop_stream();
         }
         log::info!("slot {slot} thread exited");
+    }
+
+    /// Reverses row order in-place for a tightly-packed `width x height` image
+    /// buffer with `channels` bytes per pixel (no padding/stride).
+    #[cfg(target_os = "macos")]
+    fn flip_rows_vertically(pixels: &mut [u8], width: u32, height: u32, channels: u32) {
+        let row_bytes = (width * channels) as usize;
+        let (mut top, mut bottom) = (0usize, height.saturating_sub(1) as usize);
+        while top < bottom {
+            let (top_start, bottom_start) = (top * row_bytes, bottom * row_bytes);
+            let (head, tail) = pixels.split_at_mut(bottom_start);
+            head[top_start..top_start + row_bytes]
+                .swap_with_slice(&mut tail[..row_bytes]);
+            top += 1;
+            bottom -= 1;
+        }
     }
 
     fn try_open(
