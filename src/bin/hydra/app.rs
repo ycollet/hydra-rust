@@ -169,6 +169,11 @@ pub struct HydraApp {
     /// with no confirmation beyond the OS's one-time, blanket camera
     /// permission. Cleared the first time the user explicitly evaluates.
     pending_confirmation: bool,
+    /// Set by `Ctrl`/`Cmd`+`P`; consumed (and cleared) by the very next
+    /// `paint_background` render-callback invocation, which reads back
+    /// exactly what was just drawn to the window - before any UI layer
+    /// (sidebar, code editor) is painted on top - and saves it as a PNG.
+    pending_screenshot: bool,
     banks: Vec<Bank>,
     current_bank: usize,
     /// The last slot recalled or saved to, for the sidebar's highlight -
@@ -256,6 +261,7 @@ impl HydraApp {
             sidebar_open: false,
             current_file: session.current_file,
             pending_confirmation: false,
+            pending_screenshot: false,
             banks: session.banks,
             current_bank: session.current_bank,
             active_slot: None,
@@ -754,6 +760,8 @@ impl HydraApp {
             None
         };
 
+        let take_screenshot = std::mem::take(&mut self.pending_screenshot);
+
         let snap = renderer.snapshot();
         let ping = renderer.ping().clone();
         let uniforms = RenderUniforms {
@@ -797,6 +805,27 @@ impl HydraApp {
                     );
                 }
                 push_captured_frame(sink, res_w, res_h, &buf);
+            }
+            if take_screenshot {
+                // Same reasoning as the broadcast readback above: this runs
+                // on the background layer, before the sidebar/editor UI
+                // layers are painted, so the capture is the bare render -
+                // no menu/overlay in it.
+                use glow::HasContext;
+                let gl = painter.gl();
+                let mut buf = vec![0u8; (res_w * res_h * 3) as usize];
+                unsafe {
+                    gl.read_pixels(
+                        0,
+                        0,
+                        res_w as i32,
+                        res_h as i32,
+                        glow::RGB,
+                        glow::UNSIGNED_BYTE,
+                        glow::PixelPackData::Slice(Some(&mut buf)),
+                    );
+                }
+                save_screenshot(res_w, res_h, &buf);
             }
         });
 
@@ -928,6 +957,7 @@ impl HydraApp {
                 ui.small("Ctrl+Shift+H — toggle editor");
                 ui.small("Ctrl+S — save");
                 ui.small("Ctrl+O — open");
+                ui.small("Ctrl+P — screenshot");
                 ui.small("Alt+0-9/A-F — recall slot");
                 ui.small("Alt+Shift+0-9/A-F — save slot");
                 ui.small("Alt+←/→ — cycle bank");
@@ -1222,6 +1252,63 @@ impl HydraApp {
     }
 }
 
+/// Converts a packed bottom-up `RGB8` framebuffer readback (OpenGL's
+/// `read_pixels` convention: row 0 is the bottom of the image) into a
+/// top-down PNG file named `hydra_screenshot_DD_MM_YYYY.png` in the current
+/// directory - adding a numeric suffix (`_1`, `_2`, ...) if that name is
+/// already taken (e.g. a second screenshot on the same day).
+fn save_screenshot(width: u32, height: u32, bottom_up_rgb: &[u8]) {
+    let row_bytes = (width * 3) as usize;
+    let mut pixels = vec![0u8; bottom_up_rgb.len()];
+    for y in 0..height as usize {
+        let src = &bottom_up_rgb[y * row_bytes..(y + 1) * row_bytes];
+        let dst_row = height as usize - 1 - y;
+        pixels[dst_row * row_bytes..(dst_row + 1) * row_bytes].copy_from_slice(src);
+    }
+
+    let (year, month, day) = civil_date_today();
+    let base = format!("hydra_screenshot_{day:02}_{month:02}_{year:04}");
+    let mut path = PathBuf::from(format!("{base}.png"));
+    let mut suffix = 1;
+    while path.exists() {
+        path = PathBuf::from(format!("{base}_{suffix}.png"));
+        suffix += 1;
+    }
+
+    match image::save_buffer(&path, &pixels, width, height, image::ColorType::Rgb8) {
+        Ok(()) => log::info!("saved screenshot to {}", path.display()),
+        Err(e) => log::error!("failed to save screenshot {}: {e}", path.display()),
+    }
+}
+
+/// Today's UTC calendar date as `(year, month, day)`, computed from scratch
+/// (Howard Hinnant's `civil_from_days` algorithm) to avoid pulling in a
+/// date/time crate for just a screenshot filename.
+fn civil_date_today() -> (i64, u32, u32) {
+    let days_since_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64 / 86_400)
+        .unwrap_or(0);
+    civil_from_days(days_since_epoch)
+}
+
+/// Howard Hinnant's `civil_from_days`: days since the 1970-01-01 Unix epoch
+/// (negative for earlier dates) to a proleptic-Gregorian `(year, month,
+/// day)`.
+fn civil_from_days(days_since_epoch: i64) -> (i64, u32, u32) {
+    let z = days_since_epoch + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = (z - era * 146_097) as u64; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // [0, 399]
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32; // [1, 12]
+    let year = if month <= 2 { y + 1 } else { y };
+    (year, month, day)
+}
+
 impl eframe::App for HydraApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.paint_background(ctx);
@@ -1267,6 +1354,9 @@ impl eframe::App for HydraApp {
         }
         if ctx.input(|i| cmd(i, egui::Key::O)) {
             self.load_file();
+        }
+        if ctx.input(|i| cmd(i, egui::Key::P)) {
+            self.pending_screenshot = true;
         }
         if ctx.input(|i| {
             i.key_pressed(egui::Key::H)
@@ -1379,6 +1469,14 @@ fn wrap_bank_index(current: usize, delta: i32, n: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn civil_from_days_matches_known_dates() {
+        assert_eq!(civil_from_days(0), (1970, 1, 1));
+        assert_eq!(civil_from_days(-1), (1969, 12, 31));
+        assert_eq!(civil_from_days(11_016), (2000, 2, 29));
+        assert_eq!(civil_from_days(20_734), (2026, 10, 8));
+    }
 
     #[test]
     fn wrap_bank_index_moves_forward_and_back() {

@@ -19,7 +19,7 @@ regex = "1"
 rfd = "0.15"
 cpal = { version = "0.15", optional = true }
 rustfft = { version = "6", optional = true }
-image = { version = "0.25", optional = true, default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 ureq = { version = "2", optional = true, features = ["tls"] }
 midir = { version = "0.10", optional = true }
 rosc = { version = "0.11", optional = true }
@@ -51,7 +51,7 @@ async-trait = { version = "0.1", optional = true }
 [features]
 webcam = ["dep:nokhwa"]
 audio = ["dep:cpal", "dep:rustfft"]
-image_url = ["dep:image", "dep:ureq"]
+image_url = ["dep:ureq"]
 midi = ["dep:midir"]
 osc = ["dep:rosc"]
 video = ["dep:ffmpeg-sidecar"]
