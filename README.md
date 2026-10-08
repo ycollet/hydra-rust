@@ -44,11 +44,20 @@ See [SPEC.md](SPEC.md) for the full language specification (reactive values, fun
 ## Build
 
 ```bash
-cargo build          # library only
+cargo build          # library + standalone binary (gui feature is on by default)
 cargo run            # standalone binary
 cargo test           # tests
 cargo clippy         # lint
 ```
+
+To embed `hydra-rust` as a library in another project (e.g. a host app driving its own `glow::Context`/window), depend on it with the default `gui` feature turned off — this skips `eframe`/`rfd` and the whole windowing stack (egui, egui_glow, winit, arboard, ...) they pull in, which the library's own `eval`/`renderer`/manager modules never need:
+
+```toml
+[dependencies]
+hydra-rust = { path = "...", default-features = false, features = ["audio", "webcam"] } # pick whichever device features you need
+```
+
+`ShaderRenderer::new` only requires an `Arc<glow::Context>`, so a host can render into its own window/surface without pulling in the `hydra` binary's UI at all.
 
 ## Keyboard shortcuts
 
@@ -333,7 +342,7 @@ Built-in globals available as GLSL expressions: `time`, `beat`, `tempo`, `phase`
 
 ## Used in Sova
 
-hydra-rust is the visual engine of [Sova](https://github.com/Bubobubobubobubo/Sova), a polyglot live coding sequencer for music and visuals. In Sova, hydra shaders sync to the musical clock via `beat`, `tempo`, and `phase`, and can be shared across peers in multiplayer sessions.
+hydra-rust is the visual engine of [Sova](https://github.com/Bubobubobubobubo/Sova), a polyglot live coding sequencer for music and visuals. In Sova, hydra shaders sync to the musical clock via `beat`, `tempo`, and `phase`, and can be shared across peers in multiplayer sessions. A host like Sova can depend on `hydra-rust` with `default-features = false` (see [Build](#build)) to use `eval`/`ShaderRenderer` directly inside its own window, without the standalone app's `eframe`-based UI.
 
 ## Differences from browser Hydra
 

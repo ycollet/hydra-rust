@@ -11,12 +11,19 @@ glow = "0.16"
 ab_glyph = "0.2"
 nokhwa = { version = "0.10", features = ["input-native"], optional = true }
 log = "0.4"
-eframe = "0.33.3"
+# `eframe`/`rfd` are only used by the `hydra` binary (the desktop app's
+# window/editor UI and native file dialogs) - never by the library's own
+# `eval`/`renderer`/manager modules. Keeping them optional behind the `gui`
+# feature lets downstream crates (e.g. an embedding host like Sova) depend
+# on `hydra-rust` as a plain library (`default-features = false`) without
+# pulling in egui/egui_glow/winit/arboard/webbrowser and the rest of the
+# windowing stack.
+eframe = { version = "0.33.3", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 env_logger = "0.11"
 regex = "1"
-rfd = "0.15"
+rfd = { version = "0.15", optional = true }
 cpal = { version = "0.15", optional = true }
 rustfft = { version = "6", optional = true }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
@@ -49,6 +56,11 @@ bytes = { version = "1", optional = true }
 async-trait = { version = "0.1", optional = true }
 
 [features]
+# Enabled by default so plain `cargo build`/`cargo run` keeps building the
+# `hydra` desktop app unchanged. Library-only consumers should depend with
+# `default-features = false` to skip the windowing stack entirely.
+default = ["gui"]
+gui = ["dep:eframe", "dep:rfd"]
 webcam = ["dep:nokhwa"]
 audio = ["dep:cpal", "dep:rustfft"]
 image_url = ["dep:ureq"]
@@ -69,3 +81,4 @@ lto = "thin"
 [[bin]]
 name = "hydra"
 path = "src/bin/hydra/main.rs"
+required-features = ["gui"]
