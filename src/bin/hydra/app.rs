@@ -462,6 +462,40 @@ impl HydraApp {
         }
     }
 
+    /// Toggles `//` line comments on the editor's current selection -
+    /// `Ctrl`/`Cmd`+`/` - the same way most code editors do. A partial
+    /// selection is expanded out to cover every line it touches first;
+    /// with no selection at all, only the cursor's current line is
+    /// toggled. If every non-blank touched line is already commented,
+    /// removes one leading `//` (plus one following space, if present)
+    /// from each; otherwise adds `// ` to each (blank lines are left
+    /// alone either way, so toggling twice is always a no-op on them).
+    fn toggle_comment_selection(&mut self, ctx: &egui::Context) {
+        let id = egui::Id::new(CODE_EDITOR_ID);
+        let n = self.code.chars().count();
+
+        let range = egui::TextEdit::load_state(ctx, id).and_then(|s| s.cursor.char_range());
+        let (lo, hi) = match range {
+            Some(r) => (
+                r.primary.index.min(r.secondary.index),
+                r.primary.index.max(r.secondary.index),
+            ),
+            None => (0, 0),
+        };
+        let lo = lo.min(n);
+        let hi = hi.min(n);
+
+        let (new_code, new_lo, new_hi) = toggle_line_comments(&self.code, lo, hi);
+        self.code = new_code;
+
+        let mut state = egui::TextEdit::load_state(ctx, id).unwrap_or_default();
+        state.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+            egui::text::CCursor::new(new_lo),
+            egui::text::CCursor::new(new_hi),
+        )));
+        state.store(ctx, id);
+    }
+
     fn evaluate_code(&mut self, code: &str) {
         self.pending_confirmation = false;
         let Some(renderer) = &mut self.renderer else {
@@ -958,6 +992,7 @@ impl HydraApp {
                 ui.small("Ctrl+S — save");
                 ui.small("Ctrl+O — open");
                 ui.small("Ctrl+P — screenshot");
+                ui.small("Ctrl+/ — toggle comment");
                 ui.small("Alt+0-9/A-F — recall slot");
                 ui.small("Alt+Shift+0-9/A-F — save slot");
                 ui.small("Alt+←/→ — cycle bank");
@@ -1358,6 +1393,9 @@ impl eframe::App for HydraApp {
         if ctx.input(|i| cmd(i, egui::Key::P)) {
             self.pending_screenshot = true;
         }
+        if ctx.input(|i| cmd(i, egui::Key::Slash)) {
+            self.toggle_comment_selection(ctx);
+        }
         if ctx.input(|i| {
             i.key_pressed(egui::Key::H)
                 && i.modifiers.shift
@@ -1466,6 +1504,99 @@ fn wrap_bank_index(current: usize, delta: i32, n: usize) -> usize {
     (current as i32 + delta).rem_euclid(n as i32) as usize
 }
 
+/// Toggles `//` line comments on every line a `[lo, hi)` char-index
+/// selection touches (expanding a partial selection out to whole lines
+/// first), returning the new source text plus an updated `(lo, hi)`
+/// char-index range covering the touched lines in the new text - pulled
+/// out of `toggle_comment_selection` as a plain, egui-free function so it
+/// can be unit tested directly. See that method's doc comment for the
+/// exact behavior (blank-line handling, un/comment detection, etc).
+fn toggle_line_comments(code: &str, lo: usize, hi: usize) -> (String, usize, usize) {
+    let chars: Vec<char> = code.chars().collect();
+    let n = chars.len();
+    let lo = lo.min(n);
+    let hi = hi.min(n);
+
+    // Char-index (start, end) span of each line, `end` excluding the
+    // line's own trailing `\n`.
+    let mut lines: Vec<(usize, usize)> = Vec::new();
+    let mut start = 0;
+    for (i, &c) in chars.iter().enumerate() {
+        if c == '\n' {
+            lines.push((start, i));
+            start = i + 1;
+        }
+    }
+    lines.push((start, n));
+
+    let line_at = |pos: usize| -> usize {
+        lines
+            .iter()
+            .position(|&(_, e)| pos <= e)
+            .unwrap_or(lines.len() - 1)
+    };
+    let first_line = line_at(lo);
+    let mut last_line = line_at(hi);
+    // A selection ending exactly at the start of a later line (e.g.
+    // a whole-line selection via Shift+Down) doesn't drag that line
+    // in too - matches how other editors treat this boundary.
+    if hi > lo && last_line > first_line && hi == lines[last_line].0 {
+        last_line -= 1;
+    }
+
+    let is_blank = |(s, e): (usize, usize)| chars[s..e].iter().all(|c| c.is_whitespace());
+    let is_commented = |(s, e): (usize, usize)| {
+        let indent = chars[s..e].iter().take_while(|c| c.is_whitespace()).count();
+        chars[s + indent..e].iter().collect::<String>().starts_with("//")
+    };
+    let all_commented = (first_line..=last_line)
+        .map(|i| lines[i])
+        .all(|span| is_blank(span) || is_commented(span));
+
+    let mut out = String::with_capacity(code.len() + 8);
+    let mut out_len = 0usize;
+    let mut new_lo = 0usize;
+    let mut new_hi = 0usize;
+
+    for (i, &(s, e)) in lines.iter().enumerate() {
+        if i == first_line {
+            new_lo = out_len;
+        }
+        let span_chars = &chars[s..e];
+        if (first_line..=last_line).contains(&i) && !is_blank((s, e)) {
+            let indent = span_chars.iter().take_while(|c| c.is_whitespace()).count();
+            let (pre, rest) = span_chars.split_at(indent);
+            out.extend(pre.iter());
+            out_len += pre.len();
+            let rest_str: String = rest.iter().collect();
+            if all_commented {
+                let stripped = rest_str
+                    .strip_prefix("// ")
+                    .or_else(|| rest_str.strip_prefix("//"))
+                    .unwrap_or(&rest_str);
+                out.push_str(stripped);
+                out_len += stripped.chars().count();
+            } else {
+                out.push_str("// ");
+                out.push_str(&rest_str);
+                out_len += 3 + rest_str.chars().count();
+            }
+        } else {
+            out.extend(span_chars.iter());
+            out_len += span_chars.len();
+        }
+        if i == last_line {
+            new_hi = out_len;
+        }
+        if i + 1 < lines.len() {
+            out.push('\n');
+            out_len += 1;
+        }
+    }
+
+    (out, new_lo, new_hi)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1488,6 +1619,62 @@ mod tests {
     fn wrap_bank_index_wraps_at_both_ends() {
         assert_eq!(wrap_bank_index(0, -1, 4), 3);
         assert_eq!(wrap_bank_index(3, 1, 4), 0);
+    }
+
+    #[test]
+    fn toggle_line_comments_comments_a_single_selected_line() {
+        let code = "osc(10).out()";
+        let (new_code, lo, hi) = toggle_line_comments(code, 0, code.chars().count());
+        assert_eq!(new_code, "// osc(10).out()");
+        assert_eq!(&new_code[lo..hi], "// osc(10).out()");
+    }
+
+    #[test]
+    fn toggle_line_comments_uncomments_when_already_commented() {
+        let code = "// osc(10).out()";
+        let (new_code, _, _) = toggle_line_comments(code, 0, code.chars().count());
+        assert_eq!(new_code, "osc(10).out()");
+    }
+
+    #[test]
+    fn toggle_line_comments_round_trips() {
+        let code = "osc(10).out()";
+        let (commented, lo, hi) = toggle_line_comments(code, 0, code.len());
+        let (back, _, _) = toggle_line_comments(&commented, lo, hi);
+        assert_eq!(back, code);
+    }
+
+    #[test]
+    fn toggle_line_comments_covers_every_touched_line_from_a_partial_selection() {
+        let code = "osc(10)\n  .out()\nrender()";
+        // Selection only spans into the first two lines' content.
+        let lo = 2; // inside "osc(10)"
+        let hi = 10; // inside "  .out()"
+        let (new_code, _, _) = toggle_line_comments(code, lo, hi);
+        assert_eq!(new_code, "// osc(10)\n  // .out()\nrender()");
+    }
+
+    #[test]
+    fn toggle_line_comments_leaves_blank_lines_alone() {
+        let code = "osc(10)\n\n.out()";
+        let (new_code, _, _) = toggle_line_comments(code, 0, code.chars().count());
+        assert_eq!(new_code, "// osc(10)\n\n// .out()");
+    }
+
+    #[test]
+    fn toggle_line_comments_with_no_selection_toggles_the_cursor_line_only() {
+        let code = "osc(10)\n.out()";
+        let (new_code, _, _) = toggle_line_comments(code, 3, 3);
+        assert_eq!(new_code, "// osc(10)\n.out()");
+    }
+
+    #[test]
+    fn toggle_line_comments_preserves_indentation() {
+        let code = "  osc(10).out()";
+        let (new_code, _, _) = toggle_line_comments(code, 0, code.chars().count());
+        assert_eq!(new_code, "  // osc(10).out()");
+        let (back, _, _) = toggle_line_comments(&new_code, 0, new_code.chars().count());
+        assert_eq!(back, code);
     }
 
     #[test]

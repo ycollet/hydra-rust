@@ -59,6 +59,7 @@ cargo clippy         # lint
 | `Ctrl/Cmd + S` | Save the current sketch to a `.hydra` file |
 | `Ctrl/Cmd + O` | Open a `.hydra` file |
 | `Ctrl/Cmd + P` | Save a screenshot of the current render (no sidebar/editor) as `hydra_screenshot_DD_MM_YYYY.png` in the current directory |
+| `Ctrl/Cmd + /` | Toggle `//` line comments on the selected lines (or the cursor's current line, with no selection) |
 | `Ctrl/Cmd + Shift + H` | Toggle editor visibility (hide the code overlay, keep the visuals running) |
 | `Tab` | Toggle the options sidebar — tempo/font/text-opacity, camera status, and the scene-bank grid (see below) |
 | `Alt/⌥ + 0`-`9` / `A`-`F` | Recall slot `0`-`F` (hex) in the active bank — loads and immediately evaluates its saved code |
