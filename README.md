@@ -55,6 +55,7 @@ cargo clippy         # lint
 | Shortcut | Action |
 |----------|--------|
 | `Ctrl/Cmd + Enter` | Evaluate the current sketch |
+| `Ctrl/Cmd + Shift + Enter` | Evaluate only the selected text in the editor (falls back to the whole sketch if there's no selection) |
 | `Ctrl/Cmd + S` | Save the current sketch to a `.hydra` file |
 | `Ctrl/Cmd + O` | Open a `.hydra` file |
 | `Ctrl/Cmd + Shift + H` | Toggle editor visibility (hide the code overlay, keep the visuals running) |

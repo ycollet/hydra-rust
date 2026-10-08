@@ -142,6 +142,12 @@ impl Session {
     }
 }
 
+/// Stable `egui::Id` salt for the code editor's `TextEdit`, so its cursor/
+/// selection state can be looked up on demand (for `Ctrl`/`Cmd`+`Shift`+
+/// `Enter`'s "evaluate selection") without threading an `Id` through the
+/// struct.
+const CODE_EDITOR_ID: &str = "hydra_code_editor";
+
 pub struct HydraApp {
     code: String,
     renderer: Option<ShaderRenderer>,
@@ -420,11 +426,42 @@ impl HydraApp {
     }
 
     fn evaluate(&mut self) {
+        let code = self.code.clone();
+        self.evaluate_code(&code);
+    }
+
+    /// Evaluates the editor's current text selection instead of the whole
+    /// script - `Ctrl`/`Cmd`+`Shift`+`Enter`. Falls back to a full
+    /// `evaluate()` when there's no selection (or it's empty/whitespace),
+    /// since there's nothing sensible to run otherwise.
+    fn evaluate_selection(&mut self, ctx: &egui::Context) {
+        let selected = egui::TextEdit::load_state(ctx, egui::Id::new(CODE_EDITOR_ID))
+            .and_then(|state| state.cursor.char_range())
+            .and_then(|range| {
+                let (lo, hi) = (
+                    range.primary.index.min(range.secondary.index),
+                    range.primary.index.max(range.secondary.index),
+                );
+                if lo == hi {
+                    None
+                } else {
+                    self.code.chars().take(hi).skip(lo).collect::<String>().into()
+                }
+            })
+            .filter(|s: &String| !s.trim().is_empty());
+
+        match selected {
+            Some(code) => self.evaluate_code(&code),
+            None => self.evaluate(),
+        }
+    }
+
+    fn evaluate_code(&mut self, code: &str) {
         self.pending_confirmation = false;
         let Some(renderer) = &mut self.renderer else {
             return;
         };
-        if self.code.is_empty() {
+        if code.is_empty() {
             let _ = renderer.compile_buffers(
                 &[
                     Some(hydra_rust::shader::DEFAULT_SHADER.to_owned()),
@@ -437,7 +474,7 @@ impl HydraApp {
             self.error = None;
             return;
         }
-        match hydra_rust::eval(&self.code) {
+        match hydra_rust::eval(code) {
             Ok(result) => {
                 if let Some(ref td) = result.text_data {
                     renderer.upload_text(td);
@@ -887,6 +924,7 @@ impl HydraApp {
                 ui.add_space(4.0);
                 ui.small("Tab — toggle this panel");
                 ui.small("Ctrl+Enter — evaluate");
+                ui.small("Ctrl+Shift+Enter — evaluate selection");
                 ui.small("Ctrl+Shift+H — toggle editor");
                 ui.small("Ctrl+S — save");
                 ui.small("Ctrl+O — open");
@@ -1175,6 +1213,7 @@ impl HydraApp {
                 ui.add_sized(
                     available,
                     egui::TextEdit::multiline(&mut self.code)
+                        .id(egui::Id::new(CODE_EDITOR_ID))
                         .font(font_id)
                         .desired_width(f32::INFINITY)
                         .layouter(&mut layouter),
@@ -1210,7 +1249,17 @@ impl eframe::App for HydraApp {
                 }
         };
 
-        if ctx.input(|i| cmd(i, egui::Key::Enter)) {
+        if ctx.input(|i| {
+            i.key_pressed(egui::Key::Enter)
+                && i.modifiers.shift
+                && if is_mac {
+                    i.modifiers.mac_cmd
+                } else {
+                    i.modifiers.ctrl
+                }
+        }) {
+            self.evaluate_selection(ctx);
+        } else if ctx.input(|i| cmd(i, egui::Key::Enter)) {
             self.evaluate();
         }
         if ctx.input(|i| cmd(i, egui::Key::S)) {
