@@ -342,6 +342,30 @@ hydra-rust is the visual engine of [Sova](https://github.com/Bubobubobubobubo/So
 - **No `speed` global.** Animation speed is per-source, controlled through function arguments.
 - **GLSL 330.** Targets OpenGL 3.3 core profile.
 
+## Custom GLSL functions (`setFunction`)
+
+`setFunction({name, type, inputs, glsl})` defines a new source/coord/color/
+combine/combineCoord function at runtime, the same way real hydra.js does —
+useful for pasting in a shader from a community extension or tutorial
+without editing hydra-rust itself. Must be its own statement (not chained
+off of, e.g. `setFunction({...}).out()`); define it, then call the new
+function by name afterwards:
+
+```js
+setFunction({
+  name: 'gradient2',
+  type: 'src',
+  inputs: [{type: 'float', name: 'speed', default: 0}],
+  glsl: `return vec4(sin(speed*time), st, 1.0);`
+});
+gradient2(0.5).out();
+```
+
+Every input is treated as a plain `float` regardless of its declared
+`type`; `time`/`resolution` in the `glsl` body are rewritten to this
+project's own `iTime`/`iResolution` uniform names. See `SPEC.md` §12 for
+the full details and limitations.
+
 ## Current limitations
 
 - Max nesting depth of 16
@@ -366,7 +390,6 @@ These are registered so scripts calling them don't hard-error, but they don't do
 | `new THREE.PerspectiveCamera(...)` / `new THREE.WebGLRenderer(...)` / `renderer.setSize(...)` | No-ops (return a settable map) — three.js setup boilerplate. `THREE` itself is never a real module — `let THREE = await import(url)` degrades to a plain string once `await`/`import` are stripped as bare keywords — so these are registered against that string receiver too. No 3D rendering pipeline exists here |
 | `document.createElement(...)` / `.getElementById(...)` / `.querySelector(...)` / `.getElementsByTagName(...)` | Each returns a plain settable map (like `P5(...)`) rather than hard-erroring — real sketches commonly build an offscreen `<canvas>`/`<img>` element this way, usually to feed a p5.js overlay or draw text via a 2D canvas context; no DOM exists here to back it. `.getContext("2d")` on the resulting map returns another settable map with its own common methods (`fillText`, `fillRect`, `clearRect`, `strokeText`, `save`/`restore`, `translate`/`scale`, `measureText`, `createLinearGradient`) registered as no-ops; properties like `.fillStyle`/`.font` need no registration, same as `hydraText` |
 | `canvas.setRelativeSize(...)` / `.setAlign(...)` / `.setLinear()` / `.setNearest()` | No-op — a top-level `canvas` config object the `hyper-hydra` community extension exposes, not a real hydra.js API at all |
-| `setFunction(descriptor)` | No-op — real hydra.js registers a custom GLSL source/color/combine function from a JS descriptor object + GLSL string; no dynamic function-registration or GLSL-embedding pipeline exists here |
 | `Scene(name)` | No-op — not a hydra.js API at all; some external VJ/live-coding integrations use it to switch named cue banks |
 | `.value(fn)` (MIDI `note`/`cc`, `midi` feature) | Not implemented — each chain compiles to a static GLSL expression once, so there's nowhere to run an arbitrary per-frame Rhai closure the way a real per-frame JS callback would; calling it cleanly fails as "Function not found" |
 | `midi.channel(n)` / `.input(n)` | Accepted, logged, ignored — MIDI channels and input devices are all merged into one rather than faithfully filtered (see SPEC.md §6.1) |

@@ -472,8 +472,12 @@ detail on the `.bhr`/`.shr` formats.
 
 A handful of functions are registered (so a script calling them doesn't hard-error) but don't
 do anything real, or only partially implement real hydra.js/community-extension behavior —
-`initScreen`, `P5(...)`, `setFunction`, `Scene(...)`,
+`initScreen`, `P5(...)`, `Scene(...)`,
 `loadScript`, `ease` (non-linear curves), `.value(fn)`, and a few others. See
 [README.md's stub-function table](README.md#stub-functions-accepted-but-not-yet-implemented)
 for the complete, currently-accurate list with rationale for each, and SPEC.md §9 for the
 same list in the language-spec context.
+
+`setFunction(...)` is **not** a stub — it's a real, dynamic custom-GLSL-function registration
+mechanism; see [README.md's "Custom GLSL functions"](README.md#custom-glsl-functions-setfunction)
+section and SPEC.md §12.

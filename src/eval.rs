@@ -12,6 +12,7 @@ use crate::autolet;
 use crate::closurefn;
 use crate::commaexpr;
 use crate::commastmt;
+use crate::customfn;
 use crate::destructure;
 use crate::forloop;
 use crate::ifstmt;
@@ -1598,7 +1599,12 @@ pub fn preprocess(code: &str) -> String {
 }
 
 pub fn eval(code: &str) -> Result<EvalResult, String> {
-    let code = &preprocess(code);
+    // Must run before `preprocess` (and before anything else touches the
+    // source): pulls `setFunction({...})` calls out whole, so the raw
+    // GLSL body text inside them never gets rewritten by a later pass
+    // that doesn't know it's looking at embedded shader code.
+    let (code, custom_fns) = customfn::extract(code);
+    let code = &preprocess(&code);
     let state = Arc::new(Mutex::new(PatchState {
         buffers: [None, None, None, None],
         render_mode: RenderMode::default(),
@@ -1631,6 +1637,15 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
     register_functions(&mut engine);
     register_glsl_ops(&mut engine);
     register_patterns(&mut engine);
+
+    // Register each `setFunction`-defined custom function as a real
+    // overload, exactly like a built-in `FUNCTIONS` entry, and collect its
+    // generated GLSL definition to splice ahead of every buffer's shader
+    // text (GLSL requires a function to be defined before it's called).
+    let mut custom_glsl = String::new();
+    for def in &custom_fns {
+        custom_glsl.push_str(&register_custom_function(&mut engine, def));
+    }
 
     {
         let s = state.clone();
@@ -2485,11 +2500,13 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
     });
     // Real hydra.js's setFunction(descriptor) registers a custom GLSL
     // source/color/combine/combineCoord function from a JS object
-    // describing its name/inputs/GLSL body - no such dynamic
-    // function-registration or GLSL-embedding exists here, so this is a
-    // no-op: whatever function it would have defined simply won't exist
-    // (surfacing as an ordinary "missing function" if called), but the
-    // rest of the sketch still gets to evaluate.
+    // describing its name/inputs/GLSL body. Ordinary `setFunction({...})`
+    // calls never actually reach here - `customfn::extract` pulls them out
+    // of the source text and registers the real thing before the script
+    // runs (see `eval()`). This registration only remains as a fallback
+    // for a call shape that pre-scan doesn't recognize (e.g. a descriptor
+    // built from variables instead of an object literal), so such a
+    // sketch still gets to evaluate instead of hard-erroring.
     engine.register_fn("setFunction", |_descriptor: Map| {
         log::warn!("setFunction(...) ignored: custom GLSL function registration is not supported");
     });
@@ -2664,7 +2681,12 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
     let mut shaders: [Option<String>; 4] = [None, None, None, None];
     for (i, buf) in patch.buffers.iter().enumerate() {
         if let Some(node) = buf {
-            shaders[i] = Some(compile_node(node)?);
+            let body = compile_node(node)?;
+            shaders[i] = Some(if custom_glsl.is_empty() {
+                body
+            } else {
+                format!("{custom_glsl}{body}")
+            });
         }
     }
 
@@ -2690,6 +2712,68 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
         #[cfg(feature = "stream")]
         broadcast_request: patch.broadcast_request,
     })
+}
+
+/// Dynamically registers one `setFunction`-defined custom function on
+/// `engine`, as a real overload indistinguishable from a built-in
+/// `FUNCTIONS` entry, and returns its generated GLSL function definition
+/// (to be spliced ahead of every buffer's shader text).
+///
+/// `eval()` builds a fresh `Engine` per call, so leaking the name and
+/// defaults slice here is bounded by one evaluation's worth of distinct
+/// custom function names - not an unbounded, run-forever leak - the same
+/// trade-off the rest of `FUNCTIONS` makes by requiring `&'static str`
+/// everywhere (`Node`/`Op` carry function names by reference, not by
+/// owned `String`, to keep codegen's hot path allocation-free).
+fn register_custom_function(engine: &mut Engine, def: &customfn::CustomFnDef) -> String {
+    let name: &'static str = Box::leak(def.name.clone().into_boxed_str());
+    let defaults: &'static [f64] = Box::leak(
+        def.inputs
+            .iter()
+            .map(|(_, d)| *d)
+            .collect::<Vec<f64>>()
+            .into_boxed_slice(),
+    );
+    let kind = match def.kind {
+        customfn::CustomFnKind::Src => OpKind::Source,
+        customfn::CustomFnKind::Coord => OpKind::Geo,
+        customfn::CustomFnKind::Color => OpKind::Color,
+        customfn::CustomFnKind::Combine => OpKind::Blend,
+        customfn::CustomFnKind::CombineCoord => OpKind::Modulate,
+    };
+    let meta = FnMeta {
+        name,
+        kind,
+        defaults,
+    };
+    match kind {
+        OpKind::Source => register_source(engine, &meta),
+        OpKind::Geo => register_geo(engine, &meta),
+        OpKind::Color => register_color(engine, &meta),
+        OpKind::Blend => register_blend(engine, &meta),
+        OpKind::Modulate => register_modulate(engine, &meta),
+    }
+
+    // Matches real hydra.js's own signature table for each `type`: the
+    // `glsl` field is only the function *body*, wrapped here the same way
+    // real hydra.js wraps it (`st`/`c0`/`c1` fixed argument names, plus
+    // one `float` per declared input, in declaration order).
+    let (ret_ty, fixed_args) = match def.kind {
+        customfn::CustomFnKind::Src => ("vec4", "vec2 st"),
+        customfn::CustomFnKind::Coord => ("vec2", "vec2 st"),
+        customfn::CustomFnKind::Color => ("vec4", "vec4 c0"),
+        customfn::CustomFnKind::Combine => ("vec4", "vec4 c0, vec4 c1"),
+        customfn::CustomFnKind::CombineCoord => ("vec2", "vec2 st, vec4 c0"),
+    };
+    let extra_args: String = def
+        .inputs
+        .iter()
+        .map(|(pname, _)| format!(", float {pname}"))
+        .collect();
+    format!(
+        "{ret_ty} {name}({fixed_args}{extra_args}) {{\n{}\n}}\n",
+        def.glsl_body
+    )
 }
 
 fn register_source(engine: &mut Engine, meta: &FnMeta) {

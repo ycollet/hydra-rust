@@ -1058,3 +1058,61 @@ up in `cargo test` or `check_corpus` at all. Two ways it does show up:
   evaluating that patch (§10) - so actually run the binary with a script
   exercising the new function before calling it done, the same way any
   other change here gets verified against real output.
+
+## 12. `setFunction()` - runtime custom GLSL functions
+
+Real hydra.js's `setFunction(descriptor)` lets a *sketch* define its own
+source/coord/color/combine/combineCoord function at runtime, instead of
+only using what's built in - this is what many community "paste this
+shader into your sketch" extensions use. hydra-rust implements this for
+real (`src/customfn.rs`), as a dynamic counterpart to §11's static,
+compile-time process:
+
+```js
+setFunction({
+  name: 'gradient2',
+  type: 'src',          // 'src' | 'coord' | 'color' | 'combine' | 'combineCoord'
+  inputs: [
+    {type: 'float', name: 'speed', default: 0}
+  ],
+  glsl: `return vec4(sin(speed*time), st, 1.0);`
+});
+gradient2(0.5).out();
+```
+
+**How it works**: before anything else - even `preprocess`'s own pass
+pipeline - `customfn::extract` scans the raw source text for top-level
+`setFunction({...})` calls, parses out `name`/`type`/`inputs`/`glsl`, and
+removes the whole call from the source (so none of the usual JS-
+compatibility rewriting, or Rhai itself, ever has to understand it or
+risk mangling the embedded GLSL body text). `eval()` then registers each
+one as a real overload on the fresh `Engine`, exactly the way a
+`FUNCTIONS` entry would (`type` maps onto `OpKind` the same way as §11's
+table: `src`→Source, `coord`→Geo, `color`→Color, `combine`→Blend,
+`combineCoord`→Modulate), and wraps the `glsl` body into a full function
+definition using the same signature shapes as §11's table (fixed argument
+names `st`/`c0`/`c1`, matching what real hydra.js's own generated GLSL
+calls them) - spliced ahead of `mainImage` in whichever buffer(s)
+reference it.
+
+**Limitations** (a sketch-only, runtime process has less to work with than
+the static one in §11):
+- Every input is a plain `float`, regardless of its declared `type` field
+  - same constraint as every other function in this project (§11's "all
+    parameters are `float` here").
+- `time`/`resolution` are rewritten to this project's `iTime`/
+  `iResolution` names (a simple identifier rename, not a general JS-GLSL
+  transpiler) so a community `glsl` body written against real hydra.js
+  still compiles unmodified; anything else real hydra.js's GLSL
+  environment provides that this project doesn't (e.g. other uniforms) is
+  not translated.
+- `setFunction(...)` must be its own statement - chaining directly off its
+  return value (`setFunction({...}).out()`) isn't recognized; call the new
+  function by name in a later statement instead.
+- The same per-kind arity ceiling as §11's `register_*` functions applies
+  (e.g. `register_blend` currently tops out at 1 extra parameter) - inputs
+  beyond it won't have a matching call-site overload.
+- A descriptor built from variables instead of a literal `{...}` object
+  (e.g. `setFunction(myConfig)`) isn't recognized by the pre-scan and
+  falls through to a harmless no-op stub (logs a warning, nothing crashes).
+

@@ -8,6 +8,7 @@ pub mod broadcast;
 mod closurefn;
 mod commaexpr;
 mod commastmt;
+mod customfn;
 mod destructure;
 pub mod eval;
 mod forloop;
