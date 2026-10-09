@@ -61,13 +61,17 @@ hydra-rust = { path = "...", default-features = false, features = ["audio", "web
 
 ## Keyboard shortcuts
 
+The `Enter`-based shortcuts mirror [upstream Hydra](https://github.com/hydra-synth/hydra)'s own CodeMirror keymap (`Ctrl/Cmd+Enter`/`Alt+Enter`/`Ctrl/Cmd+Shift+Enter` for eval line/block/all); `Ctrl/Cmd+Alt+Enter` (eval selection) is specific to this native port, since upstream's `Ctrl/Cmd+Shift+Enter` slot was needed for "eval all" instead.
+
 | Shortcut | Action |
 |----------|--------|
-| `Ctrl/Cmd + Enter` | Evaluate the current sketch |
-| `Ctrl/Cmd + Shift + Enter` | Evaluate only the selected text in the editor (falls back to the whole sketch if there's no selection) |
+| `Ctrl/Cmd + Enter` | Evaluate only the line the cursor is on |
+| `Alt + Enter` | Evaluate the current "block": the contiguous run of non-blank lines around the cursor, stopping at the first blank line (or file boundary) above/below |
+| `Ctrl/Cmd + Shift + Enter` | Evaluate the whole sketch |
+| `Ctrl/Cmd + Alt + Enter` | Evaluate only the selected text in the editor (falls back to the whole sketch if there's no selection) |
 | `Ctrl/Cmd + S` | Save the current sketch to a `.hydra` file |
 | `Ctrl/Cmd + O` | Open a `.hydra` file |
-| `Ctrl/Cmd + P` | Save a screenshot of the current render (no sidebar/editor) as `hydra_screenshot_DD_MM_YYYY.png` in the current directory |
+| `Ctrl/Cmd + P` or `Ctrl/Cmd + Shift + S` | Save a screenshot of the current render (no sidebar/editor) as `hydra_screenshot_DD_MM_YYYY.png` in the current directory |
 | `Ctrl/Cmd + /` | Toggle `//` line comments on the selected lines (or the cursor's current line, with no selection) |
 | `Ctrl/Cmd + Shift + H` | Toggle editor visibility (hide the code overlay, keep the visuals running) |
 | `Tab` | Toggle the options sidebar — tempo/font/text-opacity, camera status, and the scene-bank grid (see below) |

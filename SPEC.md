@@ -928,11 +928,13 @@ are shown as an in-app toast and logged via `log::error!`, so `RUST_LOG=error`
 
 A sketch loaded via the CLI argument is **not** run automatically - it's
 shown in the editor, with a persistent on-screen banner, until the user
-explicitly evaluates it (Ctrl+Enter/Cmd+Enter). This is deliberate: such a
+explicitly evaluates it (Ctrl+Shift+Enter/Cmd+Shift+Enter to run the whole
+file). This is deliberate: such a
 file may not be one the user wrote themselves (e.g. shared online), and
 could call `initCam()`/reference `a.fft[i]` to access the camera or
 microphone (`webcam`/`audio` features), call `initImage(...)`/`initGif(...)`
 to make an outbound network request to an arbitrary URL (`image_url`
+
 feature), call `initVideo(...)` to spawn an `ffmpeg` subprocess against
 an arbitrary local path or URL (`video` feature), call `initStream(...)`
 to open a network connection to an arbitrary address, or call

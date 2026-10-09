@@ -436,8 +436,32 @@ impl HydraApp {
         self.evaluate_code(&code);
     }
 
+    /// Evaluates just the editor's current line - `Ctrl`/`Cmd`+`Enter` -
+    /// mirroring upstream Hydra's `editor: eval line` (CodeMirror's
+    /// `getLine(cursor.line)`). A no-op if the cursor's line is blank.
+    fn evaluate_line(&mut self, ctx: &egui::Context) {
+        let line = current_line(&self.code, cursor_char_index(ctx));
+        if !line.trim().is_empty() {
+            self.evaluate_code(&line);
+        }
+    }
+
+    /// Evaluates the contiguous "block" of non-blank lines around the
+    /// editor's cursor - `Alt`+`Enter` - mirroring upstream Hydra's
+    /// `editor: eval block` (CodeMirror's `getCurrentBlock()`): expands
+    /// from the cursor's line upward and downward through every
+    /// non-blank neighboring line, stopping at the first blank line (or a
+    /// file boundary) on each side. A no-op if the cursor's line is
+    /// blank.
+    fn evaluate_block(&mut self, ctx: &egui::Context) {
+        let block = current_block(&self.code, cursor_char_index(ctx));
+        if !block.trim().is_empty() {
+            self.evaluate_code(&block);
+        }
+    }
+
     /// Evaluates the editor's current text selection instead of the whole
-    /// script - `Ctrl`/`Cmd`+`Shift`+`Enter`. Falls back to a full
+    /// script - `Ctrl`/`Cmd`+`Alt`+`Enter`. Falls back to a full
     /// `evaluate()` when there's no selection (or it's empty/whitespace),
     /// since there's nothing sensible to run otherwise.
     fn evaluate_selection(&mut self, ctx: &egui::Context) {
@@ -986,12 +1010,14 @@ impl HydraApp {
                 }
                 ui.add_space(4.0);
                 ui.small("Tab — toggle this panel");
-                ui.small("Ctrl+Enter — evaluate");
-                ui.small("Ctrl+Shift+Enter — evaluate selection");
+                ui.small("Ctrl+Enter — evaluate line");
+                ui.small("Alt+Enter — evaluate block");
+                ui.small("Ctrl+Shift+Enter — evaluate all");
+                ui.small("Ctrl+Alt+Enter — evaluate selection");
                 ui.small("Ctrl+Shift+H — toggle editor");
                 ui.small("Ctrl+S — save");
                 ui.small("Ctrl+O — open");
-                ui.small("Ctrl+P — screenshot");
+                ui.small("Ctrl+P / Ctrl+Shift+S — screenshot");
                 ui.small("Ctrl+/ — toggle comment");
                 ui.small("Alt+0-9/A-F — recall slot");
                 ui.small("Alt+Shift+0-9/A-F — save slot");
@@ -1017,7 +1043,7 @@ impl HydraApp {
                     .show(ui, |ui| {
                         ui.label(
                             egui::RichText::new(
-                                "Loaded from file, not yet run (it may access your camera/mic) - press Ctrl+Enter to run it",
+                                "Loaded from file, not yet run (it may access your camera/mic) - press Ctrl+Shift+Enter to run it",
                             )
                             .color(Color32::from_rgb(255, 200, 100))
                             .monospace(),
@@ -1371,26 +1397,38 @@ impl eframe::App for HydraApp {
                 }
         };
 
-        if ctx.input(|i| {
-            i.key_pressed(egui::Key::Enter)
-                && i.modifiers.shift
-                && if is_mac {
-                    i.modifiers.mac_cmd
-                } else {
-                    i.modifiers.ctrl
-                }
-        }) {
-            self.evaluate_selection(ctx);
-        } else if ctx.input(|i| cmd(i, egui::Key::Enter)) {
-            self.evaluate();
+        // Mirrors upstream Hydra's own CodeMirror keymap
+        // (`src/views/editor/keymaps.js`) as closely as egui's modifier
+        // model allows: `Ctrl`/`Cmd`+`Enter` evaluates just the current
+        // line, `Alt`+`Enter` evaluates the current blank-line-delimited
+        // "block", and `Ctrl`/`Cmd`+`Shift`+`Enter` evaluates the whole
+        // script (upstream's `editor: eval all`). `Ctrl`/`Cmd`+`Alt`+`Enter`
+        // isn't an upstream shortcut - it's where this project's own
+        // selection-eval feature (added before these upstream bindings)
+        // moved to, since `Ctrl`/`Cmd`+`Shift`+`Enter` was needed for
+        // "eval all" instead.
+        if let Some(mods) = ctx.input(|i| i.key_pressed(egui::Key::Enter).then_some(i.modifiers)) {
+            let primary = if is_mac { mods.mac_cmd } else { mods.ctrl };
+            if primary && mods.shift {
+                self.evaluate();
+            } else if primary && mods.alt {
+                self.evaluate_selection(ctx);
+            } else if primary {
+                self.evaluate_line(ctx);
+            } else if mods.alt {
+                self.evaluate_block(ctx);
+            }
         }
-        if ctx.input(|i| cmd(i, egui::Key::S)) {
+        if ctx.input(|i| cmd(i, egui::Key::S) && !i.modifiers.shift) {
             self.save_file();
         }
         if ctx.input(|i| cmd(i, egui::Key::O)) {
             self.load_file();
         }
-        if ctx.input(|i| cmd(i, egui::Key::P)) {
+        // `Ctrl`/`Cmd`+`P` is this project's original screenshot shortcut;
+        // `Ctrl`/`Cmd`+`Shift`+`S` is upstream Hydra's own `screencap`
+        // binding, added as a second way to trigger the same action.
+        if ctx.input(|i| cmd(i, egui::Key::P) || (cmd(i, egui::Key::S) && i.modifiers.shift)) {
             self.pending_screenshot = true;
         }
         if ctx.input(|i| cmd(i, egui::Key::Slash)) {
@@ -1504,6 +1542,83 @@ fn wrap_bank_index(current: usize, delta: i32, n: usize) -> usize {
     (current as i32 + delta).rem_euclid(n as i32) as usize
 }
 
+/// Char-index `(start, end)` span of each line in `chars`, `end` excluding
+/// the line's own trailing `\n` - shared by `toggle_line_comments` and the
+/// eval-line/eval-block helpers below.
+fn line_spans(chars: &[char]) -> Vec<(usize, usize)> {
+    let mut lines: Vec<(usize, usize)> = Vec::new();
+    let mut start = 0;
+    for (i, &c) in chars.iter().enumerate() {
+        if c == '\n' {
+            lines.push((start, i));
+            start = i + 1;
+        }
+    }
+    lines.push((start, chars.len()));
+    lines
+}
+
+/// Returns the editor's current cursor position as a char index into
+/// `self.code`, looked up from the persisted `TextEdit` state (the same
+/// one `evaluate_selection`/`toggle_comment_selection` use). Falls back
+/// to `0` when there's no tracked cursor yet (e.g. before the editor has
+/// been focused).
+fn cursor_char_index(ctx: &egui::Context) -> usize {
+    egui::TextEdit::load_state(ctx, egui::Id::new(CODE_EDITOR_ID))
+        .and_then(|s| s.cursor.char_range())
+        .map(|r| r.primary.index)
+        .unwrap_or(0)
+}
+
+/// Returns the single line of `code` containing char-index `pos` (clamped
+/// to `code`'s length) - the exact text `Ctrl`/`Cmd`+`Enter`'s "eval line"
+/// evaluates, mirroring upstream Hydra's `editor: eval line`.
+fn current_line(code: &str, pos: usize) -> String {
+    let chars: Vec<char> = code.chars().collect();
+    let pos = pos.min(chars.len());
+    let lines = line_spans(&chars);
+    let idx = lines
+        .iter()
+        .position(|&(_, e)| pos <= e)
+        .unwrap_or(lines.len() - 1);
+    let (s, e) = lines[idx];
+    chars[s..e].iter().collect()
+}
+
+/// Returns the contiguous "block" of non-blank lines around char-index
+/// `pos` in `code` - the exact text `Alt`+`Enter`'s "eval block"
+/// evaluates, mirroring upstream Hydra's `getCurrentBlock()`: starting
+/// from the cursor's own line, expands upward and downward through every
+/// non-blank neighboring line, stopping at the first blank line (or a
+/// file boundary) on each side. If the cursor's own line is blank, the
+/// block is just that (blank) line - no expansion - matching upstream.
+fn current_block(code: &str, pos: usize) -> String {
+    let chars: Vec<char> = code.chars().collect();
+    let pos = pos.min(chars.len());
+    let lines = line_spans(&chars);
+    let idx = lines
+        .iter()
+        .position(|&(_, e)| pos <= e)
+        .unwrap_or(lines.len() - 1);
+
+    let is_blank = |(s, e): (usize, usize)| chars[s..e].iter().all(|c| c.is_whitespace());
+
+    let mut first = idx;
+    let mut last = idx;
+    if !is_blank(lines[idx]) {
+        while first > 0 && !is_blank(lines[first - 1]) {
+            first -= 1;
+        }
+        while last + 1 < lines.len() && !is_blank(lines[last + 1]) {
+            last += 1;
+        }
+    }
+
+    let (s, _) = lines[first];
+    let (_, e) = lines[last];
+    chars[s..e].iter().collect()
+}
+
 /// Toggles `//` line comments on every line a `[lo, hi)` char-index
 /// selection touches (expanding a partial selection out to whole lines
 /// first), returning the new source text plus an updated `(lo, hi)`
@@ -1517,17 +1632,7 @@ fn toggle_line_comments(code: &str, lo: usize, hi: usize) -> (String, usize, usi
     let lo = lo.min(n);
     let hi = hi.min(n);
 
-    // Char-index (start, end) span of each line, `end` excluding the
-    // line's own trailing `\n`.
-    let mut lines: Vec<(usize, usize)> = Vec::new();
-    let mut start = 0;
-    for (i, &c) in chars.iter().enumerate() {
-        if c == '\n' {
-            lines.push((start, i));
-            start = i + 1;
-        }
-    }
-    lines.push((start, n));
+    let lines = line_spans(&chars);
 
     let line_at = |pos: usize| -> usize {
         lines
@@ -1675,6 +1780,42 @@ mod tests {
         assert_eq!(new_code, "  // osc(10).out()");
         let (back, _, _) = toggle_line_comments(&new_code, 0, new_code.chars().count());
         assert_eq!(back, code);
+    }
+
+    #[test]
+    fn current_line_returns_the_line_containing_the_cursor() {
+        let code = "osc(10)\n.rotate(0.1)\n.out()";
+        assert_eq!(current_line(code, 0), "osc(10)");
+        assert_eq!(current_line(code, 10), ".rotate(0.1)");
+        assert_eq!(current_line(code, code.chars().count()), ".out()");
+    }
+
+    #[test]
+    fn current_line_on_a_blank_line_is_empty() {
+        let code = "osc(10)\n\n.out()";
+        assert_eq!(current_line(code, 8), "");
+    }
+
+    #[test]
+    fn current_block_expands_through_non_blank_neighbors_until_a_blank_line() {
+        let code = "osc(10)\n.rotate(0.1)\n.out()\n\nsrc(o0).out(o1)";
+        // cursor on the middle line of the first block
+        assert_eq!(current_block(code, 10), "osc(10)\n.rotate(0.1)\n.out()");
+        // cursor inside the second (single-line) block
+        assert_eq!(current_block(code, code.len() - 3), "src(o0).out(o1)");
+    }
+
+    #[test]
+    fn current_block_on_a_blank_line_is_empty_not_the_whole_file() {
+        let code = "osc(10).out()\n\nsrc(o0).out(o1)";
+        assert_eq!(current_block(code, 14), "");
+    }
+
+    #[test]
+    fn current_block_at_file_boundaries_stops_at_start_and_end() {
+        let code = "osc(10)\n.out()";
+        assert_eq!(current_block(code, 0), code);
+        assert_eq!(current_block(code, code.chars().count()), code);
     }
 
     #[test]
