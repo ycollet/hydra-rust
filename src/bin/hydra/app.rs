@@ -23,6 +23,7 @@ use hydra_rust::eval::OscRequest;
     feature = "stream"
 ))]
 use hydra_rust::eval::SourceRequest;
+use hydra_rust::format_code;
 #[cfg(feature = "image_url")]
 use hydra_rust::imageload::ImageManager;
 #[cfg(feature = "midi")]
@@ -1019,6 +1020,7 @@ impl HydraApp {
                 ui.small("Ctrl+O — open");
                 ui.small("Ctrl+P / Ctrl+Shift+S — screenshot");
                 ui.small("Ctrl+/ — toggle comment");
+                ui.small("Ctrl+Shift+F — format code");
                 ui.small("Alt+0-9/A-F — recall slot");
                 ui.small("Alt+Shift+0-9/A-F — save slot");
                 ui.small("Alt+←/→ — cycle bank");
@@ -1433,6 +1435,12 @@ impl eframe::App for HydraApp {
         }
         if ctx.input(|i| cmd(i, egui::Key::Slash)) {
             self.toggle_comment_selection(ctx);
+        }
+        // `Ctrl`/`Cmd`+`Shift`+`F` - upstream Hydra's own `editor: format
+        // code`, which always reformats the whole script, never a
+        // selection.
+        if ctx.input(|i| cmd(i, egui::Key::F) && i.modifiers.shift) {
+            self.code = format_code(&self.code);
         }
         if ctx.input(|i| {
             i.key_pressed(egui::Key::H)

@@ -73,6 +73,7 @@ The `Enter`-based shortcuts mirror [upstream Hydra](https://github.com/hydra-syn
 | `Ctrl/Cmd + O` | Open a `.hydra` file |
 | `Ctrl/Cmd + P` or `Ctrl/Cmd + Shift + S` | Save a screenshot of the current render (no sidebar/editor) as `hydra_screenshot_DD_MM_YYYY.png` in the current directory |
 | `Ctrl/Cmd + /` | Toggle `//` line comments on the selected lines (or the cursor's current line, with no selection) |
+| `Ctrl/Cmd + Shift + F` | Format code: breaks a single-line method chain (e.g. `osc(60).rotate(0.1).out()`) onto one call per line. Always reformats the whole script, matching upstream (an already multi-line chain is left untouched) |
 | `Ctrl/Cmd + Shift + H` | Toggle editor visibility (hide the code overlay, keep the visuals running) |
 | `Tab` | Toggle the options sidebar — tempo/font/text-opacity, camera status, and the scene-bank grid (see below) |
 | `Alt/⌥ + 0`-`9` / `A`-`F` | Recall slot `0`-`F` (hex) in the active bank — loads and immediately evaluates its saved code |

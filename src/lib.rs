@@ -11,6 +11,7 @@ mod commastmt;
 mod customfn;
 mod destructure;
 pub mod eval;
+mod fmt;
 mod forloop;
 mod glsl;
 mod ifstmt;
@@ -57,6 +58,7 @@ pub use eval::OscRequest;
 ))]
 pub use eval::SourceRequest;
 pub use eval::{EvalResult, RenderMode, eval, preprocess};
+pub use fmt::format_code;
 #[cfg(feature = "midi")]
 pub use midi::MidiManager;
 #[cfg(feature = "osc")]
