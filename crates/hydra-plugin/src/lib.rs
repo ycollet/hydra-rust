@@ -12,10 +12,9 @@
 //! environment variable (falling back to a small built-in example sketch if
 //! unset or unreadable). The file's mtime is polled once per frame; editing
 //! and saving the file in any external editor hot-reloads it in the plugin
-//! window, enabling live-coding from inside a DAW. There is currently no
-//! in-window text editor - see `README.md` in this crate for known
-//! limitations and the plan for a future in-window editor / parameter-based
-//! script loading.
+//! window, enabling live-coding from inside a DAW. There is also an
+//! in-window text editor overlay (see "In-window editor" below) for typing
+//! code directly without an external file/editor.
 //!
 //! ## Audio (v1)
 //!
@@ -63,6 +62,26 @@
 //! `Arc<AtomicCell<(u32, u32)>>` (`HydraPluginParams::editor_size`) and
 //! the host is asked to match via `GuiContext::request_resize()`; if the
 //! host rejects the new size, the resize is rolled back.
+//!
+//! ## In-window editor (v1)
+//!
+//! Pressing Ctrl+E (Cmd+E on macOS) toggles a text-editor overlay drawn
+//! on top of the rendered output, so a script can be typed and evaluated
+//! directly in the plugin window without an external file/editor. It has
+//! its own buffer, independent from the `HYDRA_PLUGIN_SCRIPT` file - the
+//! two don't overwrite each other, and the overlay has a "Load file"
+//! button to copy the currently-active (file or default) script into it
+//! as a starting point. Ctrl+Enter (or the "Eval" button) compiles the
+//! buffer; any script/shader error is shown inline. The overlay is built
+//! with `egui` (rendered via `egui_glow`'s GL backend on top of our own
+//! `render_multipass` output) rather than `nih_plug_egui`/`egui-baseview`,
+//! since those own their *entire* window - using them would mean
+//! replacing this crate's own `baseview::WindowHandler`/resize/audio/MIDI
+//! event-handling with theirs. Instead, `egui::Context::run` is driven by
+//! hand, with `baseview`'s mouse/keyboard events translated into
+//! `egui::RawInput` in `on_event`. There's no system clipboard
+//! integration yet (copy/paste stays inside the text field only, no
+//! `arboard`/OS clipboard - see `README.md`).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -73,6 +92,7 @@ use baseview::{
     WindowHandle, WindowOpenOptions, WindowScalePolicy, gl::GlConfig,
 };
 use crossbeam::atomic::AtomicCell;
+use keyboard_types::{Code, Key as KtKey, KeyState, Modifiers as KtModifiers};
 use nih_plug::prelude::*;
 use raw_window_handle::{HasRawWindowHandle, RawWindowHandle};
 
@@ -138,6 +158,29 @@ struct HydraGlWindow {
     /// computed as an absolute delta (avoids accumulating rounding error
     /// across many small `CursorMoved` events).
     resize_drag: Option<((f32, f32), (u32, u32))>,
+    /// Whether the in-window text-editor overlay is visible (toggled by
+    /// Ctrl/Cmd+E - see the module doc comment's "In-window editor"
+    /// section).
+    editor_open: bool,
+    /// The in-window editor's own script buffer - independent of the
+    /// `HYDRA_PLUGIN_SCRIPT` file so neither overwrites the other.
+    script_buffer: String,
+    /// The most recently hot-reloaded/default file content - what the
+    /// editor overlay's "Load file" button copies into `script_buffer`.
+    loaded_code: String,
+    /// The most recent eval/shader-compile error (from either the file
+    /// hot-reload or the in-window editor's "Eval"), shown in the editor
+    /// overlay when it's open.
+    last_error: Option<String>,
+    egui_ctx: egui::Context,
+    egui_painter: egui_glow::Painter,
+    /// Current keyboard modifier state, tracked across `KeyboardEvent`s
+    /// since baseview reports each key press/release individually rather
+    /// than a combined modifiers snapshot per-event-type.
+    modifiers: KtModifiers,
+    /// `egui::Event`s translated from baseview input since the last
+    /// `on_frame`, fed into `egui::RawInput` there.
+    pending_egui_events: Vec<egui::Event>,
 }
 
 impl HydraGlWindow {
@@ -162,16 +205,26 @@ impl HydraGlWindow {
         let script_path = script_path_from_env();
         let (code, mtime) = load_script(&script_path);
 
-        let (gl, renderer, render_mode) = unsafe {
+        let (gl, renderer, render_mode, last_error, egui_painter) = unsafe {
             gl_context.make_current();
             #[allow(clippy::arc_with_non_send_sync)]
             let gl = Arc::new(glow::Context::from_loader_function(|s| {
                 gl_context.get_proc_address(s)
             }));
             let mut renderer = ShaderRenderer::new(gl.clone());
-            let render_mode = Self::compile(&mut renderer, &code, &midi_bridge);
+            let (render_mode, last_error) = Self::compile(&mut renderer, &code, &midi_bridge);
+            // `egui_glow::Painter` needs its own `glow::Context` handle
+            // (a different `glow` crate version than `hydra_rust`'s
+            // renderer uses) - both just wrap the same underlying GL
+            // function pointers, so two independent handles are fine.
+            #[allow(clippy::arc_with_non_send_sync)]
+            let egui_gl = Arc::new(egui_glow::glow::Context::from_loader_function(|s| {
+                gl_context.get_proc_address(s)
+            }));
+            let egui_painter = egui_glow::Painter::new(egui_gl, "", None, false)
+                .expect("failed to create egui_glow painter");
             gl_context.make_not_current();
-            (gl, renderer, render_mode)
+            (gl, renderer, render_mode, last_error, egui_painter)
         };
 
         let midi_poller = MidiPoller::new(midi_bridge.clone());
@@ -191,6 +244,14 @@ impl HydraGlWindow {
             editor_size,
             cursor_pos: (0.0, 0.0),
             resize_drag: None,
+            editor_open: false,
+            script_buffer: code.clone(),
+            loaded_code: code,
+            last_error,
+            egui_ctx: egui::Context::default(),
+            egui_painter,
+            modifiers: KtModifiers::empty(),
+            pending_egui_events: Vec::new(),
         }
     }
 
@@ -199,8 +260,15 @@ impl HydraGlWindow {
     /// typo while live-coding doesn't blank the editor window. Also
     /// applies any `midi.*` requests the script generated (CC smoothing,
     /// ADSR envelope slots) directly to `midi_bridge` - see the module
-    /// doc comment for which requests are honored here.
-    fn compile(renderer: &mut ShaderRenderer, code: &str, midi_bridge: &MidiBridge) -> RenderMode {
+    /// doc comment for which requests are honored here. Returns the
+    /// compiled `RenderMode` plus any eval/shader-compile error text (for
+    /// display in the in-window editor overlay, regardless of whether
+    /// the code came from the overlay or the hot-reloaded file).
+    fn compile(
+        renderer: &mut ShaderRenderer,
+        code: &str,
+        midi_bridge: &MidiBridge,
+    ) -> (RenderMode, Option<String>) {
         match hydra_rust::eval(code) {
             Ok(result) => {
                 if let Some(ref td) = result.text_data {
@@ -240,11 +308,16 @@ impl HydraGlWindow {
                         | MidiRequest::Hide => {}
                     }
                 }
-                result.render_mode
+                let error = if errs.is_empty() {
+                    None
+                } else {
+                    Some(errs.join("\n"))
+                };
+                (result.render_mode, error)
             }
             Err(err) => {
                 log::warn!("hydra-plugin: script eval error: {err}");
-                Default::default()
+                (Default::default(), Some(err))
             }
         }
     }
@@ -262,8 +335,20 @@ impl HydraGlWindow {
         if Some(mtime) != self.last_mtime {
             self.last_mtime = Some(mtime);
             let code = std::fs::read_to_string(path).unwrap_or_default();
-            self.render_mode = Self::compile(&mut self.renderer, &code, &self.midi_bridge);
+            let (render_mode, error) = Self::compile(&mut self.renderer, &code, &self.midi_bridge);
+            self.render_mode = render_mode;
+            self.last_error = error;
+            self.loaded_code = code;
         }
+    }
+
+    /// Evaluates the in-window editor's own buffer (independent of the
+    /// hot-reloaded file) and updates `last_error` for display.
+    fn eval_editor_buffer(&mut self) {
+        let (render_mode, error) =
+            Self::compile(&mut self.renderer, &self.script_buffer, &self.midi_bridge);
+        self.render_mode = render_mode;
+        self.last_error = error;
     }
 
     /// Whether `pos` (logical window coordinates) falls within the
@@ -313,6 +398,88 @@ impl HydraGlWindow {
             self.gl.disable(glow::SCISSOR_TEST);
         }
     }
+
+    /// When open, runs one `egui` frame from the input accumulated in
+    /// `on_event` since the last call, draws the editor window, and
+    /// paints it on top of whatever `render_multipass` already drew this
+    /// frame via `egui_glow`.
+    fn draw_editor_overlay(&mut self, w: u32, h: u32) {
+        if !self.editor_open {
+            // Still drop any input that arrived while the overlay was
+            // closed (e.g. the toggle keypress itself) so it isn't
+            // replayed stale the next time it's opened.
+            self.pending_egui_events.clear();
+            return;
+        }
+
+        let raw_input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(w as f32, h as f32),
+            )),
+            time: Some(self.start.elapsed().as_secs_f64()),
+            modifiers: kt_modifiers_to_egui(self.modifiers),
+            events: std::mem::take(&mut self.pending_egui_events),
+            ..Default::default()
+        };
+
+        let mut do_eval = false;
+        let mut do_load = false;
+        let script_buffer = &mut self.script_buffer;
+        let last_error = self.last_error.as_deref();
+
+        let full_output = self.egui_ctx.run(raw_input, |ctx| {
+            egui::Window::new("Hydra Editor")
+                .default_pos([16.0, 16.0])
+                .default_size([w as f32 * 0.6, h as f32 * 0.6])
+                .show(ctx, |ui| {
+                    ui.label("Ctrl/Cmd+E to close - Ctrl/Cmd+Enter or \"Eval\" to run.");
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        ui.add(
+                            egui::TextEdit::multiline(script_buffer)
+                                .code_editor()
+                                .desired_width(f32::INFINITY)
+                                .desired_rows(16),
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        if ui.button("Eval").clicked() {
+                            do_eval = true;
+                        }
+                        if ui
+                            .button("Load file")
+                            .on_hover_text("Copy the currently active HYDRA_PLUGIN_SCRIPT (or default sketch) into the buffer above")
+                            .clicked()
+                        {
+                            do_load = true;
+                        }
+                    });
+                    if ctx.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.command) {
+                        do_eval = true;
+                    }
+                    if let Some(err) = last_error {
+                        ui.colored_label(egui::Color32::from_rgb(230, 80, 80), err);
+                    }
+                });
+        });
+
+        if do_load {
+            self.script_buffer = self.loaded_code.clone();
+        }
+        if do_eval {
+            self.eval_editor_buffer();
+        }
+
+        let clipped_primitives = self
+            .egui_ctx
+            .tessellate(full_output.shapes, full_output.pixels_per_point);
+        self.egui_painter.paint_and_update_textures(
+            [w, h],
+            full_output.pixels_per_point,
+            &clipped_primitives,
+            &full_output.textures_delta,
+        );
+    }
 }
 
 impl baseview::WindowHandler for HydraGlWindow {
@@ -336,9 +503,10 @@ impl baseview::WindowHandler for HydraGlWindow {
         let uniforms = RenderUniforms {
             time: self.start.elapsed().as_secs_f32(),
             resolution: [w as f32, h as f32],
-            // TODO: wire real mouse position from baseview's `on_event`
-            // (see `HydraGlWindow::on_event` below) into `mouse`/`m` reads.
-            mouse: [0.0, 0.0],
+            mouse: [
+                (self.cursor_pos.0 / w as f32).clamp(0.0, 1.0),
+                (1.0 - self.cursor_pos.1 / h as f32).clamp(0.0, 1.0),
+            ],
             beat: 0.0,
             tempo: 120.0,
             phase: 0.0,
@@ -366,6 +534,7 @@ impl baseview::WindowHandler for HydraGlWindow {
         let _ = self.render_mode;
 
         self.draw_resize_handle(w, h);
+        self.draw_editor_overlay(w, h);
 
         unsafe {
             gl_context.swap_buffers();
@@ -379,8 +548,12 @@ impl baseview::WindowHandler for HydraGlWindow {
         event: baseview::Event,
     ) -> baseview::EventStatus {
         match event {
-            BvEvent::Mouse(MouseEvent::CursorMoved { position, .. }) => {
+            BvEvent::Mouse(MouseEvent::CursorMoved {
+                position,
+                modifiers,
+            }) => {
                 self.cursor_pos = (position.x as f32, position.y as f32);
+                self.modifiers = modifiers;
                 if let Some((start_cursor, start_size)) = self.resize_drag {
                     let dx = self.cursor_pos.0 - start_cursor.0;
                     let dy = self.cursor_pos.1 - start_cursor.1;
@@ -388,20 +561,95 @@ impl baseview::WindowHandler for HydraGlWindow {
                     let new_h = (start_size.1 as f32 + dy).round() as u32;
                     self.apply_resize(window, new_w, new_h);
                 }
-            }
-            BvEvent::Mouse(MouseEvent::ButtonPressed {
-                button: MouseButton::Left,
-                ..
-            }) => {
-                if self.in_resize_handle(self.cursor_pos) {
-                    self.resize_drag = Some((self.cursor_pos, self.editor_size.load()));
+                if self.editor_open {
+                    self.pending_egui_events
+                        .push(egui::Event::PointerMoved(egui::pos2(
+                            self.cursor_pos.0,
+                            self.cursor_pos.1,
+                        )));
                 }
             }
-            BvEvent::Mouse(MouseEvent::ButtonReleased {
-                button: MouseButton::Left,
-                ..
-            }) => {
-                self.resize_drag = None;
+            BvEvent::Mouse(MouseEvent::ButtonPressed { button, modifiers }) => {
+                self.modifiers = modifiers;
+                if button == MouseButton::Left && self.in_resize_handle(self.cursor_pos) {
+                    self.resize_drag = Some((self.cursor_pos, self.editor_size.load()));
+                }
+                if self.editor_open {
+                    if let Some(b) = bv_button_to_egui(button) {
+                        self.pending_egui_events.push(egui::Event::PointerButton {
+                            pos: egui::pos2(self.cursor_pos.0, self.cursor_pos.1),
+                            button: b,
+                            pressed: true,
+                            modifiers: kt_modifiers_to_egui(modifiers),
+                        });
+                    }
+                }
+            }
+            BvEvent::Mouse(MouseEvent::ButtonReleased { button, modifiers }) => {
+                self.modifiers = modifiers;
+                if button == MouseButton::Left {
+                    self.resize_drag = None;
+                }
+                if self.editor_open {
+                    if let Some(b) = bv_button_to_egui(button) {
+                        self.pending_egui_events.push(egui::Event::PointerButton {
+                            pos: egui::pos2(self.cursor_pos.0, self.cursor_pos.1),
+                            button: b,
+                            pressed: false,
+                            modifiers: kt_modifiers_to_egui(modifiers),
+                        });
+                    }
+                }
+            }
+            BvEvent::Mouse(MouseEvent::WheelScrolled { delta, modifiers }) => {
+                self.modifiers = modifiers;
+                if self.editor_open {
+                    let delta = match delta {
+                        baseview::ScrollDelta::Lines { x, y } => egui::vec2(x, y) * 24.0,
+                        baseview::ScrollDelta::Pixels { x, y } => egui::vec2(x, y),
+                    };
+                    self.pending_egui_events.push(egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta,
+                        modifiers: kt_modifiers_to_egui(modifiers),
+                    });
+                }
+            }
+            BvEvent::Keyboard(kb_event) => {
+                self.modifiers = kb_event.modifiers;
+                let is_toggle = kb_event.code == Code::KeyE
+                    && kb_event.state == KeyState::Down
+                    && (kb_event.modifiers.contains(KtModifiers::CONTROL)
+                        || kb_event.modifiers.contains(KtModifiers::META));
+                if is_toggle {
+                    self.editor_open = !self.editor_open;
+                } else if self.editor_open {
+                    let pressed = kb_event.state == KeyState::Down;
+                    let modifiers = kt_modifiers_to_egui(kb_event.modifiers);
+                    if let Some(key) = kt_code_to_egui_key(kb_event.code) {
+                        self.pending_egui_events.push(egui::Event::Key {
+                            key,
+                            physical_key: Some(key),
+                            pressed,
+                            repeat: false,
+                            modifiers,
+                        });
+                    }
+                    // Only plain character presses (no Ctrl/Cmd chord,
+                    // which are shortcuts, not text) are forwarded as
+                    // text input - mirrors how every other egui backend
+                    // integration splits `Key`/`Text` events.
+                    if pressed
+                        && !modifiers.ctrl
+                        && !modifiers.command
+                        && !modifiers.mac_cmd
+                    {
+                        if let KtKey::Character(s) = &kb_event.key {
+                            self.pending_egui_events
+                                .push(egui::Event::Text(s.clone()));
+                        }
+                    }
+                }
             }
             // Fires when the OS window itself is resized directly (only
             // reachable in the standalone binary - a parented/embedded
@@ -419,6 +667,108 @@ impl baseview::WindowHandler for HydraGlWindow {
 
         baseview::EventStatus::Captured
     }
+}
+
+/// Converts a `keyboard_types::Modifiers` snapshot into `egui::Modifiers`.
+/// `command`/`mac_cmd` follow platform convention (Cmd on macOS, Ctrl
+/// elsewhere), matching every other egui backend integration.
+fn kt_modifiers_to_egui(m: KtModifiers) -> egui::Modifiers {
+    let mac_cmd = cfg!(target_os = "macos") && m.contains(KtModifiers::META);
+    let command = if cfg!(target_os = "macos") {
+        m.contains(KtModifiers::META)
+    } else {
+        m.contains(KtModifiers::CONTROL)
+    };
+    egui::Modifiers {
+        alt: m.contains(KtModifiers::ALT),
+        ctrl: m.contains(KtModifiers::CONTROL),
+        shift: m.contains(KtModifiers::SHIFT),
+        mac_cmd,
+        command,
+    }
+}
+
+fn bv_button_to_egui(button: MouseButton) -> Option<egui::PointerButton> {
+    match button {
+        MouseButton::Left => Some(egui::PointerButton::Primary),
+        MouseButton::Right => Some(egui::PointerButton::Secondary),
+        MouseButton::Middle => Some(egui::PointerButton::Middle),
+        MouseButton::Back => Some(egui::PointerButton::Extra1),
+        MouseButton::Forward => Some(egui::PointerButton::Extra2),
+        MouseButton::Other(_) => None,
+    }
+}
+
+/// Maps a physical key position to an `egui::Key` - only the subset
+/// needed for text editing (letters, digits, navigation, punctuation);
+/// anything else (media keys, function keys, etc.) is ignored.
+fn kt_code_to_egui_key(code: Code) -> Option<egui::Key> {
+    use egui::Key as EK;
+    Some(match code {
+        Code::ArrowDown => EK::ArrowDown,
+        Code::ArrowLeft => EK::ArrowLeft,
+        Code::ArrowRight => EK::ArrowRight,
+        Code::ArrowUp => EK::ArrowUp,
+        Code::Escape => EK::Escape,
+        Code::Tab => EK::Tab,
+        Code::Backspace => EK::Backspace,
+        Code::Enter | Code::NumpadEnter => EK::Enter,
+        Code::Space => EK::Space,
+        Code::Insert => EK::Insert,
+        Code::Delete => EK::Delete,
+        Code::Home => EK::Home,
+        Code::End => EK::End,
+        Code::PageUp => EK::PageUp,
+        Code::PageDown => EK::PageDown,
+        Code::Minus => EK::Minus,
+        Code::Equal => EK::Equals,
+        Code::Comma => EK::Comma,
+        Code::Period => EK::Period,
+        Code::Semicolon => EK::Semicolon,
+        Code::Quote => EK::Quote,
+        Code::Backquote => EK::Backtick,
+        Code::BracketLeft => EK::OpenBracket,
+        Code::BracketRight => EK::CloseBracket,
+        Code::Backslash => EK::Backslash,
+        Code::Slash => EK::Slash,
+        Code::Digit0 => EK::Num0,
+        Code::Digit1 => EK::Num1,
+        Code::Digit2 => EK::Num2,
+        Code::Digit3 => EK::Num3,
+        Code::Digit4 => EK::Num4,
+        Code::Digit5 => EK::Num5,
+        Code::Digit6 => EK::Num6,
+        Code::Digit7 => EK::Num7,
+        Code::Digit8 => EK::Num8,
+        Code::Digit9 => EK::Num9,
+        Code::KeyA => EK::A,
+        Code::KeyB => EK::B,
+        Code::KeyC => EK::C,
+        Code::KeyD => EK::D,
+        Code::KeyE => EK::E,
+        Code::KeyF => EK::F,
+        Code::KeyG => EK::G,
+        Code::KeyH => EK::H,
+        Code::KeyI => EK::I,
+        Code::KeyJ => EK::J,
+        Code::KeyK => EK::K,
+        Code::KeyL => EK::L,
+        Code::KeyM => EK::M,
+        Code::KeyN => EK::N,
+        Code::KeyO => EK::O,
+        Code::KeyP => EK::P,
+        Code::KeyQ => EK::Q,
+        Code::KeyR => EK::R,
+        Code::KeyS => EK::S,
+        Code::KeyT => EK::T,
+        Code::KeyU => EK::U,
+        Code::KeyV => EK::V,
+        Code::KeyW => EK::W,
+        Code::KeyX => EK::X,
+        Code::KeyY => EK::Y,
+        Code::KeyZ => EK::Z,
+        _ => return None,
+    })
 }
 
 struct HydraEditor {

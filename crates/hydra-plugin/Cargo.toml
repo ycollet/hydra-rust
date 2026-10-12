@@ -33,3 +33,18 @@ glow = "0.16"
 crossbeam = "0.8"
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
+# In-window live-code editor overlay (see the module doc comment's
+# "In-window editor" section) - `egui_glow` is a bare GL-rendering
+# backend for egui with no window-toolkit of its own, so baseview's
+# mouse/keyboard events are translated into `egui::RawInput` by hand in
+# `HydraGlWindow::on_event`/`on_frame` instead of pulling in a second
+# windowing stack (egui-baseview/winit) alongside the one baseview
+# already provides.
+egui = "0.29"
+egui_glow = { version = "0.29", default-features = false }
+# Needed directly (not just transitively via `baseview`) so
+# `baseview::Event::Keyboard`'s payload type can be named/matched on in
+# `HydraGlWindow::on_event` - pinned to the same major version baseview
+# itself depends on so cargo unifies them into one `keyboard-types` in
+# the dependency graph.
+keyboard-types = "0.6"

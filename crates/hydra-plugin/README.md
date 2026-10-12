@@ -24,7 +24,8 @@ library-embedding path the main crate's README documents for Sova.
   environment variable (falls back to a small built-in default sketch if
   unset/unreadable). The file's mtime is polled once per frame and
   hot-reloaded on change - edit-and-save in any external editor to
-  live-code from inside a DAW. There is **no in-window text editor yet**.
+  live-code from inside a DAW. There's also an **in-window text editor**
+  (Ctrl/Cmd+E to toggle) - see below.
 - **Audio**: the host's own audio buffer is downmixed to mono in
   `process()` (the real-time audio thread) and pushed into a
   `hydra_rust::audio::AudioBuffer` - a bounded ring buffer with no
@@ -50,7 +51,17 @@ library-embedding path the main crate's README documents for Sova.
   `.pause()`/`.show()`/`.hide()` are accepted but are no-ops (there's no
   system MIDI port to start/stop, and no MIDI monitor overlay in this v1
   window).
-- **Mouse**: not yet wired into `mouse`/`m` reads (always `[0, 0]`).
+- **Mouse**: wired into `mouse`/`m` reads from the window's actual
+  cursor position, normalized to `[0, 1]` with the Y axis flipped to
+  match the desktop app's own convention (origin at the bottom-left).
+- **In-window editor**: Ctrl/Cmd+E toggles a text-editor overlay (built
+  with `egui`, rendered via `egui_glow` on top of the Hydra output) with
+  its own script buffer, independent of the `HYDRA_PLUGIN_SCRIPT` file -
+  "Eval" (or Ctrl/Cmd+Enter) compiles it, "Load file" copies in the
+  currently active file/default-sketch code as a starting point, and any
+  eval/shader error is shown inline. There's no syntax highlighting and
+  no system-clipboard integration yet (copy/paste works only within the
+  text field itself, not to/from other apps).
 - **Window is resizable**: drag the bottom-right corner (a small
   translucent square marks the hotspot) to resize the window directly;
   nih-plug doesn't support host-initiated (OS-border) resize of an
@@ -117,3 +128,8 @@ start and run without panicking, and `cargo xtask bundle` still produces
 valid, codesigned bundles after the change - actually dragging the
 resize handle (and a host accepting/rejecting `request_resize()`) has
 not yet been tested interactively in a real DAW or the standalone app.
+The in-window editor overlay's build/clippy/bundle are likewise
+verified and the standalone binary still starts and runs without
+panicking after adding it - actually opening the overlay (Ctrl/Cmd+E),
+typing, and evaluating has not yet been tested interactively in a real
+DAW or the standalone app.
