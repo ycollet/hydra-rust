@@ -31,6 +31,23 @@
 //! producer. Audio itself is still passed through unchanged (this is an
 //! analysis tap, not an audio effect).
 
+//! ## MIDI (v1)
+//!
+//! `MIDI_INPUT` is set to `MidiConfig::MidiCCs`, so the host delivers
+//! structured note-on/off, polyphonic/channel pressure, and CC events
+//! directly to `process()` (the real-time audio thread) - there's no
+//! system-MIDI-port connection here at all (unlike the desktop app's
+//! `MidiManager`, which uses `midir` to read a real MIDI input device).
+//! Those events are fed into a shared [`hydra_rust::midi::MidiBridge`],
+//! polled once per frame on the render thread via
+//! [`hydra_rust::midi::MidiPoller`] into `midi_note`/`midi_velocity`/
+//! `midi_cc`/etc. - the same `a.fft[]`-style bridge/poller split the
+//! audio pipeline above uses. Scripts' own `midi.cc(i).smooth(f)`/
+//! `.adsr(...)` calls are honored (applied directly to the bridge after
+//! each `eval()`); `midi.start()`/`.pause()`/`.show()`/`.hide()` are
+//! accepted but are no-ops here (there's no system MIDI port to start/
+//! stop, and no MIDI monitor overlay in this v1 window).
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
@@ -40,7 +57,8 @@ use nih_plug::prelude::*;
 use raw_window_handle::{HasRawWindowHandle, RawWindowHandle};
 
 use hydra_rust::audio::{AudioAnalyzer, AudioBuffer};
-use hydra_rust::eval::RenderMode;
+use hydra_rust::eval::{MidiRequest, RenderMode};
+use hydra_rust::midi::{MidiBridge, MidiPoller};
 use hydra_rust::renderer::{self, RenderUniforms, ShaderRenderer};
 
 const DEFAULT_SKETCH: &str = "osc(60, 0.1, 1.2).out()";
@@ -78,10 +96,12 @@ struct HydraGlWindow {
     render_mode: RenderMode,
     audio_buffer: AudioBuffer,
     audio_analyzer: AudioAnalyzer,
+    midi_bridge: MidiBridge,
+    midi_poller: MidiPoller,
 }
 
 impl HydraGlWindow {
-    fn new(window: &mut baseview::Window<'_>, audio_buffer: AudioBuffer) -> Self {
+    fn new(window: &mut baseview::Window<'_>, audio_buffer: AudioBuffer, midi_bridge: MidiBridge) -> Self {
         let gl_context = window
             .gl_context()
             .expect("failed to get baseview gl context");
@@ -103,10 +123,12 @@ impl HydraGlWindow {
                 gl_context.get_proc_address(s)
             }));
             let mut renderer = ShaderRenderer::new(gl.clone());
-            let render_mode = Self::compile(&mut renderer, &code);
+            let render_mode = Self::compile(&mut renderer, &code, &midi_bridge);
             gl_context.make_not_current();
             (gl, renderer, render_mode)
         };
+
+        let midi_poller = MidiPoller::new(midi_bridge.clone());
 
         Self {
             gl,
@@ -117,13 +139,18 @@ impl HydraGlWindow {
             render_mode,
             audio_buffer,
             audio_analyzer: AudioAnalyzer::new(),
+            midi_bridge,
+            midi_poller,
         }
     }
 
     /// Compiles `code` into `renderer`'s buffers, logging (not panicking)
     /// on a script error and leaving whatever previously compiled, so a
-    /// typo while live-coding doesn't blank the editor window.
-    fn compile(renderer: &mut ShaderRenderer, code: &str) -> RenderMode {
+    /// typo while live-coding doesn't blank the editor window. Also
+    /// applies any `midi.*` requests the script generated (CC smoothing,
+    /// ADSR envelope slots) directly to `midi_bridge` - see the module
+    /// doc comment for which requests are honored here.
+    fn compile(renderer: &mut ShaderRenderer, code: &str, midi_bridge: &MidiBridge) -> RenderMode {
         match hydra_rust::eval(code) {
             Ok(result) => {
                 if let Some(ref td) = result.text_data {
@@ -136,6 +163,31 @@ impl HydraGlWindow {
                 for (i, filter) in result.buffer_filter.iter().enumerate() {
                     if let Some(mode) = filter {
                         renderer.set_buffer_filter(i, *mode);
+                    }
+                }
+                for req in &result.midi_requests {
+                    match *req {
+                        MidiRequest::SetCcSmooth { index, factor } => {
+                            midi_bridge.set_cc_smooth(index, factor);
+                        }
+                        MidiRequest::AdsrSlot {
+                            slot,
+                            note,
+                            a,
+                            d,
+                            s,
+                            r,
+                        } => {
+                            midi_bridge.set_adsr_slot(slot, note, a, d, s, r);
+                        }
+                        // The host (not this process) always owns MIDI
+                        // routing for a plugin - there's no system MIDI
+                        // port to start/pause - and there's no MIDI
+                        // monitor overlay in this v1 window either.
+                        MidiRequest::Start
+                        | MidiRequest::Pause
+                        | MidiRequest::Show
+                        | MidiRequest::Hide => {}
                     }
                 }
                 result.render_mode
@@ -160,7 +212,7 @@ impl HydraGlWindow {
         if Some(mtime) != self.last_mtime {
             self.last_mtime = Some(mtime);
             let code = std::fs::read_to_string(path).unwrap_or_default();
-            self.render_mode = Self::compile(&mut self.renderer, &code);
+            self.render_mode = Self::compile(&mut self.renderer, &code, &self.midi_bridge);
         }
     }
 }
@@ -186,6 +238,7 @@ impl baseview::WindowHandler for HydraGlWindow {
         let (w, h) = (HYDRA_EDITOR_WIDTH, HYDRA_EDITOR_HEIGHT);
         self.renderer.ensure_resolution(w, h);
 
+        let midi_frame = self.midi_poller.poll();
         let uniforms = RenderUniforms {
             time: self.start.elapsed().as_secs_f32(),
             resolution: [w as f32, h as f32],
@@ -200,13 +253,16 @@ impl baseview::WindowHandler for HydraGlWindow {
             // `self.audio_buffer`; polling/FFT only ever happens here, on
             // the render thread.
             fft: self.audio_analyzer.poll(&self.audio_buffer),
-            midi_note: [0.0; hydra_rust::midi::NUM_MIDI_NOTES],
-            midi_velocity: [0.0; hydra_rust::midi::NUM_MIDI_NOTES],
-            midi_cc: [0.0; hydra_rust::midi::NUM_MIDI_CC],
-            midi_cc_smoothed: [0.0; hydra_rust::midi::NUM_MIDI_CC],
-            midi_envelope: [0.0; hydra_rust::midi::NUM_MIDI_ENVELOPES],
-            midi_aftertouch: [0.0; hydra_rust::midi::NUM_MIDI_NOTES],
-            midi_channel_aftertouch: 0.0,
+            // Fed from the host's own MIDI events, pushed in
+            // `HydraPlugin::process()` into `self.midi_bridge`; polling
+            // (CC smoothing, envelope timing) only ever happens here.
+            midi_note: midi_frame.note,
+            midi_velocity: midi_frame.velocity,
+            midi_cc: midi_frame.cc,
+            midi_cc_smoothed: midi_frame.cc_smoothed,
+            midi_envelope: midi_frame.envelope,
+            midi_aftertouch: midi_frame.aftertouch,
+            midi_channel_aftertouch: midi_frame.channel_aftertouch,
             osc: [0.0; hydra_rust::osc::NUM_OSC_SLOTS],
         };
 
@@ -235,6 +291,7 @@ const HYDRA_EDITOR_HEIGHT: u32 = 576;
 
 struct HydraEditor {
     audio_buffer: AudioBuffer,
+    midi_bridge: MidiBridge,
 }
 
 impl Editor for HydraEditor {
@@ -244,6 +301,7 @@ impl Editor for HydraEditor {
         _context: Arc<dyn GuiContext>,
     ) -> Box<dyn std::any::Any + Send> {
         let audio_buffer = self.audio_buffer.clone();
+        let midi_bridge = self.midi_bridge.clone();
         let window = baseview::Window::open_parented(
             &ParentWindowHandleAdapter(parent),
             WindowOpenOptions {
@@ -269,7 +327,7 @@ impl Editor for HydraEditor {
                 }),
             },
             move |window: &mut baseview::Window<'_>| -> HydraGlWindow {
-                HydraGlWindow::new(window, audio_buffer.clone())
+                HydraGlWindow::new(window, audio_buffer.clone(), midi_bridge.clone())
             },
         );
 
@@ -335,6 +393,7 @@ struct HydraPluginParams {}
 pub struct HydraPlugin {
     params: Arc<HydraPluginParams>,
     audio_buffer: AudioBuffer,
+    midi_bridge: MidiBridge,
     /// Reused across `process()` calls to downmix the host's planar
     /// channel buffers into mono before pushing into `audio_buffer` -
     /// preallocated to `max_buffer_size` in `initialize()` so pushing
@@ -348,6 +407,7 @@ impl Default for HydraPlugin {
         Self {
             params: Arc::new(HydraPluginParams::default()),
             audio_buffer: AudioBuffer::new(),
+            midi_bridge: MidiBridge::new(),
             mono_scratch: Vec::new(),
         }
     }
@@ -370,7 +430,7 @@ impl Plugin for HydraPlugin {
         ..AudioIOLayout::const_default()
     }];
 
-    const MIDI_INPUT: MidiConfig = MidiConfig::None;
+    const MIDI_INPUT: MidiConfig = MidiConfig::MidiCCs;
     const SAMPLE_ACCURATE_AUTOMATION: bool = false;
 
     type SysExMessage = ();
@@ -383,6 +443,7 @@ impl Plugin for HydraPlugin {
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
         Some(Box::new(HydraEditor {
             audio_buffer: self.audio_buffer.clone(),
+            midi_bridge: self.midi_bridge.clone(),
         }))
     }
 
@@ -400,8 +461,40 @@ impl Plugin for HydraPlugin {
         &mut self,
         buffer: &mut Buffer,
         _aux: &mut AuxiliaryBuffers,
-        _context: &mut impl ProcessContext<Self>,
+        context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
+        // Drain every MIDI event the host delivered for this block and
+        // apply it directly to `midi_bridge` - `MidiBridge`'s own methods
+        // just lock a `Mutex` and write plain floats/array slots (same
+        // real-time-safety trade-off `audio_buffer.push()` below already
+        // makes - no heap allocation either way), so this is safe to call
+        // from `process()`.
+        while let Some(event) = context.next_event() {
+            match event {
+                NoteEvent::NoteOn { note, velocity, .. } => {
+                    self.midi_bridge.note_on(note, velocity);
+                }
+                NoteEvent::NoteOff { note, velocity, .. } => {
+                    // A real note-off always clears the note regardless of
+                    // its (released) velocity - `MidiBridge::note_on`'s
+                    // own velocity<=0 shorthand only matters for the raw
+                    // system-MIDI-port path.
+                    let _ = velocity;
+                    self.midi_bridge.note_off(note);
+                }
+                NoteEvent::PolyPressure { note, pressure, .. } => {
+                    self.midi_bridge.poly_pressure(note, pressure);
+                }
+                NoteEvent::MidiCC { cc, value, .. } => {
+                    self.midi_bridge.control_change(cc, value);
+                }
+                NoteEvent::MidiChannelPressure { pressure, .. } => {
+                    self.midi_bridge.channel_pressure(pressure);
+                }
+                _ => {}
+            }
+        }
+
         // v1: audio is passed through unchanged - this is purely an
         // analysis tap. Downmix the host's planar channel buffers to mono
         // and push into `audio_buffer`; the editor's render loop (a

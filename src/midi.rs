@@ -156,8 +156,11 @@ mod imp {
             }
         }
 
-        fn note_on(&mut self, note: u8, velocity: u8) {
-            if velocity == 0 {
+        /// `velocity` is already normalized to `[0, 1]` - callers that
+        /// only have a raw `0..127` MIDI byte (the system-MIDI-port path,
+        /// see `handle_message` below) divide by 127 before calling this.
+        fn note_on(&mut self, note: u8, velocity: f32) {
+            if velocity <= 0.0 {
                 // Many controllers send note-on with velocity 0 instead of
                 // a real note-off - conventional MIDI shorthand.
                 self.note_off(note);
@@ -167,11 +170,10 @@ mod imp {
             if note >= NUM_MIDI_NOTES {
                 return;
             }
-            let v = velocity as f32 / 127.0;
-            self.note_velocity[note] = v;
+            self.note_velocity[note] = velocity;
             for slot in self.slots.iter_mut().flatten() {
                 if slot.note == note as i64 {
-                    slot.envelope.trigger(v);
+                    slot.envelope.trigger(velocity);
                 }
             }
         }
@@ -189,22 +191,115 @@ mod imp {
             }
         }
 
-        fn control_change(&mut self, index: u8, value: u8) {
+        fn control_change(&mut self, index: u8, value: f32) {
             let index = index as usize;
             if index < NUM_MIDI_CC {
-                self.cc_value[index] = value as f32 / 127.0;
+                self.cc_value[index] = value;
             }
         }
 
-        fn poly_aftertouch(&mut self, note: u8, value: u8) {
+        fn poly_aftertouch(&mut self, note: u8, value: f32) {
             let note = note as usize;
             if note < NUM_MIDI_NOTES {
-                self.aftertouch[note] = value as f32 / 127.0;
+                self.aftertouch[note] = value;
             }
         }
 
-        fn set_channel_aftertouch(&mut self, value: u8) {
-            self.channel_aftertouch = value as f32 / 127.0;
+        fn set_channel_aftertouch(&mut self, value: f32) {
+            self.channel_aftertouch = value;
+        }
+    }
+
+    /// A cheap, cloneable handle onto the shared MIDI state - the MIDI
+    /// equivalent of `audio::AudioBuffer`. Feeding events into this
+    /// doesn't require a system MIDI port at all: the desktop app's
+    /// [`MidiManager`] uses one internally (fed by real `midir` input
+    /// callbacks), while `hydra-plugin` feeds it directly from the host's
+    /// own structured [`nih_plug::prelude::NoteEvent`]s instead, with no
+    /// `midir`/system-MIDI-device dependency at all.
+    #[derive(Clone)]
+    pub struct MidiBridge(Arc<Mutex<SharedState>>);
+
+    impl Default for MidiBridge {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl MidiBridge {
+        pub fn new() -> Self {
+            Self(Arc::new(Mutex::new(SharedState::new())))
+        }
+
+        /// `velocity` is normalized to `[0, 1]`, matching nih-plug's own
+        /// `NoteEvent::NoteOn::velocity` representation directly - no
+        /// `u8`-byte round trip needed for host-fed events.
+        pub fn note_on(&self, note: u8, velocity: f32) {
+            self.0.lock().unwrap().note_on(note, velocity);
+        }
+
+        pub fn note_off(&self, note: u8) {
+            self.0.lock().unwrap().note_off(note);
+        }
+
+        /// Polyphonic key pressure, `pressure` normalized to `[0, 1]`.
+        pub fn poly_pressure(&self, note: u8, pressure: f32) {
+            self.0.lock().unwrap().poly_aftertouch(note, pressure);
+        }
+
+        /// A MIDI control change, `value` normalized to `[0, 1]`.
+        pub fn control_change(&self, cc: u8, value: f32) {
+            self.0.lock().unwrap().control_change(cc, value);
+        }
+
+        /// Channel pressure, `pressure` normalized to `[0, 1]`.
+        pub fn channel_pressure(&self, pressure: f32) {
+            self.0.lock().unwrap().set_channel_aftertouch(pressure);
+        }
+
+        pub fn set_cc_smooth(&self, index: usize, factor: f32) {
+            if index < NUM_MIDI_CC {
+                self.0.lock().unwrap().cc_smooth_factor[index] = factor;
+            }
+        }
+
+        /// (Re)assigns envelope slot `slot` to watch `note`, with the given
+        /// ADSR parameters (milliseconds for a/d/r, a 0-1 sustain level).
+        pub fn set_adsr_slot(&self, slot: usize, note: i64, a: f32, d: f32, s: f32, r: f32) {
+            if slot >= NUM_MIDI_ENVELOPES {
+                return;
+            }
+            let mut state = self.0.lock().unwrap();
+            state.slots[slot] = Some(EnvelopeSlot {
+                note,
+                envelope: Envelope::new(a, d, s, r),
+            });
+        }
+
+        /// Parses a raw 2-3 byte MIDI message (as delivered by a system
+        /// MIDI port via `midir`) and applies it - only used by
+        /// [`MidiManager::ensure_started`]'s connection callback.
+        fn handle_raw_message(&self, message: &[u8]) {
+            let Some(&status) = message.first() else {
+                return;
+            };
+            let kind = status & 0xF0;
+            match kind {
+                0x90 if message.len() >= 3 => self.note_on(message[1], message[2] as f32 / 127.0),
+                0x80 if message.len() >= 3 => self.note_off(message[1]),
+                0xB0 if message.len() >= 3 => {
+                    self.control_change(message[1], message[2] as f32 / 127.0)
+                }
+                // Polyphonic key pressure - two data bytes (note, pressure).
+                0xA0 if message.len() >= 3 => {
+                    self.poly_pressure(message[1], message[2] as f32 / 127.0)
+                }
+                // Channel pressure - only *one* data byte (pressure),
+                // unlike every message kind above - a real 2-byte MIDI
+                // message, not a truncated 3-byte one.
+                0xD0 if message.len() >= 2 => self.channel_pressure(message[1] as f32 / 127.0),
+                _ => {}
+            }
         }
     }
 
@@ -221,98 +316,31 @@ mod imp {
         pub channel_aftertouch: f32,
     }
 
-    pub struct MidiManager {
-        state: Arc<Mutex<SharedState>>,
-        connections: Vec<MidiInputConnection<()>>,
-        started: bool,
+    /// Per-frame polling state (CC smoothing accumulator, envelope clock) -
+    /// kept separate from [`MidiBridge`] so each render thread/window can
+    /// own its own smoothing state while all sharing the same underlying
+    /// note/CC/aftertouch values. Mirrors the
+    /// bridge/analyzer split `audio::AudioBuffer`/`audio::AudioAnalyzer`
+    /// already use.
+    pub struct MidiPoller {
+        bridge: MidiBridge,
         start_time: Instant,
         cc_smoothed: [f32; NUM_MIDI_CC],
         cc_smoothed_init: [bool; NUM_MIDI_CC],
     }
 
-    impl Default for MidiManager {
-        fn default() -> Self {
-            Self::new()
-        }
-    }
-
-    impl MidiManager {
-        pub fn new() -> Self {
+    impl MidiPoller {
+        pub fn new(bridge: MidiBridge) -> Self {
             Self {
-                state: Arc::new(Mutex::new(SharedState::new())),
-                connections: Vec::new(),
-                started: false,
+                bridge,
                 start_time: Instant::now(),
                 cc_smoothed: [0.0; NUM_MIDI_CC],
                 cc_smoothed_init: [false; NUM_MIDI_CC],
             }
         }
 
-        /// Connects to every currently-available MIDI input port (see the
-        /// module doc comment on why devices aren't distinguished). Not
-        /// called automatically - only once a script actually calls
-        /// `midi.start()`, the same lazy-start-on-script-intent treatment
-        /// `AudioManager::ensure_started` gives the microphone.
-        pub fn ensure_started(&mut self) {
-            if self.started {
-                return;
-            }
-            self.started = true;
-
-            let Ok(probe) = MidiInput::new("hydra-rust-probe") else {
-                log::warn!("midi.start(): failed to initialize MIDI input");
-                return;
-            };
-            for port in probe.ports() {
-                let name = probe.port_name(&port).unwrap_or_else(|_| "unknown".into());
-                let Ok(mut input) = MidiInput::new("hydra-rust") else {
-                    continue;
-                };
-                input.ignore(midir::Ignore::None);
-                let state = self.state.clone();
-                match input.connect(
-                    &port,
-                    "hydra-rust-read",
-                    move |_timestamp, message, _| {
-                        handle_message(&state, message);
-                    },
-                    (),
-                ) {
-                    Ok(conn) => {
-                        log::info!("midi: connected to \"{name}\"");
-                        self.connections.push(conn);
-                    }
-                    Err(e) => log::warn!("midi: failed to connect to \"{name}\": {e}"),
-                }
-            }
-        }
-
-        pub fn pause(&mut self) {
-            self.connections.clear();
-            self.started = false;
-        }
-
-        pub fn set_cc_smooth(&mut self, index: usize, factor: f32) {
-            if index < NUM_MIDI_CC {
-                self.state.lock().unwrap().cc_smooth_factor[index] = factor;
-            }
-        }
-
-        /// (Re)assigns envelope slot `slot` to watch `note`, with the given
-        /// ADSR parameters (milliseconds for a/d/r, a 0-1 sustain level).
-        pub fn set_adsr_slot(&mut self, slot: usize, note: i64, a: f32, d: f32, s: f32, r: f32) {
-            if slot >= NUM_MIDI_ENVELOPES {
-                return;
-            }
-            let mut state = self.state.lock().unwrap();
-            state.slots[slot] = Some(EnvelopeSlot {
-                note,
-                envelope: Envelope::new(a, d, s, r),
-            });
-        }
-
         pub fn poll(&mut self) -> MidiFrame {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.bridge.0.lock().unwrap();
 
             let mut note = [0.0; NUM_MIDI_NOTES];
             for (i, v) in state.note_velocity.iter().enumerate() {
@@ -354,61 +382,128 @@ mod imp {
         }
     }
 
-    fn handle_message(state: &Arc<Mutex<SharedState>>, message: &[u8]) {
-        let Some(&status) = message.first() else {
-            return;
-        };
-        let kind = status & 0xF0;
-        let mut state = state.lock().unwrap();
-        match kind {
-            0x90 if message.len() >= 3 => state.note_on(message[1], message[2]),
-            0x80 if message.len() >= 3 => state.note_off(message[1]),
-            0xB0 if message.len() >= 3 => state.control_change(message[1], message[2]),
-            // Polyphonic key pressure - two data bytes (note, pressure).
-            0xA0 if message.len() >= 3 => state.poly_aftertouch(message[1], message[2]),
-            // Channel pressure - only *one* data byte (pressure), unlike
-            // every message kind above - a real 2-byte MIDI message, not a
-            // truncated 3-byte one.
-            0xD0 if message.len() >= 2 => state.set_channel_aftertouch(message[1]),
-            _ => {}
+    /// The desktop app's own MIDI backend: connects directly to system
+    /// MIDI input ports via `midir`. `hydra-plugin` does *not* use this -
+    /// it feeds host-provided events straight into a [`MidiBridge`]
+    /// instead (see the crate's own `lib.rs`), since the host (not this
+    /// process) owns MIDI routing for a plugin.
+    pub struct MidiManager {
+        bridge: MidiBridge,
+        poller: MidiPoller,
+        connections: Vec<MidiInputConnection<()>>,
+        started: bool,
+    }
+
+    impl Default for MidiManager {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl MidiManager {
+        pub fn new() -> Self {
+            let bridge = MidiBridge::new();
+            Self {
+                poller: MidiPoller::new(bridge.clone()),
+                bridge,
+                connections: Vec::new(),
+                started: false,
+            }
+        }
+
+        /// Connects to every currently-available MIDI input port (see the
+        /// module doc comment on why devices aren't distinguished). Not
+        /// called automatically - only once a script actually calls
+        /// `midi.start()`, the same lazy-start-on-script-intent treatment
+        /// `AudioManager::ensure_started` gives the microphone.
+        pub fn ensure_started(&mut self) {
+            if self.started {
+                return;
+            }
+            self.started = true;
+
+            let Ok(probe) = MidiInput::new("hydra-rust-probe") else {
+                log::warn!("midi.start(): failed to initialize MIDI input");
+                return;
+            };
+            for port in probe.ports() {
+                let name = probe.port_name(&port).unwrap_or_else(|_| "unknown".into());
+                let Ok(mut input) = MidiInput::new("hydra-rust") else {
+                    continue;
+                };
+                input.ignore(midir::Ignore::None);
+                let bridge = self.bridge.clone();
+                match input.connect(
+                    &port,
+                    "hydra-rust-read",
+                    move |_timestamp, message, _| {
+                        bridge.handle_raw_message(message);
+                    },
+                    (),
+                ) {
+                    Ok(conn) => {
+                        log::info!("midi: connected to \"{name}\"");
+                        self.connections.push(conn);
+                    }
+                    Err(e) => log::warn!("midi: failed to connect to \"{name}\": {e}"),
+                }
+            }
+        }
+
+        pub fn pause(&mut self) {
+            self.connections.clear();
+            self.started = false;
+        }
+
+        pub fn set_cc_smooth(&mut self, index: usize, factor: f32) {
+            self.bridge.set_cc_smooth(index, factor);
+        }
+
+        /// (Re)assigns envelope slot `slot` to watch `note`, with the given
+        /// ADSR parameters (milliseconds for a/d/r, a 0-1 sustain level).
+        pub fn set_adsr_slot(&mut self, slot: usize, note: i64, a: f32, d: f32, s: f32, r: f32) {
+            self.bridge.set_adsr_slot(slot, note, a, d, s, r);
+        }
+
+        pub fn poll(&mut self) -> MidiFrame {
+            self.poller.poll()
         }
     }
 
     #[cfg(test)]
     mod tests {
-        use super::{Envelope, SharedState, handle_message};
-        use std::sync::{Arc, Mutex};
+        use super::{Envelope, MidiBridge};
 
         #[test]
         fn poly_aftertouch_sets_the_given_notes_value() {
-            let state = Arc::new(Mutex::new(SharedState::new()));
-            handle_message(&state, &[0xA0, 60, 100]);
-            assert_eq!(state.lock().unwrap().aftertouch[60], 100.0 / 127.0);
+            let bridge = MidiBridge::new();
+            bridge.handle_raw_message(&[0xA0, 60, 100]);
+            assert_eq!(bridge.0.lock().unwrap().aftertouch[60], 100.0 / 127.0);
         }
 
         #[test]
         fn channel_aftertouch_sets_the_shared_value_from_a_two_byte_message() {
-            let state = Arc::new(Mutex::new(SharedState::new()));
-            handle_message(&state, &[0xD0, 64]);
-            assert_eq!(state.lock().unwrap().channel_aftertouch, 64.0 / 127.0);
+            let bridge = MidiBridge::new();
+            bridge.handle_raw_message(&[0xD0, 64]);
+            assert_eq!(bridge.0.lock().unwrap().channel_aftertouch, 64.0 / 127.0);
         }
 
         #[test]
         fn aftertouch_on_different_notes_is_independent() {
-            let state = Arc::new(Mutex::new(SharedState::new()));
-            handle_message(&state, &[0xA0, 10, 20]);
-            handle_message(&state, &[0xA0, 11, 40]);
-            let guard = state.lock().unwrap();
+            let bridge = MidiBridge::new();
+            bridge.handle_raw_message(&[0xA0, 10, 20]);
+            bridge.handle_raw_message(&[0xA0, 11, 40]);
+            let guard = bridge.0.lock().unwrap();
             assert_eq!(guard.aftertouch[10], 20.0 / 127.0);
             assert_eq!(guard.aftertouch[11], 40.0 / 127.0);
         }
 
         #[test]
         fn a_truncated_message_of_an_otherwise_three_byte_kind_is_ignored_not_a_panic() {
-            let state = Arc::new(Mutex::new(SharedState::new()));
-            handle_message(&state, &[0x90, 60]); // note-on missing its velocity byte
-            handle_message(&state, &[0xA0, 60]); // poly aftertouch missing its value byte
-            let guard = state.lock().unwrap();
+            let bridge = MidiBridge::new();
+            bridge.handle_raw_message(&[0x90, 60]); // note-on missing its velocity byte
+            bridge.handle_raw_message(&[0xA0, 60]); // poly aftertouch missing its value byte
+            let guard = bridge.0.lock().unwrap();
             assert_eq!(guard.note_velocity[60], 0.0);
             assert_eq!(guard.aftertouch[60], 0.0);
         }

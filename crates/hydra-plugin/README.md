@@ -37,9 +37,22 @@ library-embedding path the main crate's README documents for Sova.
   (this is an analysis tap, not an audio effect). Tempo/transport sync
   (via nih-plug's host-transport info) is a natural follow-up, not yet
   wired up.
+- **MIDI**: `MIDI_INPUT` is `MidiConfig::MidiCCs`, so the host delivers
+  note-on/off, polyphonic/channel pressure, and CC events straight to
+  `process()` - there's no system-MIDI-port connection here at all (unlike
+  the desktop app's `midir`-based `MidiManager`). Those events are pushed
+  into a shared `hydra_rust::midi::MidiBridge`, polled once per frame on
+  the render thread via `hydra_rust::midi::MidiPoller`, feeding
+  `midi_note`/`midi_velocity`/`midi_cc`/`midi_cc_smoothed`/
+  `midi_envelope`/`midi_aftertouch`/`midi_channel_aftertouch` - so scripts
+  using `note()`/`cc()`/`.adsr(...)`/`.smooth(...)` react to the host's own
+  MIDI routing (e.g. a MIDI track feeding this plugin). `midi.start()`/
+  `.pause()`/`.show()`/`.hide()` are accepted but are no-ops (there's no
+  system MIDI port to start/stop, and no MIDI monitor overlay in this v1
+  window).
 - **Mouse**: not yet wired into `mouse`/`m` reads (always `[0, 0]`).
 - **Window is fixed-size** (`1024x576`) - not resizable yet.
-- **MIDI, webcam, OSC**: not exposed to the plugin build at all yet (the
+- **Webcam, OSC**: not exposed to the plugin build at all yet (the
   underlying `hydra-rust` features exist but aren't wired into this crate's
   `Cargo.toml`/editor - straightforward to add the same way `webcam` is
   feature-gated in the main crate).
@@ -83,4 +96,9 @@ tested. `cargo xtask bundle hydra-plugin --release` has been run and
 verified to produce correctly-structured, validly (ad-hoc) codesigned
 `.vst3`/`.clap` bundles on macOS (`codesign --verify --deep --strict`
 passes on both, and `Info.plist` reports the expected display name) -
-actually loading either in a real DAW has not yet been tested.
+actually loading either in a real DAW has not yet been tested. The MIDI
+bridge's unit-level plumbing is covered by `hydra_rust::midi`'s own test
+suite (note-on/off, pressure, CC parsing); the standalone binary has been
+run and confirmed to recognize a `--midi-input` device option and start
+without error - feeding it a real MIDI note/CC stream from inside an
+actual DAW host has not yet been tested.
