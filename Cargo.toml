@@ -1,3 +1,17 @@
+# This package is also the workspace root. `hydra-plugin` is a separate
+# member crate (VST3/CLAP/standalone plugin build) that depends on this
+# crate as a plain library (`default-features = false`) - see
+# `crates/hydra-plugin/README.md`.
+#
+# `default-members` deliberately excludes `hydra-plugin`: plain `cargo
+# build`/`cargo test`/`cargo run` (this project's long-established
+# rebuild/test workflow) must keep building/testing only the main
+# `hydra-rust` crate + `hydra` binary, without also pulling in nih-plug's
+# git dependencies. Build the plugin explicitly with `-p hydra-plugin`.
+[workspace]
+members = [".", "crates/hydra-plugin"]
+default-members = ["."]
+
 [package]
 name = "hydra-rust"
 version = "0.1.0"

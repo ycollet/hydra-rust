@@ -1,0 +1,35 @@
+[package]
+name = "hydra-plugin"
+version = "0.1.0"
+edition = "2021"
+description = "Hydra visual synthesizer as a VST3/CLAP/standalone plugin, rendering GLSL into the host's editor window via a raw OpenGL (glow) context"
+license = "AGPL-3.0-or-later"
+
+[lib]
+# `cdylib` is the VST3/CLAP plugin binary; `lib` is also kept so the
+# `standalone` nih-plug feature can build a normal standalone executable
+# from the same crate (see `src/main.rs`).
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+# `hydra-rust` is depended on as a plain library (no `gui` feature, so no
+# eframe/winit/arboard pulled in) - this plugin brings its own window via
+# baseview + a raw glow context instead, reusing only `eval()` and
+# `ShaderRenderer`/`render_multipass` from the core library.
+hydra-rust = { path = "../..", default-features = false }
+
+nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", features = [
+    "assert_process_allocs",
+    "standalone",
+] }
+baseview = { git = "https://github.com/RustAudio/baseview.git", rev = "9a0b42c09d712777b2edb4c5e0cb6baf21e988f0", features = [
+    "opengl",
+] }
+raw-window-handle = "0.5"
+# Pinned to the same version hydra-rust's own renderer uses, so
+# `ShaderRenderer::new`/`render_multipass` can be called directly with the
+# glow context baseview hands us - no adapter layer needed.
+glow = "0.16"
+crossbeam = "0.8"
+log = "0.4"
+serde = { version = "1", features = ["derive"] }
