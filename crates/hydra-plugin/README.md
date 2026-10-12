@@ -51,7 +51,17 @@ library-embedding path the main crate's README documents for Sova.
   system MIDI port to start/stop, and no MIDI monitor overlay in this v1
   window).
 - **Mouse**: not yet wired into `mouse`/`m` reads (always `[0, 0]`).
-- **Window is fixed-size** (`1024x576`) - not resizable yet.
+- **Window is resizable**: drag the bottom-right corner (a small
+  translucent square marks the hotspot) to resize the window directly;
+  nih-plug doesn't support host-initiated (OS-border) resize of an
+  embedded plugin editor yet, so this is the plugin's own
+  content-driven resize, the same pattern `nih_plug_vizia`'s
+  `ResizeHandle` widget uses. The new size is reported to the host via
+  `GuiContext::request_resize()`; if the host rejects it (some DAWs
+  don't support runtime editor resizing) the resize is rolled back. In
+  the standalone binary, dragging the real OS window border also works
+  and keeps the handle in sync. The size is clamped to a minimum of
+  256x144 and persisted across host project save/reload.
 - **Webcam, OSC**: not exposed to the plugin build at all yet (the
   underlying `hydra-rust` features exist but aren't wired into this crate's
   `Cargo.toml`/editor - straightforward to add the same way `webcam` is
@@ -101,4 +111,9 @@ bridge's unit-level plumbing is covered by `hydra_rust::midi`'s own test
 suite (note-on/off, pressure, CC parsing); the standalone binary has been
 run and confirmed to recognize a `--midi-input` device option and start
 without error - feeding it a real MIDI note/CC stream from inside an
-actual DAW host has not yet been tested.
+actual DAW host has not yet been tested. The resizable-window code
+builds and passes clippy, the standalone binary has been confirmed to
+start and run without panicking, and `cargo xtask bundle` still produces
+valid, codesigned bundles after the change - actually dragging the
+resize handle (and a host accepting/rejecting `request_resize()`) has
+not yet been tested interactively in a real DAW or the standalone app.

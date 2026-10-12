@@ -47,12 +47,32 @@
 //! each `eval()`); `midi.start()`/`.pause()`/`.show()`/`.hide()` are
 //! accepted but are no-ops here (there's no system MIDI port to start/
 //! stop, and no MIDI monitor overlay in this v1 window).
+//!
+//! ## Resizing (v1)
+//!
+//! The window starts at a default size but can be resized two ways: (1)
+//! dragging the small translucent square handle drawn in the
+//! bottom-right corner of the content itself (the same "plugin draws its
+//! own resize handle" pattern `nih_plug_vizia::widgets::ResizeHandle`
+//! uses, since nih-plug doesn't yet support host-initiated/OS-border
+//! plugin-window resizing - see its own `Editor` trait doc comment), or
+//! (2), for the standalone binary only, dragging the real OS window
+//! border (baseview resizes its own window directly, no in-content
+//! handle needed there).
+//! Either way, the new size is stored in a shared, host-state-persisted
+//! `Arc<AtomicCell<(u32, u32)>>` (`HydraPluginParams::editor_size`) and
+//! the host is asked to match via `GuiContext::request_resize()`; if the
+//! host rejects the new size, the resize is rolled back.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 
-use baseview::{WindowHandle, WindowOpenOptions, WindowScalePolicy, gl::GlConfig};
+use baseview::{
+    Event as BvEvent, MouseButton, MouseEvent, Size as BvSize, WindowEvent as BvWindowEvent,
+    WindowHandle, WindowOpenOptions, WindowScalePolicy, gl::GlConfig,
+};
+use crossbeam::atomic::AtomicCell;
 use nih_plug::prelude::*;
 use raw_window_handle::{HasRawWindowHandle, RawWindowHandle};
 
@@ -62,6 +82,15 @@ use hydra_rust::midi::{MidiBridge, MidiPoller};
 use hydra_rust::renderer::{self, RenderUniforms, ShaderRenderer};
 
 const DEFAULT_SKETCH: &str = "osc(60, 0.1, 1.2).out()";
+
+/// Logical-pixel size of the triangular corner handle a user drags to
+/// resize the window (see the module doc comment's "Resizing" section).
+const RESIZE_HANDLE_SIZE: f32 = 16.0;
+const MIN_EDITOR_WIDTH: u32 = 256;
+const MIN_EDITOR_HEIGHT: u32 = 144;
+const DEFAULT_EDITOR_WIDTH: u32 = 1024;
+const DEFAULT_EDITOR_HEIGHT: u32 = 576;
+
 
 fn script_path_from_env() -> Option<PathBuf> {
     std::env::var_os("HYDRA_PLUGIN_SCRIPT").map(PathBuf::from)
@@ -98,10 +127,27 @@ struct HydraGlWindow {
     audio_analyzer: AudioAnalyzer,
     midi_bridge: MidiBridge,
     midi_poller: MidiPoller,
+    gui_context: Arc<dyn GuiContext>,
+    editor_size: Arc<AtomicCell<(u32, u32)>>,
+    /// The logical-pixel cursor position last reported by baseview -
+    /// needed to hit-test the resize handle on a button press (baseview
+    /// doesn't include the position in `ButtonPressed` itself).
+    cursor_pos: (f32, f32),
+    /// `Some` for as long as the resize handle is being dragged - the
+    /// cursor position and editor size at drag-start, so the new size is
+    /// computed as an absolute delta (avoids accumulating rounding error
+    /// across many small `CursorMoved` events).
+    resize_drag: Option<((f32, f32), (u32, u32))>,
 }
 
 impl HydraGlWindow {
-    fn new(window: &mut baseview::Window<'_>, audio_buffer: AudioBuffer, midi_bridge: MidiBridge) -> Self {
+    fn new(
+        window: &mut baseview::Window<'_>,
+        audio_buffer: AudioBuffer,
+        midi_bridge: MidiBridge,
+        gui_context: Arc<dyn GuiContext>,
+        editor_size: Arc<AtomicCell<(u32, u32)>>,
+    ) -> Self {
         let gl_context = window
             .gl_context()
             .expect("failed to get baseview gl context");
@@ -141,6 +187,10 @@ impl HydraGlWindow {
             audio_analyzer: AudioAnalyzer::new(),
             midi_bridge,
             midi_poller,
+            gui_context,
+            editor_size,
+            cursor_pos: (0.0, 0.0),
+            resize_drag: None,
         }
     }
 
@@ -215,6 +265,54 @@ impl HydraGlWindow {
             self.render_mode = Self::compile(&mut self.renderer, &code, &self.midi_bridge);
         }
     }
+
+    /// Whether `pos` (logical window coordinates) falls within the
+    /// resize-handle region drawn in the bottom-right corner (see
+    /// `draw_resize_handle`).
+    fn in_resize_handle(&self, pos: (f32, f32)) -> bool {
+        let (w, h) = self.editor_size.load();
+        pos.0 >= w as f32 - RESIZE_HANDLE_SIZE && pos.1 >= h as f32 - RESIZE_HANDLE_SIZE
+    }
+
+    /// Resizes the baseview window itself, updates the shared
+    /// host-visible size, and asks the host to match via
+    /// `request_resize()` - rolling the resize back if the host refuses
+    /// it (mirrors `nih_plug_vizia`'s own resize-handle widget).
+    fn apply_resize(&mut self, window: &mut baseview::Window, width: u32, height: u32) {
+        let width = width.max(MIN_EDITOR_WIDTH);
+        let height = height.max(MIN_EDITOR_HEIGHT);
+        let previous = self.editor_size.load();
+        if (width, height) == previous {
+            return;
+        }
+
+        self.editor_size.store((width, height));
+        window.resize(BvSize::new(width as f64, height as f64));
+        if !self.gui_context.request_resize() {
+            self.editor_size.store(previous);
+            window.resize(BvSize::new(previous.0 as f64, previous.1 as f64));
+        }
+    }
+
+    /// Draws a small translucent square over the bottom-right corner as a
+    /// visible/grabbable resize-handle affordance - drawn directly with
+    /// `glow` (scissored clear) rather than extra geometry/shader setup,
+    /// since it's just an indicator, not part of the Hydra-rendered
+    /// output itself.
+    fn draw_resize_handle(&self, w: u32, h: u32) {
+        use glow::HasContext as _;
+        let size = (RESIZE_HANDLE_SIZE as i32 * 2).min(w as i32).min(h as i32);
+        if size <= 0 {
+            return;
+        }
+        unsafe {
+            self.gl.enable(glow::SCISSOR_TEST);
+            self.gl.scissor(w as i32 - size, 0, size, size);
+            self.gl.clear_color(1.0, 1.0, 1.0, 0.35);
+            self.gl.clear(glow::COLOR_BUFFER_BIT);
+            self.gl.disable(glow::SCISSOR_TEST);
+        }
+    }
 }
 
 impl baseview::WindowHandler for HydraGlWindow {
@@ -231,11 +329,7 @@ impl baseview::WindowHandler for HydraGlWindow {
         // this may call `compile_buffers`, which issues real GL calls.
         self.maybe_reload();
 
-        // TODO: track the actual baseview window size; nih-plug's
-        // `Editor::size()` reports a fixed logical size for now (see
-        // `HydraEditor::size`), so this stays in sync with that until a
-        // resizable-window TODO below is picked up.
-        let (w, h) = (HYDRA_EDITOR_WIDTH, HYDRA_EDITOR_HEIGHT);
+        let (w, h) = self.editor_size.load();
         self.renderer.ensure_resolution(w, h);
 
         let midi_frame = self.midi_poller.poll();
@@ -271,6 +365,8 @@ impl baseview::WindowHandler for HydraGlWindow {
         renderer::render_multipass(&self.gl, &snap, &ping, uniforms);
         let _ = self.render_mode;
 
+        self.draw_resize_handle(w, h);
+
         unsafe {
             gl_context.swap_buffers();
             gl_context.make_not_current();
@@ -279,37 +375,73 @@ impl baseview::WindowHandler for HydraGlWindow {
 
     fn on_event(
         &mut self,
-        _window: &mut baseview::Window,
-        _event: baseview::Event,
+        window: &mut baseview::Window,
+        event: baseview::Event,
     ) -> baseview::EventStatus {
+        match event {
+            BvEvent::Mouse(MouseEvent::CursorMoved { position, .. }) => {
+                self.cursor_pos = (position.x as f32, position.y as f32);
+                if let Some((start_cursor, start_size)) = self.resize_drag {
+                    let dx = self.cursor_pos.0 - start_cursor.0;
+                    let dy = self.cursor_pos.1 - start_cursor.1;
+                    let new_w = (start_size.0 as f32 + dx).round() as u32;
+                    let new_h = (start_size.1 as f32 + dy).round() as u32;
+                    self.apply_resize(window, new_w, new_h);
+                }
+            }
+            BvEvent::Mouse(MouseEvent::ButtonPressed {
+                button: MouseButton::Left,
+                ..
+            }) => {
+                if self.in_resize_handle(self.cursor_pos) {
+                    self.resize_drag = Some((self.cursor_pos, self.editor_size.load()));
+                }
+            }
+            BvEvent::Mouse(MouseEvent::ButtonReleased {
+                button: MouseButton::Left,
+                ..
+            }) => {
+                self.resize_drag = None;
+            }
+            // Fires when the OS window itself is resized directly (only
+            // reachable in the standalone binary - a parented/embedded
+            // plugin view's size is instead driven by `apply_resize`
+            // above, in response to our own in-content handle).
+            BvEvent::Window(BvWindowEvent::Resized(info)) => {
+                let logical = info.logical_size();
+                self.editor_size.store((
+                    logical.width.round() as u32,
+                    logical.height.round() as u32,
+                ));
+            }
+            _ => {}
+        }
+
         baseview::EventStatus::Captured
     }
 }
 
-const HYDRA_EDITOR_WIDTH: u32 = 1024;
-const HYDRA_EDITOR_HEIGHT: u32 = 576;
-
 struct HydraEditor {
     audio_buffer: AudioBuffer,
     midi_bridge: MidiBridge,
+    editor_size: Arc<AtomicCell<(u32, u32)>>,
 }
 
 impl Editor for HydraEditor {
     fn spawn(
         &self,
         parent: ParentWindowHandle,
-        _context: Arc<dyn GuiContext>,
+        context: Arc<dyn GuiContext>,
     ) -> Box<dyn std::any::Any + Send> {
         let audio_buffer = self.audio_buffer.clone();
         let midi_bridge = self.midi_bridge.clone();
+        let editor_size = self.editor_size.clone();
+        let (initial_w, initial_h) = editor_size.load();
         let window = baseview::Window::open_parented(
             &ParentWindowHandleAdapter(parent),
             WindowOpenOptions {
                 title: String::from("Hydra"),
-                size: baseview::Size::new(
-                    HYDRA_EDITOR_WIDTH as f64,
-                    HYDRA_EDITOR_HEIGHT as f64,
-                ),
+                size: baseview::Size::new(initial_w as f64, initial_h as f64),
                 scale: WindowScalePolicy::SystemScaleFactor,
                 gl_config: Some(GlConfig {
                     version: (3, 2),
@@ -327,7 +459,13 @@ impl Editor for HydraEditor {
                 }),
             },
             move |window: &mut baseview::Window<'_>| -> HydraGlWindow {
-                HydraGlWindow::new(window, audio_buffer.clone(), midi_bridge.clone())
+                HydraGlWindow::new(
+                    window,
+                    audio_buffer.clone(),
+                    midi_bridge.clone(),
+                    context.clone(),
+                    editor_size.clone(),
+                )
             },
         );
 
@@ -335,7 +473,7 @@ impl Editor for HydraEditor {
     }
 
     fn size(&self) -> (u32, u32) {
-        (HYDRA_EDITOR_WIDTH, HYDRA_EDITOR_HEIGHT)
+        self.editor_size.load()
     }
 
     fn set_scale_factor(&self, _factor: f32) -> bool {
@@ -387,8 +525,23 @@ unsafe impl HasRawWindowHandle for ParentWindowHandleAdapter {
     }
 }
 
-#[derive(Params, Default)]
-struct HydraPluginParams {}
+#[derive(Params)]
+struct HydraPluginParams {
+    /// The editor window's last size, in logical pixels - persisted
+    /// across host project save/reload via `AtomicCell`'s built-in
+    /// `PersistentField` impl (see the module doc comment's "Resizing"
+    /// section), so a resized window doesn't reset on the next load.
+    #[persist = "editor-size"]
+    editor_size: Arc<AtomicCell<(u32, u32)>>,
+}
+
+impl Default for HydraPluginParams {
+    fn default() -> Self {
+        Self {
+            editor_size: Arc::new(AtomicCell::new((DEFAULT_EDITOR_WIDTH, DEFAULT_EDITOR_HEIGHT))),
+        }
+    }
+}
 
 pub struct HydraPlugin {
     params: Arc<HydraPluginParams>,
@@ -444,6 +597,7 @@ impl Plugin for HydraPlugin {
         Some(Box::new(HydraEditor {
             audio_buffer: self.audio_buffer.clone(),
             midi_bridge: self.midi_bridge.clone(),
+            editor_size: self.params.editor_size.clone(),
         }))
     }
 
