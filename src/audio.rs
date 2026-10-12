@@ -1,31 +1,70 @@
 pub const NUM_FFT_BINS: usize = 8;
 
-#[cfg(feature = "audio")]
-mod imp {
+// The FFT-reactive pipeline (`AudioBuffer`/`AudioAnalyzer`) is split out
+// from mic capture (`AudioManager`, below) so a host other than this
+// crate's own cpal-based desktop app - e.g. the `hydra-plugin` crate,
+// fed by a DAW's own audio callback - can push samples into the exact
+// same analysis pipeline without needing `cpal`/microphone access at all.
+#[cfg(feature = "fft")]
+mod analysis {
     use std::collections::VecDeque;
-    use std::sync::mpsc;
     use std::sync::{Arc, Mutex};
-    use std::thread;
 
-    use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
     use rustfft::{Fft, FftPlanner, num_complex::Complex};
 
     use super::NUM_FFT_BINS;
 
-    const FFT_SIZE: usize = 1024;
+    pub(super) const FFT_SIZE: usize = 1024;
 
-    enum Command {
-        Shutdown,
+    /// Shared ring buffer that a producer (this crate's own mic-capture
+    /// thread, or - for the plugin build - the host's own `process()`
+    /// audio callback) pushes raw samples into, and an [`AudioAnalyzer`]
+    /// (typically on a different thread, e.g. a render loop) polls FFT
+    /// bins out of.
+    ///
+    /// Splitting the buffer from the analyzer like this means the
+    /// producer side never runs any FFT/allocation - only a bounded
+    /// `VecDeque` push behind a quick mutex lock - which is what makes it
+    /// safe to call `push` directly from a real-time audio thread (e.g.
+    /// a VST3/CLAP plugin's `process()`).
+    #[derive(Clone)]
+    pub struct AudioBuffer {
+        pub(super) samples: Arc<Mutex<VecDeque<f32>>>,
     }
 
-    pub struct AudioManager {
-        command_tx: Option<mpsc::Sender<Command>>,
-        samples: Arc<Mutex<VecDeque<f32>>>,
+    impl Default for AudioBuffer {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl AudioBuffer {
+        pub fn new() -> Self {
+            Self {
+                samples: Arc::new(Mutex::new(VecDeque::with_capacity(FFT_SIZE))),
+            }
+        }
+
+        /// Pushes samples, downmixing to mono first if `channels > 1`
+        /// (assuming `data` is interleaved, matching `cpal`'s own stream
+        /// callback layout). Real-time safe: no allocation once the
+        /// deque has grown to its capacity once (it's capped at
+        /// `FFT_SIZE` below, same as before this was split out).
+        pub fn push(&self, data: &[f32], channels: usize) {
+            push_samples(&self.samples, data, channels);
+        }
+    }
+
+    /// The FFT analysis side: owns the FFT planner/scratch buffers and
+    /// the smoothed-output state, and reads (without ever locking for
+    /// longer than a `VecDeque` copy) from an [`AudioBuffer`] a producer
+    /// is concurrently pushing into.
+    pub struct AudioAnalyzer {
         fft: Arc<dyn Fft<f32>>,
         scratch: Vec<Complex<f32>>,
         /// Hann window, precomputed once - `FFT_SIZE` never changes, so
-        /// recomputing `cos()` for all 1024 samples on every `poll()` call
-        /// (once per rendered frame) would be pure waste.
+        /// recomputing `cos()` for all 1024 samples on every `poll()`
+        /// call (once per rendered frame) would be pure waste.
         window: [f32; FFT_SIZE],
         smoothed: [f32; NUM_FFT_BINS],
         num_bins: usize,
@@ -34,24 +73,17 @@ mod imp {
         smooth: f32,
     }
 
-    impl Default for AudioManager {
+    impl Default for AudioAnalyzer {
         fn default() -> Self {
             Self::new()
         }
     }
 
-    impl AudioManager {
-        /// Doesn't touch the microphone - see `ensure_started`. Constructing
-        /// this (e.g. once at app startup) must not, by itself, start
-        /// capturing audio; only a script that actually uses `a.*` should.
+    impl AudioAnalyzer {
         pub fn new() -> Self {
-            let samples: Arc<Mutex<VecDeque<f32>>> =
-                Arc::new(Mutex::new(VecDeque::with_capacity(FFT_SIZE)));
             let fft = FftPlanner::<f32>::new().plan_fft_forward(FFT_SIZE);
 
             Self {
-                command_tx: None,
-                samples,
                 fft,
                 scratch: vec![Complex { re: 0.0, im: 0.0 }; FFT_SIZE],
                 window: std::array::from_fn(|i| hann(i, FFT_SIZE)),
@@ -61,26 +93,6 @@ mod imp {
                 scale: 1.0,
                 smooth: 0.4,
             }
-        }
-
-        /// Opens the default microphone input stream, if it isn't already
-        /// open. Idempotent - safe to call on every frame. Call this only
-        /// once a script is known to actually reference `a.*` (checking for
-        /// an `AudioRequest` or `iFft` in its compiled output), not
-        /// unconditionally at startup: capturing audio is a real privacy-
-        /// sensitive action a script shouldn't get "for free" just because
-        /// the `audio` feature happens to be compiled in.
-        pub fn ensure_started(&mut self) {
-            if self.command_tx.is_some() {
-                return;
-            }
-            let (command_tx, command_rx) = mpsc::channel();
-            let samples = self.samples.clone();
-            thread::Builder::new()
-                .name("hydra-audio".into())
-                .spawn(move || capture_thread(samples, command_rx))
-                .expect("spawn audio capture thread");
-            self.command_tx = Some(command_tx);
         }
 
         pub fn set_bins(&mut self, n: usize) {
@@ -99,9 +111,9 @@ mod imp {
             self.smooth = s.clamp(0.0, 1.0);
         }
 
-        pub fn poll(&mut self) -> [f32; NUM_FFT_BINS] {
+        pub fn poll(&mut self, buffer: &AudioBuffer) -> [f32; NUM_FFT_BINS] {
             {
-                let buf = self.samples.lock().unwrap();
+                let buf = buffer.samples.lock().unwrap();
                 let len = buf.len();
                 let offset = FFT_SIZE.saturating_sub(len);
                 for (i, slot) in self.scratch.iter_mut().enumerate() {
@@ -142,14 +154,6 @@ mod imp {
         }
     }
 
-    impl Drop for AudioManager {
-        fn drop(&mut self) {
-            if let Some(tx) = &self.command_tx {
-                let _ = tx.send(Command::Shutdown);
-            }
-        }
-    }
-
     fn hann(i: usize, n: usize) -> f32 {
         0.5 - 0.5 * (2.0 * std::f32::consts::PI * i as f32 / (n as f32 - 1.0)).cos()
     }
@@ -177,7 +181,7 @@ mod imp {
         bins
     }
 
-    fn push_samples(samples: &Arc<Mutex<VecDeque<f32>>>, data: &[f32], channels: usize) {
+    pub(super) fn push_samples(samples: &Arc<Mutex<VecDeque<f32>>>, data: &[f32], channels: usize) {
         let mut buf = samples.lock().unwrap();
         if channels <= 1 {
             buf.extend(data.iter().copied());
@@ -190,8 +194,99 @@ mod imp {
             buf.pop_front();
         }
     }
+}
 
-    fn capture_thread(samples: Arc<Mutex<VecDeque<f32>>>, command_rx: mpsc::Receiver<Command>) {
+#[cfg(feature = "fft")]
+pub use analysis::{AudioAnalyzer, AudioBuffer};
+
+#[cfg(feature = "audio")]
+mod capture {
+    use std::sync::mpsc;
+    use std::thread;
+
+    use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+
+    use super::NUM_FFT_BINS;
+    use super::analysis::{AudioAnalyzer, AudioBuffer};
+
+    enum Command {
+        Shutdown,
+    }
+
+    pub struct AudioManager {
+        command_tx: Option<mpsc::Sender<Command>>,
+        buffer: AudioBuffer,
+        analyzer: AudioAnalyzer,
+    }
+
+    impl Default for AudioManager {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl AudioManager {
+        /// Doesn't touch the microphone - see `ensure_started`. Constructing
+        /// this (e.g. once at app startup) must not, by itself, start
+        /// capturing audio; only a script that actually uses `a.*` should.
+        pub fn new() -> Self {
+            Self {
+                command_tx: None,
+                buffer: AudioBuffer::new(),
+                analyzer: AudioAnalyzer::new(),
+            }
+        }
+
+        /// Opens the default microphone input stream, if it isn't already
+        /// open. Idempotent - safe to call on every frame. Call this only
+        /// once a script is known to actually reference `a.*` (checking for
+        /// an `AudioRequest` or `iFft` in its compiled output), not
+        /// unconditionally at startup: capturing audio is a real privacy-
+        /// sensitive action a script shouldn't get "for free" just because
+        /// the `audio` feature happens to be compiled in.
+        pub fn ensure_started(&mut self) {
+            if self.command_tx.is_some() {
+                return;
+            }
+            let (command_tx, command_rx) = mpsc::channel();
+            let buffer = self.buffer.clone();
+            thread::Builder::new()
+                .name("hydra-audio".into())
+                .spawn(move || capture_thread(buffer, command_rx))
+                .expect("spawn audio capture thread");
+            self.command_tx = Some(command_tx);
+        }
+
+        pub fn set_bins(&mut self, n: usize) {
+            self.analyzer.set_bins(n);
+        }
+
+        pub fn set_cutoff(&mut self, c: f32) {
+            self.analyzer.set_cutoff(c);
+        }
+
+        pub fn set_scale(&mut self, s: f32) {
+            self.analyzer.set_scale(s);
+        }
+
+        pub fn set_smooth(&mut self, s: f32) {
+            self.analyzer.set_smooth(s);
+        }
+
+        pub fn poll(&mut self) -> [f32; NUM_FFT_BINS] {
+            self.analyzer.poll(&self.buffer)
+        }
+    }
+
+    impl Drop for AudioManager {
+        fn drop(&mut self) {
+            if let Some(tx) = &self.command_tx {
+                let _ = tx.send(Command::Shutdown);
+            }
+        }
+    }
+
+    fn capture_thread(buffer: AudioBuffer, command_rx: mpsc::Receiver<Command>) {
         // The cpal Stream must be built and dropped on the thread that owns it: it
         // wraps non-Send platform handles on some backends, so it stays parked here
         // for its whole lifetime rather than being handed back to the caller.
@@ -217,29 +312,29 @@ mod imp {
 
         let stream_result = match sample_format {
             cpal::SampleFormat::F32 => {
-                let samples = samples.clone();
+                let buffer = buffer.clone();
                 device.build_input_stream(
                     &stream_config,
-                    move |data: &[f32], _: &_| push_samples(&samples, data, channels),
+                    move |data: &[f32], _: &_| buffer.push(data, channels),
                     err_fn,
                     None,
                 )
             }
             cpal::SampleFormat::I16 => {
-                let samples = samples.clone();
+                let buffer = buffer.clone();
                 device.build_input_stream(
                     &stream_config,
                     move |data: &[i16], _: &_| {
                         let floats: Vec<f32> =
                             data.iter().map(|&s| s as f32 / i16::MAX as f32).collect();
-                        push_samples(&samples, &floats, channels)
+                        buffer.push(&floats, channels)
                     },
                     err_fn,
                     None,
                 )
             }
             cpal::SampleFormat::U16 => {
-                let samples = samples.clone();
+                let buffer = buffer.clone();
                 device.build_input_stream(
                     &stream_config,
                     move |data: &[u16], _: &_| {
@@ -247,7 +342,7 @@ mod imp {
                             .iter()
                             .map(|&s| (s as f32 - u16::MAX as f32 / 2.0) / (u16::MAX as f32 / 2.0))
                             .collect();
-                        push_samples(&samples, &floats, channels)
+                        buffer.push(&floats, channels)
                     },
                     err_fn,
                     None,
@@ -278,4 +373,4 @@ mod imp {
 }
 
 #[cfg(feature = "audio")]
-pub use imp::AudioManager;
+pub use capture::AudioManager;

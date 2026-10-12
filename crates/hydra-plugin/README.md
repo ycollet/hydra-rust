@@ -25,11 +25,18 @@ library-embedding path the main crate's README documents for Sova.
   unset/unreadable). The file's mtime is polled once per frame and
   hot-reloaded on change - edit-and-save in any external editor to
   live-code from inside a DAW. There is **no in-window text editor yet**.
-- **Audio**: passed through unchanged. The host's audio buffer is **not**
-  yet fed into hydra-rust's FFT-reactive (`a.fft[]`) pipeline - this is the
-  single biggest piece of remaining work to make the plugin feel like a
-  "real" Hydra instance inside a DAW (tempo/transport sync is a natural
-  follow-up once this is wired up, via nih-plug's host-transport info).
+- **Audio**: the host's own audio buffer is downmixed to mono in
+  `process()` (the real-time audio thread) and pushed into a
+  `hydra_rust::audio::AudioBuffer` - a bounded ring buffer with no
+  FFT/allocation on the push side. The editor's render loop owns an
+  `AudioAnalyzer` that polls FFT bins out of that buffer once per frame,
+  so `a.fft[]` reacts to whatever audio the host feeds the plugin's input
+  (e.g. a track routed into it), the same FFT-reactive pipeline the
+  desktop app's microphone-based `AudioManager` uses internally - just fed
+  by the host instead of a mic. Audio is still passed through unchanged
+  (this is an analysis tap, not an audio effect). Tempo/transport sync
+  (via nih-plug's host-transport info) is a natural follow-up, not yet
+  wired up.
 - **Mouse**: not yet wired into `mouse`/`m` reads (always `[0, 0]`).
 - **Window is fixed-size** (`1024x576`) - not resizable yet.
 - **MIDI, webcam, OSC**: not exposed to the plugin build at all yet (the
@@ -58,6 +65,9 @@ rendering path (which is the part reused by the real plugin formats too).
 
 The standalone binary has been run and confirmed to open its window and
 render continuously (not stall/hang) on macOS with the default built-in
-sketch. VST3/CLAP bundle-level loading in a real DAW has not yet been
-tested - only `cargo build`'s compile-time checks (`nih_export_clap!`/
+sketch. The audio bridge has been validated directly (pushing a synthetic
+tone through `AudioBuffer`/`AudioAnalyzer` produces a clear non-zero FFT
+response vs. silence); live host-audio-in-a-real-DAW has not yet been
+tested. VST3/CLAP bundle-level loading in a real DAW has not yet been
+tested either - only `cargo build`'s compile-time checks (`nih_export_clap!`/
 `nih_export_vst3!`) confirm the trait impls are well-formed.

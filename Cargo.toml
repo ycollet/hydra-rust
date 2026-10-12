@@ -76,7 +76,15 @@ async-trait = { version = "0.1", optional = true }
 default = ["gui"]
 gui = ["dep:eframe", "dep:rfd"]
 webcam = ["dep:nokhwa"]
-audio = ["dep:cpal", "dep:rustfft"]
+# `fft`: just the sample-buffer + FFT-analysis pipeline (`AudioBuffer`/
+# `AudioAnalyzer`, see `src/audio.rs`), with no OS audio capture of its
+# own - lets a host application (e.g. the `hydra-plugin` crate, fed by a
+# DAW's own audio buffer) reuse the same FFT-reactive (`a.fft[]`) pipeline
+# as the desktop app without pulling in `cpal`/microphone access at all.
+fft = ["dep:rustfft"]
+# `audio` keeps its old meaning (mic capture via `cpal`, exposed as
+# `AudioManager`) - now built on top of `fft` rather than duplicating it.
+audio = ["dep:cpal", "fft"]
 image_url = ["dep:ureq"]
 midi = ["dep:midir"]
 osc = ["dep:rosc"]

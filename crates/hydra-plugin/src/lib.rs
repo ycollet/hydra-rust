@@ -19,8 +19,17 @@
 //!
 //! ## Audio (v1)
 //!
-//! Audio is passed through unchanged; the host's audio buffers are not yet
-//! fed into Hydra's FFT-reactive (`a.fft[]`) pipeline. See `README.md`.
+//! The host's audio buffer is downmixed to mono in `process()` (the
+//! real-time audio thread) and pushed into a shared
+//! [`hydra_rust::audio::AudioBuffer`] - a bounded ring buffer with no FFT/
+//! allocation on the push side, safe to call from a real-time callback.
+//! The editor's render loop (`HydraGlWindow::on_frame`, a different
+//! thread) owns an [`hydra_rust::audio::AudioAnalyzer`] that polls FFT
+//! bins out of that buffer once per frame, feeding `a.fft[]` from the
+//! host's own audio instead of a microphone - same pipeline the desktop
+//! app's `AudioManager` uses internally, just fed by a different
+//! producer. Audio itself is still passed through unchanged (this is an
+//! analysis tap, not an audio effect).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -30,6 +39,7 @@ use baseview::{WindowHandle, WindowOpenOptions, WindowScalePolicy, gl::GlConfig}
 use nih_plug::prelude::*;
 use raw_window_handle::{HasRawWindowHandle, RawWindowHandle};
 
+use hydra_rust::audio::{AudioAnalyzer, AudioBuffer};
 use hydra_rust::eval::RenderMode;
 use hydra_rust::renderer::{self, RenderUniforms, ShaderRenderer};
 
@@ -66,10 +76,12 @@ struct HydraGlWindow {
     script_path: Option<PathBuf>,
     last_mtime: Option<SystemTime>,
     render_mode: RenderMode,
+    audio_buffer: AudioBuffer,
+    audio_analyzer: AudioAnalyzer,
 }
 
 impl HydraGlWindow {
-    fn new(window: &mut baseview::Window<'_>) -> Self {
+    fn new(window: &mut baseview::Window<'_>, audio_buffer: AudioBuffer) -> Self {
         let gl_context = window
             .gl_context()
             .expect("failed to get baseview gl context");
@@ -103,6 +115,8 @@ impl HydraGlWindow {
             script_path,
             last_mtime: mtime,
             render_mode,
+            audio_buffer,
+            audio_analyzer: AudioAnalyzer::new(),
         }
     }
 
@@ -181,11 +195,11 @@ impl baseview::WindowHandler for HydraGlWindow {
             beat: 0.0,
             tempo: 120.0,
             phase: 0.0,
-            // TODO: feed the host's audio buffer (from `process()`) into
-            // hydra-rust's FFT analysis instead of zeros, so `a.fft[]`
-            // reacts to the host's audio like the desktop app's mic input
-            // does.
-            fft: [0.0; hydra_rust::audio::NUM_FFT_BINS],
+            // Fed from the host's own audio buffer, pushed in
+            // `HydraPlugin::process()` (the real-time audio thread) into
+            // `self.audio_buffer`; polling/FFT only ever happens here, on
+            // the render thread.
+            fft: self.audio_analyzer.poll(&self.audio_buffer),
             midi_note: [0.0; hydra_rust::midi::NUM_MIDI_NOTES],
             midi_velocity: [0.0; hydra_rust::midi::NUM_MIDI_NOTES],
             midi_cc: [0.0; hydra_rust::midi::NUM_MIDI_CC],
@@ -219,7 +233,9 @@ impl baseview::WindowHandler for HydraGlWindow {
 const HYDRA_EDITOR_WIDTH: u32 = 1024;
 const HYDRA_EDITOR_HEIGHT: u32 = 576;
 
-struct HydraEditor;
+struct HydraEditor {
+    audio_buffer: AudioBuffer,
+}
 
 impl Editor for HydraEditor {
     fn spawn(
@@ -227,6 +243,7 @@ impl Editor for HydraEditor {
         parent: ParentWindowHandle,
         _context: Arc<dyn GuiContext>,
     ) -> Box<dyn std::any::Any + Send> {
+        let audio_buffer = self.audio_buffer.clone();
         let window = baseview::Window::open_parented(
             &ParentWindowHandleAdapter(parent),
             WindowOpenOptions {
@@ -251,7 +268,9 @@ impl Editor for HydraEditor {
                     ..Default::default()
                 }),
             },
-            move |window: &mut baseview::Window<'_>| -> HydraGlWindow { HydraGlWindow::new(window) },
+            move |window: &mut baseview::Window<'_>| -> HydraGlWindow {
+                HydraGlWindow::new(window, audio_buffer.clone())
+            },
         );
 
         Box::new(HydraEditorHandle { window })
@@ -315,12 +334,21 @@ struct HydraPluginParams {}
 
 pub struct HydraPlugin {
     params: Arc<HydraPluginParams>,
+    audio_buffer: AudioBuffer,
+    /// Reused across `process()` calls to downmix the host's planar
+    /// channel buffers into mono before pushing into `audio_buffer` -
+    /// preallocated to `max_buffer_size` in `initialize()` so pushing
+    /// into it in `process()` (the real-time audio thread) never
+    /// reallocates.
+    mono_scratch: Vec<f32>,
 }
 
 impl Default for HydraPlugin {
     fn default() -> Self {
         Self {
             params: Arc::new(HydraPluginParams::default()),
+            audio_buffer: AudioBuffer::new(),
+            mono_scratch: Vec::new(),
         }
     }
 }
@@ -332,8 +360,10 @@ impl Plugin for HydraPlugin {
     const EMAIL: &'static str = "info@example.com";
     const VERSION: &'static str = env!("CARGO_PKG_VERSION");
 
-    // A visual synth plugin with no audio processing of its own (v1) -
-    // audio is passed through so it can still sit on an audio track.
+    // A visual synth plugin: audio is only analyzed (fed into the
+    // FFT-reactive `a.fft[]` pipeline, see `process()`), never modified -
+    // it's passed through unchanged so the plugin can sit on a regular
+    // audio track and still "see" that track's audio.
     const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = &[AudioIOLayout {
         main_input_channels: NonZeroU32::new(2),
         main_output_channels: NonZeroU32::new(2),
@@ -351,18 +381,44 @@ impl Plugin for HydraPlugin {
     }
 
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
-        Some(Box::new(HydraEditor))
+        Some(Box::new(HydraEditor {
+            audio_buffer: self.audio_buffer.clone(),
+        }))
+    }
+
+    fn initialize(
+        &mut self,
+        _audio_io_layout: &AudioIOLayout,
+        buffer_config: &BufferConfig,
+        _context: &mut impl InitContext<Self>,
+    ) -> bool {
+        self.mono_scratch = Vec::with_capacity(buffer_config.max_buffer_size as usize);
+        true
     }
 
     fn process(
         &mut self,
-        _buffer: &mut Buffer,
+        buffer: &mut Buffer,
         _aux: &mut AuxiliaryBuffers,
         _context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
-        // v1: pass audio through unchanged. See the module-level docs and
-        // README.md for the plan to feed this into hydra-rust's FFT
-        // pipeline.
+        // v1: audio is passed through unchanged - this is purely an
+        // analysis tap. Downmix the host's planar channel buffers to mono
+        // and push into `audio_buffer`; the editor's render loop (a
+        // different thread) is what actually runs the FFT on this data
+        // (see `HydraGlWindow::on_frame`), so this stays a cheap, no-alloc
+        // `Vec`/`VecDeque` push, safe for the real-time audio thread.
+        let num_samples = buffer.samples();
+        let channel_data = buffer.as_slice();
+        let num_channels = channel_data.len().max(1);
+
+        self.mono_scratch.clear();
+        for i in 0..num_samples {
+            let sum: f32 = channel_data.iter().map(|ch| ch[i]).sum();
+            self.mono_scratch.push(sum / num_channels as f32);
+        }
+        self.audio_buffer.push(&self.mono_scratch, 1);
+
         ProcessStatus::Normal
     }
 }

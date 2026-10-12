@@ -16,7 +16,7 @@ crate-type = ["cdylib", "lib"]
 # eframe/winit/arboard pulled in) - this plugin brings its own window via
 # baseview + a raw glow context instead, reusing only `eval()` and
 # `ShaderRenderer`/`render_multipass` from the core library.
-hydra-rust = { path = "../..", default-features = false }
+hydra-rust = { path = "../..", default-features = false, features = ["fft"] }
 
 nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", features = [
     "assert_process_allocs",
