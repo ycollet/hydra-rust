@@ -1,0 +1,9 @@
+[package]
+name = "xtask"
+version = "0.1.0"
+edition = "2021"
+description = "cargo xtask bundle helper for hydra-plugin (VST3/CLAP), via nih-plug's own bundler"
+license = "AGPL-3.0-or-later"
+
+[dependencies]
+nih_plug_xtask = { git = "https://github.com/robbert-vdh/nih-plug.git" }

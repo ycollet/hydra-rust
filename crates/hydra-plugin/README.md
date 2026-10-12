@@ -53,13 +53,24 @@ cargo build -p hydra-plugin --release          # compiles the lib (VST3/CLAP) + 
 HYDRA_PLUGIN_SCRIPT=/path/to/sketch.hydra ./target/release/hydra-plugin
 ```
 
-nih-plug doesn't publish a `cargo install`-able bundler on crates.io; the
-usual way to produce an actual loadable `.vst3`/`.clap` bundle (correct
-bundle layout + `Info.plist`/manifest) is nih-plug's own `xtask` bundler. To
-set that up in this repo, vendor (or depend on, as a dev-dependency)
-`nih_plug_xtask` the same way nih-plug's own example plugins do - not yet
-wired up here since the standalone build is enough to validate the
-rendering path (which is the part reused by the real plugin formats too).
+### Producing a real `.vst3`/`.clap` bundle
+
+`cargo build` alone only produces a raw `cdylib` - not something a DAW can
+load directly (VST3/CLAP both expect a specific bundle directory layout
+plus an `Info.plist`/manifest). This repo wires up nih-plug's own `xtask`
+bundler (`xtask/`, `.cargo/config.toml`, `bundler.toml` at the repo root -
+a separate, non-default workspace member, same as `hydra-plugin` itself)
+to produce that:
+
+```sh
+cargo xtask bundle hydra-plugin --release
+```
+
+This produces `target/bundled/Hydra.vst3` and `target/bundled/Hydra.clap` -
+drop either into your DAW's plugin folder (e.g.
+`~/Library/Audio/Plug-Ins/VST3`/`CLAP` on macOS) to load it. The bundle's
+display name ("Hydra") comes from the `["hydra-plugin"]` entry in the root
+`bundler.toml`.
 
 ## Known-good state
 
@@ -68,6 +79,8 @@ render continuously (not stall/hang) on macOS with the default built-in
 sketch. The audio bridge has been validated directly (pushing a synthetic
 tone through `AudioBuffer`/`AudioAnalyzer` produces a clear non-zero FFT
 response vs. silence); live host-audio-in-a-real-DAW has not yet been
-tested. VST3/CLAP bundle-level loading in a real DAW has not yet been
-tested either - only `cargo build`'s compile-time checks (`nih_export_clap!`/
-`nih_export_vst3!`) confirm the trait impls are well-formed.
+tested. `cargo xtask bundle hydra-plugin --release` has been run and
+verified to produce correctly-structured, validly (ad-hoc) codesigned
+`.vst3`/`.clap` bundles on macOS (`codesign --verify --deep --strict`
+passes on both, and `Info.plist` reports the expected display name) -
+actually loading either in a real DAW has not yet been tested.

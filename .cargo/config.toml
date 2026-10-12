@@ -1,0 +1,7 @@
+[alias]
+# Building the xtask package in release mode is normally not necessary,
+# but since `hydra-plugin`/`xtask` itself is usually also built in release
+# mode, defaulting `cargo xtask` to release avoids needing to compile
+# `serde`(-derive) etc. twice. Mirrors nih-plug's own repo convention.
+xtask = "run --package xtask --release --"
+xtask-debug = "run --package xtask --"

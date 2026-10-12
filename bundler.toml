@@ -1,0 +1,8 @@
+# This provides metadata for NIH-plug's `cargo xtask bundle <package>`
+# bundler (run from the repo root). Syntax:
+#
+# [package_name]
+# name = "Human Readable Plugin Name"  # defaults to <package_name>
+
+["hydra-plugin"]
+name = "Hydra"

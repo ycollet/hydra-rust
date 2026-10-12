@@ -1,15 +1,19 @@
 # This package is also the workspace root. `hydra-plugin` is a separate
 # member crate (VST3/CLAP/standalone plugin build) that depends on this
 # crate as a plain library (`default-features = false`) - see
-# `crates/hydra-plugin/README.md`.
+# `crates/hydra-plugin/README.md`. `xtask` is nih-plug's own bundler,
+# invoked via `cargo xtask bundle hydra-plugin --release` (see
+# `.cargo/config.toml`/`bundler.toml`) to produce an actual loadable
+# `.vst3`/`.clap` bundle.
 #
-# `default-members` deliberately excludes `hydra-plugin`: plain `cargo
+# `default-members` deliberately excludes both: plain `cargo
 # build`/`cargo test`/`cargo run` (this project's long-established
 # rebuild/test workflow) must keep building/testing only the main
 # `hydra-rust` crate + `hydra` binary, without also pulling in nih-plug's
-# git dependencies. Build the plugin explicitly with `-p hydra-plugin`.
+# git dependencies. Build the plugin explicitly with `-p hydra-plugin`,
+# or bundle it with `cargo xtask bundle hydra-plugin --release`.
 [workspace]
-members = [".", "crates/hydra-plugin"]
+members = [".", "crates/hydra-plugin", "xtask"]
 default-members = ["."]
 
 [package]
