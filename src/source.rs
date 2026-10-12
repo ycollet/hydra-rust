@@ -263,13 +263,15 @@ mod imp {
                             let width = img.width();
                             let height = img.height();
                             let mut pixels = img.into_raw();
-                            // nokhwa's AVFoundation (macOS) backend hands back frames in
-                            // the opposite row order from its V4L2 (Linux) backend - the
-                            // downstream shader's source-sampling Y-flip (eval.rs,
-                            // `1.0 - st.y`) was tuned against the latter, so on macOS it
-                            // ends up double-flipping instead of cancelling out. Flip the
-                            // raw rows here so both platforms feed the same convention.
-                            #[cfg(target_os = "macos")]
+                            // `image::decode_image::<RgbFormat>()` hands back rows in
+                            // top-down order on every nokhwa backend we've tested
+                            // (confirmed on both macOS/AVFoundation and Linux/V4L2 -
+                            // an earlier version of this fix assumed V4L2 didn't need
+                            // it, but that was never actually verified and turned out
+                            // to be wrong), while the downstream shader's source-
+                            // sampling Y-flip (eval.rs, `1.0 - st.y`) expects
+                            // bottom-up rows - so without this, the image renders
+                            // upside down. Flip the raw rows here to match.
                             flip_rows_vertically(&mut pixels, width, height, 3);
                             let frame = SourceFrame {
                                 width,
@@ -316,7 +318,6 @@ mod imp {
 
     /// Reverses row order in-place for a tightly-packed `width x height` image
     /// buffer with `channels` bytes per pixel (no padding/stride).
-    #[cfg(target_os = "macos")]
     fn flip_rows_vertically(pixels: &mut [u8], width: u32, height: u32, channels: u32) {
         let row_bytes = (width * channels) as usize;
         let (mut top, mut bottom) = (0usize, height.saturating_sub(1) as usize);

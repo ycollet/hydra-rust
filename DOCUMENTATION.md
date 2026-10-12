@@ -265,9 +265,10 @@ cargo run --features webcam --bin hydra
 | `initCam(slot)` | Starts the default camera (index 0), populating source slot `s0`-`s3` | `s0.initCam().out()` |
 | `initCam(slot, cameraIndex)` | Starts a specific camera by index | `s0.initCam(1).out()` |
 
-On macOS, captured frames are flipped vertically before upload to correct for
-`nokhwa`'s AVFoundation backend handing back rows in the opposite order from its
-Linux V4L2 backend (which the source-sampling shader's Y-flip was tuned against).
+Captured frames are flipped vertically before upload on every platform, to
+correct for `nokhwa`'s decoded row order (top-down on both the AVFoundation/
+macOS and V4L2/Linux backends we've tested) versus the source-sampling
+shader's Y-flip (`1.0 - st.y`, eval.rs), which expects bottom-up rows.
 
 ## Feature: `audio`
 
