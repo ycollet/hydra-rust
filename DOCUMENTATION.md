@@ -265,6 +265,10 @@ cargo run --features webcam --bin hydra
 | `initCam(slot)` | Starts the default camera (index 0), populating source slot `s0`-`s3` | `s0.initCam().out()` |
 | `initCam(slot, cameraIndex)` | Starts a specific camera by index | `s0.initCam(1).out()` |
 
+`slot` must be a source (`s0`-`s3`); calling `initCam()` on an output
+(`o0`-`o3`, e.g. `o0.initCam()`) is a common typo and now raises an eval
+error instead of silently doing nothing.
+
 Captured frames are flipped vertically before upload on every platform, to
 correct for `nokhwa`'s decoded row order (top-down on both the AVFoundation/
 macOS and V4L2/Linux backends we've tested) versus the source-sampling

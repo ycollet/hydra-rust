@@ -1752,10 +1752,24 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
         // source Node (`src(slot)`), matching real hydra.js returning the
         // source object itself - real sketches routinely chain straight off
         // of it (`s0.initCam(0).out()`).
+        //
+        // `slot` must be a source index (`s0`-`s3`, i.e. >= 100); calling
+        // this on an output index (`o0`-`o3`, < 100) by mistake used to
+        // silently degenerate into `src(slot).out()` - a same-buffer
+        // read/write identity feedback loop that never starts a camera and
+        // makes the display appear frozen on whatever was last rendered,
+        // with no error at all. That's now rejected explicitly.
         {
             let s = state.clone();
-            engine.register_fn("initCam", move |slot: i64| -> Node {
-                if slot >= 100 {
+            engine.register_fn(
+                "initCam",
+                move |slot: i64| -> Result<Node, Box<rhai::EvalAltResult>> {
+                    if slot < 100 {
+                        return Err(format!(
+                            "initCam() must be called on a source (s0-s3), not an output (got index {slot}, did you mean s{slot} instead of o{slot}?)"
+                        )
+                        .into());
+                    }
                     let idx = (slot - 100) as usize;
                     s.lock()
                         .unwrap()
@@ -1764,15 +1778,22 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
                             slot: idx,
                             camera_index: 0,
                         });
-                }
-                idx_to_source(slot)
-            });
+                    Ok(idx_to_source(slot))
+                },
+            );
         }
         // initCam(slot, camera_index)
         {
             let s = state.clone();
-            engine.register_fn("initCam", move |slot: i64, cam: i64| -> Node {
-                if slot >= 100 {
+            engine.register_fn(
+                "initCam",
+                move |slot: i64, cam: i64| -> Result<Node, Box<rhai::EvalAltResult>> {
+                    if slot < 100 {
+                        return Err(format!(
+                            "initCam() must be called on a source (s0-s3), not an output (got index {slot}, did you mean s{slot} instead of o{slot}?)"
+                        )
+                        .into());
+                    }
                     let idx = (slot - 100) as usize;
                     s.lock()
                         .unwrap()
@@ -1781,9 +1802,9 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
                             slot: idx,
                             camera_index: cam as u32,
                         });
-                }
-                idx_to_source(slot)
-            });
+                    Ok(idx_to_source(slot))
+                },
+            );
         }
     }
 
@@ -3104,6 +3125,39 @@ mod tests {
         // fill_args itself must not panic if it ever does
         let filled = fill_args(&[Arg::Lit(1.0), Arg::Lit(2.0), Arg::Lit(3.0)], &[1.0]);
         assert_eq!(filled.len(), 3);
+    }
+
+    // --- initCam() slot validation ---
+
+    #[cfg(feature = "webcam")]
+    #[test]
+    fn init_cam_on_output_slot_is_rejected() {
+        match eval("o0.initCam().out()") {
+            Err(err) => assert!(
+                err.contains("initCam() must be called on a source"),
+                "unexpected error: {err}"
+            ),
+            Ok(_) => panic!("expected an error, got Ok"),
+        }
+    }
+
+    #[cfg(feature = "webcam")]
+    #[test]
+    fn init_cam_with_explicit_camera_index_on_output_slot_is_rejected() {
+        match eval("o1.initCam(0).out()") {
+            Err(err) => assert!(
+                err.contains("initCam() must be called on a source"),
+                "unexpected error: {err}"
+            ),
+            Ok(_) => panic!("expected an error, got Ok"),
+        }
+    }
+
+    #[cfg(feature = "webcam")]
+    #[test]
+    fn init_cam_on_source_slot_is_accepted() {
+        assert!(eval("s0.initCam().out()").is_ok());
+        assert!(eval("s1.initCam(0).out()").is_ok());
     }
 
     // --- idx_to_source ---

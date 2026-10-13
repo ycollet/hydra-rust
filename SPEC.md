@@ -606,7 +606,12 @@ errors from `eval()`, surfaced to the caller as `Err(String)`.
   requests slot `slot` (must be `s0`-`s3`, i.e. `>= 100`) be filled from
   camera `cameraIndex` (default `0`). This only queues a request in the
   returned `EvalResult`; actual capture happens on the host side
-  (`SourceManager`), asynchronously, outside of `eval()`.
+  (`SourceManager`), asynchronously, outside of `eval()`. Calling it on an
+  output index (`o0`-`o3`, `< 100`, e.g. `o0.initCam()`) is rejected with
+  an eval error - that used to silently resolve to `src(slot).out()`, a
+  same-buffer read/write identity feedback loop that never starts a
+  camera and leaves the display looking frozen on whatever was last
+  rendered, with no error at all.
 - **`initImage(slot, url)`**: without the `image_url` feature, a no-op
   (logged once) that still returns the slot's source `Node` for chaining.
   With it, this queues an `InitImage` request the same way `initCam` queues
