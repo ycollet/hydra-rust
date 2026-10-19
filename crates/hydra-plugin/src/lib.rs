@@ -498,6 +498,18 @@ impl baseview::WindowHandler for HydraGlWindow {
 
         let (w, h) = self.editor_size.load();
         self.renderer.ensure_resolution(w, h);
+        // `render_multipass`'s final screen blit reuses whatever GL
+        // viewport is already set (it only touches it for per-buffer FBO
+        // passes); on at least some platforms/backends resizing the
+        // window alone doesn't implicitly update it, so the drawn output
+        // would stay pinned at the old size (visibly cropped/offset)
+        // even though `editor_size`/the window itself are already
+        // correct. Setting it explicitly every frame keeps it in sync
+        // regardless of platform.
+        unsafe {
+            use glow::HasContext as _;
+            self.gl.viewport(0, 0, w as i32, h as i32);
+        }
 
         let midi_frame = self.midi_poller.poll();
         let uniforms = RenderUniforms {
