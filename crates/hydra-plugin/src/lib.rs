@@ -12,9 +12,10 @@
 //! environment variable (falling back to a small built-in example sketch if
 //! unset or unreadable). The file's mtime is polled once per frame; editing
 //! and saving the file in any external editor hot-reloads it in the plugin
-//! window, enabling live-coding from inside a DAW. There is also an
-//! in-window text editor overlay (see "In-window editor" below) for typing
-//! code directly without an external file/editor.
+//! window, enabling live-coding from inside a DAW. A small overlay (Ctrl/
+//! Cmd+E to show/hide - see "Script loader" below) has a "Load script..."
+//! button to pick a different file without restarting the host, replacing
+//! `script_path` from then on (the env var only sets the *initial* file).
 //!
 //! ## Audio (v1)
 //!
@@ -65,23 +66,37 @@
 //!
 //! ## In-window editor (v1)
 //!
-//! Pressing Ctrl+E (Cmd+E on macOS) toggles a text-editor overlay drawn
-//! on top of the rendered output, so a script can be typed and evaluated
-//! directly in the plugin window without an external file/editor. It has
-//! its own buffer, independent from the `HYDRA_PLUGIN_SCRIPT` file - the
-//! two don't overwrite each other, and the overlay has a "Load file"
-//! button to copy the currently-active (file or default) script into it
-//! as a starting point. Ctrl+Enter (or the "Eval" button) compiles the
-//! buffer; any script/shader error is shown inline. The overlay is built
-//! with `egui` (rendered via `egui_glow`'s GL backend on top of our own
-//! `render_multipass` output) rather than `nih_plug_egui`/`egui-baseview`,
-//! since those own their *entire* window - using them would mean
-//! replacing this crate's own `baseview::WindowHandler`/resize/audio/MIDI
-//! event-handling with theirs. Instead, `egui::Context::run` is driven by
-//! hand, with `baseview`'s mouse/keyboard events translated into
-//! `egui::RawInput` in `on_event`. There's no system clipboard
-//! integration yet (copy/paste stays inside the text field only, no
-//! `arboard`/OS clipboard - see `README.md`).
+//! An earlier version of this crate drew a full text-editing overlay
+//! (type a script directly in the plugin window, no file needed). It
+//! was removed: writing/iterating on a script is a much better
+//! experience in the standalone desktop app (syntax highlighting, real
+//! system clipboard, undo) than a from-scratch mouse/keyboard-driven
+//! text box ever was here, and typed text additionally inherited a
+//! `baseview` Linux/X11 limitation (its keyboard backend hard-codes a
+//! US-QWERTY scan-code table and ignores the system's actual keyboard
+//! layout, so e.g. AZERTY users got the wrong characters). The
+//! recommended workflow is: live-code/iterate in the standalone app,
+//! save the script to a file, then point the plugin at that file (see
+//! "Script loader" below) - no plugin restart needed to switch files.
+//!
+//! ## Script loader (v1)
+//!
+//! Pressing Ctrl+E (Cmd+E on macOS) shows/hides a small overlay with the
+//! currently active script path (or a note that it's the built-in
+//! default sketch) and a "Load script..." button that opens a native
+//! file-picker dialog (`rfd`, the same crate the desktop app uses) to
+//! pick a different `HYDRA_PLUGIN_SCRIPT`-style file; that file is then
+//! hot-reloaded/polled exactly like the env-var one. Any eval/shader
+//! error (from either source) is shown inline. This only needs mouse
+//! input (button clicks) - unlike a text editor, it has no keyboard-
+//! layout dependency at all. Built with `egui` (rendered via
+//! `egui_glow`'s GL backend on top of our own `render_multipass`
+//! output) rather than `nih_plug_egui`/`egui-baseview`, since those own
+//! their *entire* window - using them would mean replacing this crate's
+//! own `baseview::WindowHandler`/resize/audio/MIDI event-handling with
+//! theirs. Instead, `egui::Context::run` is driven by hand, with
+//! `baseview`'s mouse events translated into `egui::RawInput` in
+//! `on_event`.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -92,7 +107,7 @@ use baseview::{
     WindowHandle, WindowOpenOptions, WindowScalePolicy, gl::GlConfig,
 };
 use crossbeam::atomic::AtomicCell;
-use keyboard_types::{Code, Key as KtKey, KeyState, Modifiers as KtModifiers};
+use keyboard_types::{Code, KeyState, Modifiers as KtModifiers};
 use nih_plug::prelude::*;
 use raw_window_handle::{HasRawWindowHandle, RawWindowHandle};
 
@@ -158,28 +173,20 @@ struct HydraGlWindow {
     /// computed as an absolute delta (avoids accumulating rounding error
     /// across many small `CursorMoved` events).
     resize_drag: Option<((f32, f32), (u32, u32))>,
-    /// Whether the in-window text-editor overlay is visible (toggled by
-    /// Ctrl/Cmd+E - see the module doc comment's "In-window editor"
+    /// Whether the script-loader overlay is visible (toggled by
+    /// Ctrl/Cmd+E - see the module doc comment's "Script loader"
     /// section).
-    editor_open: bool,
-    /// The in-window editor's own script buffer - independent of the
-    /// `HYDRA_PLUGIN_SCRIPT` file so neither overwrites the other.
-    script_buffer: String,
-    /// The most recently hot-reloaded/default file content - what the
-    /// editor overlay's "Load file" button copies into `script_buffer`.
-    loaded_code: String,
-    /// The most recent eval/shader-compile error (from either the file
-    /// hot-reload or the in-window editor's "Eval"), shown in the editor
-    /// overlay when it's open.
+    overlay_open: bool,
+    /// The most recent eval/shader-compile error (from the hot-reloaded
+    /// script), shown in the overlay when it's open.
     last_error: Option<String>,
     egui_ctx: egui::Context,
     egui_painter: egui_glow::Painter,
-    /// Current keyboard modifier state, tracked across `KeyboardEvent`s
-    /// since baseview reports each key press/release individually rather
-    /// than a combined modifiers snapshot per-event-type.
-    modifiers: KtModifiers,
-    /// `egui::Event`s translated from baseview input since the last
-    /// `on_frame`, fed into `egui::RawInput` there.
+    /// `egui::Event`s translated from baseview mouse input since the
+    /// last `on_frame`, fed into `egui::RawInput` there. No keyboard
+    /// text input is translated - the overlay is mouse-only (a label and
+    /// a button), see the module doc comment's "In-window editor"
+    /// section for why.
     pending_egui_events: Vec<egui::Event>,
 }
 
@@ -244,13 +251,10 @@ impl HydraGlWindow {
             editor_size,
             cursor_pos: (0.0, 0.0),
             resize_drag: None,
-            editor_open: false,
-            script_buffer: code.clone(),
-            loaded_code: code,
+            overlay_open: false,
             last_error,
             egui_ctx: egui::Context::default(),
             egui_painter,
-            modifiers: KtModifiers::empty(),
             pending_egui_events: Vec::new(),
         }
     }
@@ -338,17 +342,21 @@ impl HydraGlWindow {
             let (render_mode, error) = Self::compile(&mut self.renderer, &code, &self.midi_bridge);
             self.render_mode = render_mode;
             self.last_error = error;
-            self.loaded_code = code;
         }
     }
 
-    /// Evaluates the in-window editor's own buffer (independent of the
-    /// hot-reloaded file) and updates `last_error` for display.
-    fn eval_editor_buffer(&mut self) {
-        let (render_mode, error) =
-            Self::compile(&mut self.renderer, &self.script_buffer, &self.midi_bridge);
-        self.render_mode = render_mode;
-        self.last_error = error;
+    /// Opens a native file-picker dialog and, if a file was chosen,
+    /// switches `script_path` to it and clears `last_mtime` so
+    /// `maybe_reload` picks it up (and compiles it) on the very next
+    /// frame.
+    fn pick_script_file(&mut self) {
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("Hydra script", &["hydra", "rhai", "txt"])
+            .pick_file()
+        {
+            self.script_path = Some(path);
+            self.last_mtime = None;
+        }
     }
 
     /// Whether `pos` (logical window coordinates) falls within the
@@ -399,12 +407,12 @@ impl HydraGlWindow {
         }
     }
 
-    /// When open, runs one `egui` frame from the input accumulated in
-    /// `on_event` since the last call, draws the editor window, and
-    /// paints it on top of whatever `render_multipass` already drew this
-    /// frame via `egui_glow`.
+    /// When open, runs one `egui` frame from the pointer input
+    /// accumulated in `on_event` since the last call, draws the script
+    /// loader overlay, and paints it on top of whatever `render_multipass`
+    /// already drew this frame via `egui_glow`.
     fn draw_editor_overlay(&mut self, w: u32, h: u32) {
-        if !self.editor_open {
+        if !self.overlay_open {
             // Still drop any input that arrived while the overlay was
             // closed (e.g. the toggle keypress itself) so it isn't
             // replayed stale the next time it's opened.
@@ -418,56 +426,43 @@ impl HydraGlWindow {
                 egui::vec2(w as f32, h as f32),
             )),
             time: Some(self.start.elapsed().as_secs_f64()),
-            modifiers: kt_modifiers_to_egui(self.modifiers),
             events: std::mem::take(&mut self.pending_egui_events),
             ..Default::default()
         };
 
-        let mut do_eval = false;
-        let mut do_load = false;
-        let script_buffer = &mut self.script_buffer;
-        let last_error = self.last_error.as_deref();
+        let script_label = match &self.script_path {
+            Some(p) => format!("Script: {}", p.display()),
+            None => "Script: (built-in default sketch - no file loaded)".to_string(),
+        };
+        let last_error = self.last_error.clone();
+        let mut do_pick_file = false;
 
         let full_output = self.egui_ctx.run(raw_input, |ctx| {
-            egui::Window::new("Hydra Editor")
+            egui::Window::new("Hydra")
                 .default_pos([16.0, 16.0])
-                .default_size([w as f32 * 0.6, h as f32 * 0.6])
+                .resizable(false)
+                .collapsible(false)
                 .show(ctx, |ui| {
-                    ui.label("Ctrl/Cmd+E to close - Ctrl/Cmd+Enter or \"Eval\" to run.");
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        ui.add(
-                            egui::TextEdit::multiline(script_buffer)
-                                .code_editor()
-                                .desired_width(f32::INFINITY)
-                                .desired_rows(16),
-                        );
-                    });
-                    ui.horizontal(|ui| {
-                        if ui.button("Eval").clicked() {
-                            do_eval = true;
-                        }
-                        if ui
-                            .button("Load file")
-                            .on_hover_text("Copy the currently active HYDRA_PLUGIN_SCRIPT (or default sketch) into the buffer above")
-                            .clicked()
-                        {
-                            do_load = true;
-                        }
-                    });
-                    if ctx.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.command) {
-                        do_eval = true;
+                    ui.label("Ctrl/Cmd+E to hide this panel.");
+                    ui.label(&script_label);
+                    if ui
+                        .button("Load script...")
+                        .on_hover_text(
+                            "Pick a Hydra script file to hot-reload from (replaces \
+                             HYDRA_PLUGIN_SCRIPT until the host is restarted)",
+                        )
+                        .clicked()
+                    {
+                        do_pick_file = true;
                     }
-                    if let Some(err) = last_error {
+                    if let Some(err) = &last_error {
                         ui.colored_label(egui::Color32::from_rgb(230, 80, 80), err);
                     }
                 });
         });
 
-        if do_load {
-            self.script_buffer = self.loaded_code.clone();
-        }
-        if do_eval {
-            self.eval_editor_buffer();
+        if do_pick_file {
+            self.pick_script_file();
         }
 
         let clipped_primitives = self
@@ -562,10 +557,9 @@ impl baseview::WindowHandler for HydraGlWindow {
         match event {
             BvEvent::Mouse(MouseEvent::CursorMoved {
                 position,
-                modifiers,
+                modifiers: _,
             }) => {
                 self.cursor_pos = (position.x as f32, position.y as f32);
-                self.modifiers = modifiers;
                 if let Some((start_cursor, start_size)) = self.resize_drag {
                     let dx = self.cursor_pos.0 - start_cursor.0;
                     let dy = self.cursor_pos.1 - start_cursor.1;
@@ -573,7 +567,7 @@ impl baseview::WindowHandler for HydraGlWindow {
                     let new_h = (start_size.1 as f32 + dy).round() as u32;
                     self.apply_resize(window, new_w, new_h);
                 }
-                if self.editor_open {
+                if self.overlay_open {
                     self.pending_egui_events
                         .push(egui::Event::PointerMoved(egui::pos2(
                             self.cursor_pos.0,
@@ -581,86 +575,56 @@ impl baseview::WindowHandler for HydraGlWindow {
                         )));
                 }
             }
-            BvEvent::Mouse(MouseEvent::ButtonPressed { button, modifiers }) => {
-                self.modifiers = modifiers;
+            BvEvent::Mouse(MouseEvent::ButtonPressed {
+                button,
+                modifiers: _,
+            }) => {
                 if button == MouseButton::Left && self.in_resize_handle(self.cursor_pos) {
                     self.resize_drag = Some((self.cursor_pos, self.editor_size.load()));
                 }
-                if self.editor_open {
+                if self.overlay_open {
                     if let Some(b) = bv_button_to_egui(button) {
                         self.pending_egui_events.push(egui::Event::PointerButton {
                             pos: egui::pos2(self.cursor_pos.0, self.cursor_pos.1),
                             button: b,
                             pressed: true,
-                            modifiers: kt_modifiers_to_egui(modifiers),
+                            modifiers: egui::Modifiers::NONE,
                         });
                     }
                 }
             }
-            BvEvent::Mouse(MouseEvent::ButtonReleased { button, modifiers }) => {
-                self.modifiers = modifiers;
+            BvEvent::Mouse(MouseEvent::ButtonReleased {
+                button,
+                modifiers: _,
+            }) => {
                 if button == MouseButton::Left {
                     self.resize_drag = None;
                 }
-                if self.editor_open {
+                if self.overlay_open {
                     if let Some(b) = bv_button_to_egui(button) {
                         self.pending_egui_events.push(egui::Event::PointerButton {
                             pos: egui::pos2(self.cursor_pos.0, self.cursor_pos.1),
                             button: b,
                             pressed: false,
-                            modifiers: kt_modifiers_to_egui(modifiers),
+                            modifiers: egui::Modifiers::NONE,
                         });
                     }
                 }
             }
-            BvEvent::Mouse(MouseEvent::WheelScrolled { delta, modifiers }) => {
-                self.modifiers = modifiers;
-                if self.editor_open {
-                    let delta = match delta {
-                        baseview::ScrollDelta::Lines { x, y } => egui::vec2(x, y) * 24.0,
-                        baseview::ScrollDelta::Pixels { x, y } => egui::vec2(x, y),
-                    };
-                    self.pending_egui_events.push(egui::Event::MouseWheel {
-                        unit: egui::MouseWheelUnit::Point,
-                        delta,
-                        modifiers: kt_modifiers_to_egui(modifiers),
-                    });
-                }
-            }
+            // The script-loader overlay has no scrollable content, so
+            // scroll events don't need translating.
             BvEvent::Keyboard(kb_event) => {
-                self.modifiers = kb_event.modifiers;
+                // Physical-key-position based (`Code`, not the layout-
+                // mapped `Key`), so this works the same regardless of
+                // keyboard layout - no text input is translated here at
+                // all (see the module doc comment's "In-window editor"
+                // section for why).
                 let is_toggle = kb_event.code == Code::KeyE
                     && kb_event.state == KeyState::Down
                     && (kb_event.modifiers.contains(KtModifiers::CONTROL)
                         || kb_event.modifiers.contains(KtModifiers::META));
                 if is_toggle {
-                    self.editor_open = !self.editor_open;
-                } else if self.editor_open {
-                    let pressed = kb_event.state == KeyState::Down;
-                    let modifiers = kt_modifiers_to_egui(kb_event.modifiers);
-                    if let Some(key) = kt_code_to_egui_key(kb_event.code) {
-                        self.pending_egui_events.push(egui::Event::Key {
-                            key,
-                            physical_key: Some(key),
-                            pressed,
-                            repeat: false,
-                            modifiers,
-                        });
-                    }
-                    // Only plain character presses (no Ctrl/Cmd chord,
-                    // which are shortcuts, not text) are forwarded as
-                    // text input - mirrors how every other egui backend
-                    // integration splits `Key`/`Text` events.
-                    if pressed
-                        && !modifiers.ctrl
-                        && !modifiers.command
-                        && !modifiers.mac_cmd
-                    {
-                        if let KtKey::Character(s) = &kb_event.key {
-                            self.pending_egui_events
-                                .push(egui::Event::Text(s.clone()));
-                        }
-                    }
+                    self.overlay_open = !self.overlay_open;
                 }
             }
             // Fires when the OS window itself is resized directly (only
@@ -681,25 +645,6 @@ impl baseview::WindowHandler for HydraGlWindow {
     }
 }
 
-/// Converts a `keyboard_types::Modifiers` snapshot into `egui::Modifiers`.
-/// `command`/`mac_cmd` follow platform convention (Cmd on macOS, Ctrl
-/// elsewhere), matching every other egui backend integration.
-fn kt_modifiers_to_egui(m: KtModifiers) -> egui::Modifiers {
-    let mac_cmd = cfg!(target_os = "macos") && m.contains(KtModifiers::META);
-    let command = if cfg!(target_os = "macos") {
-        m.contains(KtModifiers::META)
-    } else {
-        m.contains(KtModifiers::CONTROL)
-    };
-    egui::Modifiers {
-        alt: m.contains(KtModifiers::ALT),
-        ctrl: m.contains(KtModifiers::CONTROL),
-        shift: m.contains(KtModifiers::SHIFT),
-        mac_cmd,
-        command,
-    }
-}
-
 fn bv_button_to_egui(button: MouseButton) -> Option<egui::PointerButton> {
     match button {
         MouseButton::Left => Some(egui::PointerButton::Primary),
@@ -709,78 +654,6 @@ fn bv_button_to_egui(button: MouseButton) -> Option<egui::PointerButton> {
         MouseButton::Forward => Some(egui::PointerButton::Extra2),
         MouseButton::Other(_) => None,
     }
-}
-
-/// Maps a physical key position to an `egui::Key` - only the subset
-/// needed for text editing (letters, digits, navigation, punctuation);
-/// anything else (media keys, function keys, etc.) is ignored.
-fn kt_code_to_egui_key(code: Code) -> Option<egui::Key> {
-    use egui::Key as EK;
-    Some(match code {
-        Code::ArrowDown => EK::ArrowDown,
-        Code::ArrowLeft => EK::ArrowLeft,
-        Code::ArrowRight => EK::ArrowRight,
-        Code::ArrowUp => EK::ArrowUp,
-        Code::Escape => EK::Escape,
-        Code::Tab => EK::Tab,
-        Code::Backspace => EK::Backspace,
-        Code::Enter | Code::NumpadEnter => EK::Enter,
-        Code::Space => EK::Space,
-        Code::Insert => EK::Insert,
-        Code::Delete => EK::Delete,
-        Code::Home => EK::Home,
-        Code::End => EK::End,
-        Code::PageUp => EK::PageUp,
-        Code::PageDown => EK::PageDown,
-        Code::Minus => EK::Minus,
-        Code::Equal => EK::Equals,
-        Code::Comma => EK::Comma,
-        Code::Period => EK::Period,
-        Code::Semicolon => EK::Semicolon,
-        Code::Quote => EK::Quote,
-        Code::Backquote => EK::Backtick,
-        Code::BracketLeft => EK::OpenBracket,
-        Code::BracketRight => EK::CloseBracket,
-        Code::Backslash => EK::Backslash,
-        Code::Slash => EK::Slash,
-        Code::Digit0 => EK::Num0,
-        Code::Digit1 => EK::Num1,
-        Code::Digit2 => EK::Num2,
-        Code::Digit3 => EK::Num3,
-        Code::Digit4 => EK::Num4,
-        Code::Digit5 => EK::Num5,
-        Code::Digit6 => EK::Num6,
-        Code::Digit7 => EK::Num7,
-        Code::Digit8 => EK::Num8,
-        Code::Digit9 => EK::Num9,
-        Code::KeyA => EK::A,
-        Code::KeyB => EK::B,
-        Code::KeyC => EK::C,
-        Code::KeyD => EK::D,
-        Code::KeyE => EK::E,
-        Code::KeyF => EK::F,
-        Code::KeyG => EK::G,
-        Code::KeyH => EK::H,
-        Code::KeyI => EK::I,
-        Code::KeyJ => EK::J,
-        Code::KeyK => EK::K,
-        Code::KeyL => EK::L,
-        Code::KeyM => EK::M,
-        Code::KeyN => EK::N,
-        Code::KeyO => EK::O,
-        Code::KeyP => EK::P,
-        Code::KeyQ => EK::Q,
-        Code::KeyR => EK::R,
-        Code::KeyS => EK::S,
-        Code::KeyT => EK::T,
-        Code::KeyU => EK::U,
-        Code::KeyV => EK::V,
-        Code::KeyW => EK::W,
-        Code::KeyX => EK::X,
-        Code::KeyY => EK::Y,
-        Code::KeyZ => EK::Z,
-        _ => return None,
-    })
 }
 
 struct HydraEditor {

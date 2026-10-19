@@ -2684,6 +2684,7 @@ dependencies = [
  "log",
  "nih_plug",
  "raw-window-handle 0.5.2",
+ "rfd",
  "serde",
 ]
 

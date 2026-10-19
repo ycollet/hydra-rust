@@ -24,8 +24,9 @@ library-embedding path the main crate's README documents for Sova.
   environment variable (falls back to a small built-in default sketch if
   unset/unreadable). The file's mtime is polled once per frame and
   hot-reloaded on change - edit-and-save in any external editor to
-  live-code from inside a DAW. There's also an **in-window text editor**
-  (Ctrl/Cmd+E to toggle) - see below.
+  live-code from inside a DAW. A small overlay (Ctrl/Cmd+E to show/hide)
+  has a **"Load script..."** button to switch files without restarting
+  the host - see below.
 - **Audio**: the host's own audio buffer is downmixed to mono in
   `process()` (the real-time audio thread) and pushed into a
   `hydra_rust::audio::AudioBuffer` - a bounded ring buffer with no
@@ -54,14 +55,14 @@ library-embedding path the main crate's README documents for Sova.
 - **Mouse**: wired into `mouse`/`m` reads from the window's actual
   cursor position, normalized to `[0, 1]` with the Y axis flipped to
   match the desktop app's own convention (origin at the bottom-left).
-- **In-window editor**: Ctrl/Cmd+E toggles a text-editor overlay (built
-  with `egui`, rendered via `egui_glow` on top of the Hydra output) with
-  its own script buffer, independent of the `HYDRA_PLUGIN_SCRIPT` file -
-  "Eval" (or Ctrl/Cmd+Enter) compiles it, "Load file" copies in the
-  currently active file/default-sketch code as a starting point, and any
-  eval/shader error is shown inline. There's no syntax highlighting and
-  no system-clipboard integration yet (copy/paste works only within the
-  text field itself, not to/from other apps).
+- **Script loader overlay**: Ctrl/Cmd+E shows/hides a small panel (built
+  with `egui`, rendered via `egui_glow` on top of the Hydra output)
+  showing the currently active script path and a **"Load script..."**
+  button that opens a native file-picker dialog (`rfd`) to pick a
+  different file; any eval/shader error is shown inline. There's
+  deliberately no in-window text editor here (see "Why no in-window code
+  editor?" below) - write/iterate on scripts in the standalone desktop
+  app instead, then point the plugin at the saved file.
 - **Window is resizable**: drag the bottom-right corner (a small
   translucent square marks the hotspot) to resize the window directly;
   nih-plug doesn't support host-initiated (OS-border) resize of an
@@ -77,6 +78,21 @@ library-embedding path the main crate's README documents for Sova.
   underlying `hydra-rust` features exist but aren't wired into this crate's
   `Cargo.toml`/editor - straightforward to add the same way `webcam` is
   feature-gated in the main crate).
+
+## Why no in-window code editor?
+
+An earlier version of this crate drew a full text-editing overlay
+directly in the plugin window. It was removed: writing/iterating on a
+script is a much better experience in the standalone desktop app
+(syntax highlighting, real system clipboard, undo) than a from-scratch
+mouse/keyboard-driven text box ever was here. It also inherited a
+`baseview` Linux/X11 limitation - its keyboard backend hard-codes a
+US-QWERTY scan-code table and ignores the system's actual keyboard
+layout, so e.g. AZERTY users got the wrong characters typed. The
+recommended workflow is: live-code in the standalone app, save the
+script to a file, then use the overlay's "Load script..." button to
+point the plugin at that file - no plugin restart needed, and no
+keyboard-layout dependency since the loader overlay is mouse-only.
 
 ## Building
 
@@ -130,6 +146,14 @@ resize handle (and a host accepting/rejecting `request_resize()`) has
 not yet been tested interactively in a real DAW or the standalone app.
 The in-window editor overlay's build/clippy/bundle are likewise
 verified and the standalone binary still starts and runs without
-panicking after adding it - actually opening the overlay (Ctrl/Cmd+E),
-typing, and evaluating has not yet been tested interactively in a real
-DAW or the standalone app.
+panicking after adding it. After interactive testing on Linux surfaced
+two real bugs - the overlay's typed text following `baseview`'s
+hard-coded US-QWERTY layout regardless of the system's actual layout
+(e.g. AZERTY), and the rendered output not resizing along with the
+window (the final screen blit wasn't keeping the GL viewport in sync
+with the window's actual size on every platform) - the text-editing
+overlay was removed entirely in favor of a mouse-only "Load script..."
+file picker (see "Why no in-window code editor?" above), and the
+viewport is now set explicitly every frame. Both fixes build/clippy/
+bundle clean; re-testing the resize fix and the new loader button on
+Linux is still pending.
