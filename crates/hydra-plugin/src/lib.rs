@@ -177,6 +177,17 @@ struct HydraGlWindow {
     /// Ctrl/Cmd+E - see the module doc comment's "Script loader"
     /// section).
     overlay_open: bool,
+    /// The window's logical-to-physical pixel scale factor (1.0 on a
+    /// standard-DPI display, e.g. 2.0 on a macOS Retina display),
+    /// updated from `WindowEvent::Resized`'s `WindowInfo` whenever it
+    /// changes. `editor_size` (and everything derived from it, like
+    /// `ensure_resolution`/`RenderUniforms::resolution`) stays in
+    /// logical pixels, but the GL viewport must be set in *physical*
+    /// pixels (`editor_size * editor_scale`) to cover the whole
+    /// window's actual framebuffer - using logical pixels there only
+    /// fills the bottom-left quarter of the screen on a 2x-scaled
+    /// display (see `on_frame`).
+    editor_scale: f64,
     /// The most recent eval/shader-compile error (from the hot-reloaded
     /// script), shown in the overlay when it's open.
     last_error: Option<String>,
@@ -252,6 +263,11 @@ impl HydraGlWindow {
             cursor_pos: (0.0, 0.0),
             resize_drag: None,
             overlay_open: false,
+            // `baseview` opens the window at scale 1.0 as a placeholder
+            // (even under `SystemScaleFactor`) and corrects it via a
+            // `Resized` event almost immediately once the real display
+            // scale is known - see the field doc comment.
+            editor_scale: 1.0,
             last_error,
             egui_ctx: egui::Context::default(),
             egui_painter,
@@ -501,9 +517,19 @@ impl baseview::WindowHandler for HydraGlWindow {
         // even though `editor_size`/the window itself are already
         // correct. Setting it explicitly every frame keeps it in sync
         // regardless of platform.
+        //
+        // This must be in *physical* pixels, not `editor_size`'s logical
+        // ones - on a 2x-scaled (e.g. Retina) display the real
+        // framebuffer is twice as wide/tall as `editor_size`, so a
+        // viewport of `(w, h)` only covers its bottom-left quarter
+        // (OpenGL's origin is bottom-left), leaving the rest black.
+        let (phys_w, phys_h) = (
+            (w as f64 * self.editor_scale).round() as i32,
+            (h as f64 * self.editor_scale).round() as i32,
+        );
         unsafe {
             use glow::HasContext as _;
-            self.gl.viewport(0, 0, w as i32, h as i32);
+            self.gl.viewport(0, 0, phys_w, phys_h);
         }
 
         let midi_frame = self.midi_poller.poll();
@@ -637,6 +663,7 @@ impl baseview::WindowHandler for HydraGlWindow {
                     logical.width.round() as u32,
                     logical.height.round() as u32,
                 ));
+                self.editor_scale = info.scale();
             }
             _ => {}
         }
