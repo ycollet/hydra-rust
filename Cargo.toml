@@ -16,6 +16,12 @@
 members = [".", "crates/hydra-plugin", "xtask"]
 default-members = ["."]
 
+# Override nih-plug's older standalone baseview as well as the plugin editor.
+# Cargo requires a different source URL for a git patch; this fork provides
+# the exact upstream commit fixing null NSWindow access during initialization.
+[patch."https://github.com/RustAudio/baseview.git"]
+baseview = { git = "https://github.com/robbert-vdh/baseview.git", rev = "3e1297320f6c9feb01993cba7743277b2d645211" }
+
 [package]
 name = "hydra-rust"
 version = "0.1.0"
@@ -77,8 +83,9 @@ async-trait = { version = "0.1", optional = true }
 # Enabled by default so plain `cargo build`/`cargo run` keeps building the
 # `hydra` desktop app unchanged. Library-only consumers should depend with
 # `default-features = false` to skip the windowing stack entirely.
-default = ["gui"]
+default = ["gui", "nsm"]
 gui = ["dep:eframe", "dep:rfd"]
+nsm = ["dep:rosc"]
 webcam = ["dep:nokhwa"]
 # `fft`: just the sample-buffer + FFT-analysis pipeline (`AudioBuffer`/
 # `AudioAnalyzer`, see `src/audio.rs`), with no OS audio capture of its

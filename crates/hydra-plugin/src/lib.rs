@@ -8,12 +8,13 @@
 //!
 //! ## Script source (v1)
 //!
-//! The Hydra script is read from the file path in the `HYDRA_PLUGIN_SCRIPT`
+//! New instances read the Hydra script from the `HYDRA_PLUGIN_SCRIPT`
 //! environment variable (falling back to a small built-in example sketch if
-//! unset or unreadable). The file's mtime is polled once per frame; editing
+//! unset or unreadable). Host state restores the selected path and source
+//! snapshot instead. The file's mtime is polled once per frame; editing
 //! and saving the file in any external editor hot-reloads it in the plugin
-//! window, enabling live-coding from inside a DAW. A small overlay (Ctrl/
-//! Cmd+E to show/hide - see "Script loader" below) has a "Load script..."
+//! window, enabling live-coding from inside a DAW. A small overlay ("Load
+//! menu" button or Ctrl/Cmd+E - see "Script loader" below) has a "Load script..."
 //! button to pick a different file without restarting the host, replacing
 //! `script_path` from then on (the env var only sets the *initial* file).
 //!
@@ -81,13 +82,15 @@
 //!
 //! ## Script loader (v1)
 //!
-//! Pressing Ctrl+E (Cmd+E on macOS) shows/hides a small overlay with the
+//! Clicking "Load menu" in the top-left corner opens a small overlay with the
 //! currently active script path (or a note that it's the built-in
 //! default sketch) and a "Load script..." button that opens a native
 //! file-picker dialog (`rfd`, the same crate the desktop app uses) to
 //! pick a different `HYDRA_PLUGIN_SCRIPT`-style file; that file is then
 //! hot-reloaded/polled exactly like the env-var one. Any eval/shader
-//! error (from either source) is shown inline. This only needs mouse
+//! error (from either source) is shown inline. Close the panel with its
+//! title-bar close button, or toggle it with Ctrl+E (Cmd+E on macOS).
+//! This only needs mouse
 //! input (button clicks) - unlike a text editor, it has no keyboard-
 //! layout dependency at all. Built with `egui` (rendered via
 //! `egui_glow`'s GL backend on top of our own `render_multipass`
@@ -99,12 +102,12 @@
 //! `on_event`.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::{Instant, SystemTime};
 
 use baseview::{
-    Event as BvEvent, MouseButton, MouseEvent, Size as BvSize, WindowEvent as BvWindowEvent,
-    WindowHandle, WindowOpenOptions, WindowScalePolicy, gl::GlConfig,
+    gl::GlConfig, Event as BvEvent, MouseButton, MouseEvent, Size as BvSize,
+    WindowEvent as BvWindowEvent, WindowHandle, WindowOpenOptions, WindowScalePolicy,
 };
 use crossbeam::atomic::AtomicCell;
 use keyboard_types::{Code, KeyState, Modifiers as KtModifiers};
@@ -126,6 +129,284 @@ const MIN_EDITOR_HEIGHT: u32 = 144;
 const DEFAULT_EDITOR_WIDTH: u32 = 1024;
 const DEFAULT_EDITOR_HEIGHT: u32 = 576;
 
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+struct ScriptState {
+    path: Option<PathBuf>,
+    source: String,
+}
+
+impl Default for ScriptState {
+    fn default() -> Self {
+        let path = script_path_from_env();
+        let (source, _) = load_script(&path);
+        Self { path, source }
+    }
+}
+
+struct StandaloneSession {
+    client: hydra_rust::nsm::NsmClient,
+    params: Arc<HydraPluginParams>,
+}
+
+static STANDALONE_SESSION: OnceLock<StandaloneSession> = OnceLock::new();
+
+/// Start the standalone wrapper, restoring an NSM snapshot before opening audio or the editor.
+pub fn run_standalone() -> std::io::Result<bool> {
+    // CLI help should not wait for a session-manager handshake.
+    if !std::env::args().any(|arg| arg == "--help" || arg == "-h" || arg == "--version") {
+        if let Some(client) = hydra_rust::nsm::NsmClient::from_env("Hydra") {
+            let params = Arc::new(HydraPluginParams::default());
+            let state = hydra_rust::nsm::load::<std::collections::BTreeMap<String, String>>(
+                &client.project_dir.join("plugin-state.json"),
+            );
+            let restored = state
+                .and_then(|state| params.restore_session(&state))
+                .and_then(|()| std::fs::create_dir_all(&client.project_dir));
+            match restored {
+                Ok(()) => {}
+                Err(err) => {
+                    client.reply(
+                        "/nsm/client/open",
+                        Err(std::io::Error::other(err.to_string())),
+                    )?;
+                    return Err(err);
+                }
+            }
+            client.reply("/nsm/client/open", Ok(()))?;
+            STANDALONE_SESSION
+                .set(StandaloneSession { client, params })
+                .map_err(|_| std::io::Error::other("Standalone session already initialized"))?;
+        }
+    }
+    Ok(nih_plug::nih_export_standalone::<HydraPlugin>())
+}
+
+fn script_loader_ui(
+    ctx: &egui::Context,
+    overlay_open: &mut bool,
+    script_label: &str,
+    last_error: Option<&str>,
+) -> bool {
+    let mut do_pick_file = false;
+    if *overlay_open {
+        egui::Window::new("Hydra")
+            .open(overlay_open)
+            .default_pos([16.0, 16.0])
+            .resizable(false)
+            .collapsible(false)
+            .show(ctx, |ui| {
+                ui.label("Ctrl/Cmd+E to toggle this panel.");
+                ui.label(script_label);
+                if ui
+                    .button("Load script...")
+                    .on_hover_text(
+                        "Pick a Hydra script file to hot-reload from (replaces \
+                         HYDRA_PLUGIN_SCRIPT; saved with the host project)",
+                    )
+                    .clicked()
+                {
+                    do_pick_file = true;
+                }
+                if let Some(err) = last_error {
+                    ui.colored_label(egui::Color32::from_rgb(230, 80, 80), err);
+                }
+            });
+    } else {
+        egui::Area::new(egui::Id::new("script_loader_toggle"))
+            .fixed_pos([16.0, 16.0])
+            .movable(false)
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    if ui.button("Load menu").clicked() {
+                        *overlay_open = true;
+                    }
+                });
+            });
+    }
+    do_pick_file
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn first_audio_and_midi_callbacks_and_full_buffers_do_not_allocate() {
+        let audio = AudioBuffer::new();
+        let midi = MidiBridge::new();
+        std::thread::spawn(move || {
+            let samples = [0.25; 4096];
+            assert_no_alloc::assert_no_alloc(|| {
+                for size in [512, 512, 512, 4096] {
+                    audio.push(&samples[..size], 1);
+                }
+                midi.note_on(60, 0.8);
+                midi.poly_pressure(60, 0.4);
+                midi.control_change(1, 0.5);
+                midi.channel_pressure(0.3);
+                midi.note_off(60);
+            });
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn host_state_restores_script_source_path_and_size_without_the_original_file() {
+        let params = HydraPluginParams::default();
+        let script = ScriptState {
+            path: Some(PathBuf::from("/nonexistent/hydra-state-test.hydra")),
+            source: "osc(12, 0.2, 0.7).rotate(0.5).out()".into(),
+        };
+        *params.script.write().unwrap() = script.clone();
+        params.editor_size.store((1280, 720));
+        // This is the same Params persistence path used by the CLAP/VST3 wrappers.
+        let serialized = serde_json::to_vec(&params.serialize_fields()).unwrap();
+        let restored = HydraPluginParams::default();
+        let editor_script = restored.script.clone();
+        let editor_size = restored.editor_size.clone();
+        restored
+            .restore_session(&serde_json::from_slice(&serialized).unwrap())
+            .unwrap();
+        assert_eq!(*editor_script.read().unwrap(), script);
+        assert_eq!(editor_size.load(), (1280, 720));
+        assert!(hydra_rust::eval(&editor_script.read().unwrap().source).is_ok());
+
+        // A second restore also updates already-shared editor state.
+        *params.script.write().unwrap() = ScriptState {
+            path: None,
+            source: "noise(3).out()".into(),
+        };
+        restored.deserialize_fields(&params.serialize_fields());
+        assert_eq!(
+            *editor_script.read().unwrap(),
+            *params.script.read().unwrap()
+        );
+    }
+
+    #[test]
+    fn legacy_state_loads_and_corrupt_nsm_state_is_rejected_without_partial_restore() {
+        let params = HydraPluginParams::default();
+        let original_script = params.script.read().unwrap().clone();
+        let mut fields = std::collections::BTreeMap::new();
+        fields.insert("editor-size".into(), "[800,450]".into());
+        params.restore_session(&fields).unwrap();
+        assert_eq!(params.editor_size.load(), (800, 450));
+        assert_eq!(*params.script.read().unwrap(), original_script);
+        fields.insert("editor-size".into(), "[1600,900]".into());
+        fields.insert("script".into(), "invalid JSON".into());
+        assert!(params.restore_session(&fields).is_err());
+        assert_eq!(params.editor_size.load(), (800, 450));
+    }
+
+    fn frame(
+        ctx: &egui::Context,
+        open: &mut bool,
+        events: Vec<egui::Event>,
+    ) -> (egui::FullOutput, bool) {
+        let mut pick_file = false;
+        let output = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1024.0, 576.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |ctx| {
+                pick_file = script_loader_ui(
+                    ctx,
+                    open,
+                    "Script: example.hydra",
+                    Some("Example script error"),
+                );
+            },
+        );
+        (output, pick_file)
+    }
+
+    fn text_rect(output: &egui::FullOutput, label: &str) -> Option<egui::Rect> {
+        fn find(shape: &egui::epaint::Shape, label: &str) -> Option<egui::Rect> {
+            match shape {
+                egui::epaint::Shape::Text(text) if text.galley.text() == label => {
+                    Some(egui::Rect::from_min_size(text.pos, text.galley.size()))
+                }
+                egui::epaint::Shape::Vec(shapes) => {
+                    shapes.iter().find_map(|shape| find(shape, label))
+                }
+                _ => None,
+            }
+        }
+        output
+            .shapes
+            .iter()
+            .find_map(|shape| find(&shape.shape, label))
+    }
+
+    fn click(ctx: &egui::Context, open: &mut bool, pos: egui::Pos2) -> (egui::FullOutput, bool) {
+        frame(
+            ctx,
+            open,
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        frame(
+            ctx,
+            open,
+            vec![egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        )
+    }
+
+    #[test]
+    fn loader_is_accessible_without_keyboard_at_standard_and_high_dpi() {
+        for scale in [1.0, 2.0] {
+            let ctx = egui::Context::default();
+            ctx.set_pixels_per_point(scale);
+            let mut open = false;
+            frame(&ctx, &mut open, vec![]);
+            let (output, pick_file) = frame(&ctx, &mut open, vec![]);
+            assert!(!pick_file);
+            assert!(text_rect(&output, "Load script...").is_none());
+            let menu_pos = text_rect(&output, "Load menu").unwrap().center();
+            assert!(!click(&ctx, &mut open, menu_pos).1);
+            assert!(open);
+
+            frame(&ctx, &mut open, vec![]);
+            let (output, _) = frame(&ctx, &mut open, vec![]);
+            assert!(text_rect(&output, "Script: example.hydra").is_some());
+            assert!(text_rect(&output, "Example script error").is_some());
+            let load_pos = text_rect(&output, "Load script...").unwrap().center();
+            assert!(click(&ctx, &mut open, load_pos).1);
+
+            let window_rect = ctx
+                .memory(|memory| memory.area_rect(egui::Id::new("Hydra")))
+                .unwrap();
+            click(
+                &ctx,
+                &mut open,
+                egui::pos2(window_rect.right() - 14.0, window_rect.top() + 14.0),
+            );
+            assert!(!open);
+            frame(&ctx, &mut open, vec![]);
+            let (output, _) = frame(&ctx, &mut open, vec![]);
+            assert!(text_rect(&output, "Load menu").is_some());
+            assert!(text_rect(&output, "Load script...").is_none());
+        }
+    }
+}
 
 fn script_path_from_env() -> Option<PathBuf> {
     std::env::var_os("HYDRA_PLUGIN_SCRIPT").map(PathBuf::from)
@@ -156,6 +437,8 @@ struct HydraGlWindow {
     renderer: ShaderRenderer,
     start: Instant,
     script_path: Option<PathBuf>,
+    script_state: Arc<RwLock<ScriptState>>,
+    applied_script: ScriptState,
     last_mtime: Option<SystemTime>,
     render_mode: RenderMode,
     audio_buffer: AudioBuffer,
@@ -173,8 +456,8 @@ struct HydraGlWindow {
     /// computed as an absolute delta (avoids accumulating rounding error
     /// across many small `CursorMoved` events).
     resize_drag: Option<((f32, f32), (u32, u32))>,
-    /// Whether the script-loader overlay is visible (toggled by
-    /// Ctrl/Cmd+E - see the module doc comment's "Script loader"
+    /// Whether the script-loader overlay is visible (opened by the
+    /// "Load menu" button or Ctrl/Cmd+E - see "Script loader"
     /// section).
     overlay_open: bool,
     /// The window's logical-to-physical pixel scale factor (1.0 on a
@@ -208,6 +491,7 @@ impl HydraGlWindow {
         midi_bridge: MidiBridge,
         gui_context: Arc<dyn GuiContext>,
         editor_size: Arc<AtomicCell<(u32, u32)>>,
+        script_state: Arc<RwLock<ScriptState>>,
     ) -> Self {
         let gl_context = window
             .gl_context()
@@ -220,8 +504,12 @@ impl HydraGlWindow {
         // code did (that failed with "Unable to create VertexArray
         // object"/would have failed identically on the first shader
         // compile too).
-        let script_path = script_path_from_env();
-        let (code, mtime) = load_script(&script_path);
+        let applied_script = script_state.read().expect("Poisoned script state").clone();
+        let script_path = applied_script.path.clone();
+        let code = &applied_script.source;
+        let mtime = script_path
+            .as_ref()
+            .and_then(|path| std::fs::metadata(path).and_then(|m| m.modified()).ok());
 
         let (gl, renderer, render_mode, last_error, egui_painter) = unsafe {
             gl_context.make_current();
@@ -230,7 +518,7 @@ impl HydraGlWindow {
                 gl_context.get_proc_address(s)
             }));
             let mut renderer = ShaderRenderer::new(gl.clone());
-            let (render_mode, last_error) = Self::compile(&mut renderer, &code, &midi_bridge);
+            let (render_mode, last_error) = Self::compile(&mut renderer, code, &midi_bridge);
             // `egui_glow::Painter` needs its own `glow::Context` handle
             // (a different `glow` crate version than `hydra_rust`'s
             // renderer uses) - both just wrap the same underlying GL
@@ -252,6 +540,8 @@ impl HydraGlWindow {
             renderer,
             start: Instant::now(),
             script_path,
+            script_state,
+            applied_script,
             last_mtime: mtime,
             render_mode,
             audio_buffer,
@@ -282,8 +572,7 @@ impl HydraGlWindow {
     /// ADSR envelope slots) directly to `midi_bridge` - see the module
     /// doc comment for which requests are honored here. Returns the
     /// compiled `RenderMode` plus any eval/shader-compile error text (for
-    /// display in the in-window editor overlay, regardless of whether
-    /// the code came from the overlay or the hot-reloaded file).
+    /// display in the script-loader overlay).
     fn compile(
         renderer: &mut ShaderRenderer,
         code: &str,
@@ -346,6 +635,21 @@ impl HydraGlWindow {
     /// (cheap: a single `stat` per frame), recompiling only on an actual
     /// change - this is what gives the live-coding hot-reload behavior.
     fn maybe_reload(&mut self) {
+        let restored = {
+            let state = self.script_state.read().expect("Poisoned script state");
+            (self.applied_script != *state).then(|| state.clone())
+        };
+        if let Some(state) = restored {
+            self.script_path = state.path.clone();
+            self.last_mtime = self
+                .script_path
+                .as_ref()
+                .and_then(|path| std::fs::metadata(path).and_then(|m| m.modified()).ok());
+            let (mode, error) = Self::compile(&mut self.renderer, &state.source, &self.midi_bridge);
+            self.render_mode = mode;
+            self.last_error = error;
+            self.applied_script = state;
+        }
         let Some(path) = &self.script_path else {
             return;
         };
@@ -353,8 +657,24 @@ impl HydraGlWindow {
             return;
         };
         if Some(mtime) != self.last_mtime {
+            let code = match std::fs::read_to_string(path) {
+                Ok(code) => code,
+                Err(err) => {
+                    let message = format!("Cannot read {}: {err}", path.display());
+                    if self.last_error.as_ref() != Some(&message) {
+                        log::warn!("hydra-plugin: {message}");
+                    }
+                    self.last_error = Some(message);
+                    return;
+                }
+            };
             self.last_mtime = Some(mtime);
-            let code = std::fs::read_to_string(path).unwrap_or_default();
+            self.applied_script = ScriptState {
+                path: Some(path.clone()),
+                source: code.clone(),
+            };
+            *self.script_state.write().expect("Poisoned script state") =
+                self.applied_script.clone();
             let (render_mode, error) = Self::compile(&mut self.renderer, &code, &self.midi_bridge);
             self.render_mode = render_mode;
             self.last_error = error;
@@ -370,8 +690,19 @@ impl HydraGlWindow {
             .add_filter("Hydra script", &["hydra", "rhai", "txt"])
             .pick_file()
         {
-            self.script_path = Some(path);
-            self.last_mtime = None;
+            match std::fs::read_to_string(&path) {
+                Ok(source) => {
+                    *self.script_state.write().expect("Poisoned script state") = ScriptState {
+                        path: Some(path),
+                        source,
+                    };
+                }
+                Err(err) => {
+                    let message = format!("Cannot read {}: {err}", path.display());
+                    log::warn!("hydra-plugin: {message}");
+                    self.last_error = Some(message);
+                }
+            }
         }
     }
 
@@ -423,19 +754,12 @@ impl HydraGlWindow {
         }
     }
 
-    /// When open, runs one `egui` frame from the pointer input
+    /// Runs one `egui` frame from the pointer input
     /// accumulated in `on_event` since the last call, draws the script
     /// loader overlay, and paints it on top of whatever `render_multipass`
     /// already drew this frame via `egui_glow`.
     fn draw_editor_overlay(&mut self, w: u32, h: u32) {
-        if !self.overlay_open {
-            // Still drop any input that arrived while the overlay was
-            // closed (e.g. the toggle keypress itself) so it isn't
-            // replayed stale the next time it's opened.
-            self.pending_egui_events.clear();
-            return;
-        }
-
+        self.egui_ctx.set_pixels_per_point(self.editor_scale as f32);
         let raw_input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
@@ -450,31 +774,15 @@ impl HydraGlWindow {
             Some(p) => format!("Script: {}", p.display()),
             None => "Script: (built-in default sketch - no file loaded)".to_string(),
         };
-        let last_error = self.last_error.clone();
         let mut do_pick_file = false;
 
         let full_output = self.egui_ctx.run(raw_input, |ctx| {
-            egui::Window::new("Hydra")
-                .default_pos([16.0, 16.0])
-                .resizable(false)
-                .collapsible(false)
-                .show(ctx, |ui| {
-                    ui.label("Ctrl/Cmd+E to hide this panel.");
-                    ui.label(&script_label);
-                    if ui
-                        .button("Load script...")
-                        .on_hover_text(
-                            "Pick a Hydra script file to hot-reload from (replaces \
-                             HYDRA_PLUGIN_SCRIPT until the host is restarted)",
-                        )
-                        .clicked()
-                    {
-                        do_pick_file = true;
-                    }
-                    if let Some(err) = &last_error {
-                        ui.colored_label(egui::Color32::from_rgb(230, 80, 80), err);
-                    }
-                });
+            do_pick_file = script_loader_ui(
+                ctx,
+                &mut self.overlay_open,
+                &script_label,
+                self.last_error.as_deref(),
+            );
         });
 
         if do_pick_file {
@@ -485,7 +793,10 @@ impl HydraGlWindow {
             .egui_ctx
             .tessellate(full_output.shapes, full_output.pixels_per_point);
         self.egui_painter.paint_and_update_textures(
-            [w, h],
+            [
+                (w as f64 * self.editor_scale).round() as u32,
+                (h as f64 * self.editor_scale).round() as u32,
+            ],
             full_output.pixels_per_point,
             &clipped_primitives,
             &full_output.textures_delta,
@@ -506,6 +817,17 @@ impl baseview::WindowHandler for HydraGlWindow {
         // Recompile (if needed) only once the context is current, since
         // this may call `compile_buffers`, which issues real GL calls.
         self.maybe_reload();
+        if let Some(session) = STANDALONE_SESSION.get() {
+            if let Err(err) = session.client.poll_save(|| {
+                hydra_rust::nsm::save(
+                    &session.client.project_dir.join("plugin-state.json"),
+                    &session.params.serialize_fields(),
+                )
+            }) {
+                log::error!("hydra-plugin: NSM communication failed: {err}");
+                self.last_error = Some(format!("NSM: {err}"));
+            }
+        }
 
         let (w, h) = self.editor_size.load();
         self.renderer.ensure_resolution(w, h);
@@ -593,13 +915,11 @@ impl baseview::WindowHandler for HydraGlWindow {
                     let new_h = (start_size.1 as f32 + dy).round() as u32;
                     self.apply_resize(window, new_w, new_h);
                 }
-                if self.overlay_open {
-                    self.pending_egui_events
-                        .push(egui::Event::PointerMoved(egui::pos2(
-                            self.cursor_pos.0,
-                            self.cursor_pos.1,
-                        )));
-                }
+                self.pending_egui_events
+                    .push(egui::Event::PointerMoved(egui::pos2(
+                        self.cursor_pos.0,
+                        self.cursor_pos.1,
+                    )));
             }
             BvEvent::Mouse(MouseEvent::ButtonPressed {
                 button,
@@ -608,15 +928,13 @@ impl baseview::WindowHandler for HydraGlWindow {
                 if button == MouseButton::Left && self.in_resize_handle(self.cursor_pos) {
                     self.resize_drag = Some((self.cursor_pos, self.editor_size.load()));
                 }
-                if self.overlay_open {
-                    if let Some(b) = bv_button_to_egui(button) {
-                        self.pending_egui_events.push(egui::Event::PointerButton {
-                            pos: egui::pos2(self.cursor_pos.0, self.cursor_pos.1),
-                            button: b,
-                            pressed: true,
-                            modifiers: egui::Modifiers::NONE,
-                        });
-                    }
+                if let Some(b) = bv_button_to_egui(button) {
+                    self.pending_egui_events.push(egui::Event::PointerButton {
+                        pos: egui::pos2(self.cursor_pos.0, self.cursor_pos.1),
+                        button: b,
+                        pressed: true,
+                        modifiers: egui::Modifiers::NONE,
+                    });
                 }
             }
             BvEvent::Mouse(MouseEvent::ButtonReleased {
@@ -626,15 +944,13 @@ impl baseview::WindowHandler for HydraGlWindow {
                 if button == MouseButton::Left {
                     self.resize_drag = None;
                 }
-                if self.overlay_open {
-                    if let Some(b) = bv_button_to_egui(button) {
-                        self.pending_egui_events.push(egui::Event::PointerButton {
-                            pos: egui::pos2(self.cursor_pos.0, self.cursor_pos.1),
-                            button: b,
-                            pressed: false,
-                            modifiers: egui::Modifiers::NONE,
-                        });
-                    }
+                if let Some(b) = bv_button_to_egui(button) {
+                    self.pending_egui_events.push(egui::Event::PointerButton {
+                        pos: egui::pos2(self.cursor_pos.0, self.cursor_pos.1),
+                        button: b,
+                        pressed: false,
+                        modifiers: egui::Modifiers::NONE,
+                    });
                 }
             }
             // The script-loader overlay has no scrollable content, so
@@ -659,10 +975,8 @@ impl baseview::WindowHandler for HydraGlWindow {
             // above, in response to our own in-content handle).
             BvEvent::Window(BvWindowEvent::Resized(info)) => {
                 let logical = info.logical_size();
-                self.editor_size.store((
-                    logical.width.round() as u32,
-                    logical.height.round() as u32,
-                ));
+                self.editor_size
+                    .store((logical.width.round() as u32, logical.height.round() as u32));
                 self.editor_scale = info.scale();
             }
             _ => {}
@@ -687,6 +1001,7 @@ struct HydraEditor {
     audio_buffer: AudioBuffer,
     midi_bridge: MidiBridge,
     editor_size: Arc<AtomicCell<(u32, u32)>>,
+    script_state: Arc<RwLock<ScriptState>>,
 }
 
 impl Editor for HydraEditor {
@@ -698,6 +1013,7 @@ impl Editor for HydraEditor {
         let audio_buffer = self.audio_buffer.clone();
         let midi_bridge = self.midi_bridge.clone();
         let editor_size = self.editor_size.clone();
+        let script_state = self.script_state.clone();
         let (initial_w, initial_h) = editor_size.load();
         let window = baseview::Window::open_parented(
             &ParentWindowHandleAdapter(parent),
@@ -727,6 +1043,7 @@ impl Editor for HydraEditor {
                     midi_bridge.clone(),
                     context.clone(),
                     editor_size.clone(),
+                    script_state.clone(),
                 )
             },
         );
@@ -795,13 +1112,36 @@ struct HydraPluginParams {
     /// section), so a resized window doesn't reset on the next load.
     #[persist = "editor-size"]
     editor_size: Arc<AtomicCell<(u32, u32)>>,
+    #[persist = "script"]
+    script: Arc<RwLock<ScriptState>>,
 }
 
 impl Default for HydraPluginParams {
     fn default() -> Self {
         Self {
-            editor_size: Arc::new(AtomicCell::new((DEFAULT_EDITOR_WIDTH, DEFAULT_EDITOR_HEIGHT))),
+            editor_size: Arc::new(AtomicCell::new((
+                DEFAULT_EDITOR_WIDTH,
+                DEFAULT_EDITOR_HEIGHT,
+            ))),
+            script: Arc::new(RwLock::new(ScriptState::default())),
         }
+    }
+}
+
+impl HydraPluginParams {
+    fn restore_session(
+        &self,
+        fields: &std::collections::BTreeMap<String, String>,
+    ) -> std::io::Result<()> {
+        // NIH-plug logs malformed fields and skips them. NSM instead needs an error reply.
+        if let Some(script) = fields.get("script") {
+            serde_json::from_str::<ScriptState>(script).map_err(std::io::Error::other)?;
+        }
+        if let Some(size) = fields.get("editor-size") {
+            serde_json::from_str::<(u32, u32)>(size).map_err(std::io::Error::other)?;
+        }
+        self.deserialize_fields(fields);
+        Ok(())
     }
 }
 
@@ -820,7 +1160,10 @@ pub struct HydraPlugin {
 impl Default for HydraPlugin {
     fn default() -> Self {
         Self {
-            params: Arc::new(HydraPluginParams::default()),
+            params: STANDALONE_SESSION
+                .get()
+                .map(|session| session.params.clone())
+                .unwrap_or_else(|| Arc::new(HydraPluginParams::default())),
             audio_buffer: AudioBuffer::new(),
             midi_bridge: MidiBridge::new(),
             mono_scratch: Vec::new(),
@@ -860,6 +1203,7 @@ impl Plugin for HydraPlugin {
             audio_buffer: self.audio_buffer.clone(),
             midi_bridge: self.midi_bridge.clone(),
             editor_size: self.params.editor_size.clone(),
+            script_state: self.params.script.clone(),
         }))
     }
 

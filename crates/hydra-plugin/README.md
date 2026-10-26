@@ -13,18 +13,21 @@ VST3/CLAP are audio-plugin APIs, but a plugin's editor window can render
 with a toolkit of its own choosing - including raw OpenGL. This crate uses
 nih-plug's "bring your own GUI" support (`baseview` + a raw `glow` context,
 the same `glow` version `hydra-rust`'s own `ShaderRenderer` uses) to render
-Hydra's GLSL output straight into the host's editor window, with **no**
-`eframe`/`egui`/winit dependency pulled in at all - it depends on
+Hydra's GLSL output straight into the host's editor window. A small
+`egui`/`egui_glow` overlay provides file loading; there is no
+`eframe`/winit dependency. It depends on
 `hydra-rust` itself with `default-features = false`, matching the plain
 library-embedding path the main crate's README documents for Sova.
 
 ## Status: v1 (functional, with real limitations)
 
-- **Script source**: read from the file at the `HYDRA_PLUGIN_SCRIPT`
+- **Script source**: new instances read from the file at the `HYDRA_PLUGIN_SCRIPT`
   environment variable (falls back to a small built-in default sketch if
-  unset/unreadable). The file's mtime is polled once per frame and
+  unset/unreadable); restored host state uses its saved script snapshot.
+  The file's mtime is polled once per frame and
   hot-reloaded on change - edit-and-save in any external editor to
-  live-code from inside a DAW. A small overlay (Ctrl/Cmd+E to show/hide)
+  live-code from inside a DAW. A small overlay (click **"Load menu"** in
+  the top-left corner, or press Ctrl/Cmd+E)
   has a **"Load script..."** button to switch files without restarting
   the host - see below.
 - **Audio**: the host's own audio buffer is downmixed to mono in
@@ -55,14 +58,16 @@ library-embedding path the main crate's README documents for Sova.
 - **Mouse**: wired into `mouse`/`m` reads from the window's actual
   cursor position, normalized to `[0, 1]` with the Y axis flipped to
   match the desktop app's own convention (origin at the bottom-left).
-- **Script loader overlay**: Ctrl/Cmd+E shows/hides a small panel (built
+- **Script loader overlay**: click **"Load menu"** in the top-left
+  corner to open a small panel (built
   with `egui`, rendered via `egui_glow` on top of the Hydra output)
   showing the currently active script path and a **"Load script..."**
   button that opens a native file-picker dialog (`rfd`) to pick a
   different file; any eval/shader error is shown inline. There's
-  deliberately no in-window text editor here (see "Why no in-window code
-  editor?" below) - write/iterate on scripts in the standalone desktop
-  app instead, then point the plugin at the saved file.
+  no in-window text editor: write/iterate on scripts in the `hydra`
+  desktop app or any external editor, then point the plugin at the saved
+  file. Close the panel with its title-bar close button; Ctrl+E (Cmd+E
+  on macOS) also toggles it, if the host forwards the shortcut.
 - **Window is resizable**: drag the bottom-right corner (a small
   translucent square marks the hotspot) to resize the window directly;
   nih-plug doesn't support host-initiated (OS-border) resize of an
@@ -79,20 +84,70 @@ library-embedding path the main crate's README documents for Sova.
   `Cargo.toml`/editor - straightforward to add the same way `webcam` is
   feature-gated in the main crate).
 
-## Why no in-window code editor?
+## Loading and editing scripts
 
-An earlier version of this crate drew a full text-editing overlay
-directly in the plugin window. It was removed: writing/iterating on a
-script is a much better experience in the standalone desktop app
-(syntax highlighting, real system clipboard, undo) than a from-scratch
-mouse/keyboard-driven text box ever was here. It also inherited a
-`baseview` Linux/X11 limitation - its keyboard backend hard-codes a
-US-QWERTY scan-code table and ignores the system's actual keyboard
-layout, so e.g. AZERTY users got the wrong characters typed. The
-recommended workflow is: live-code in the standalone app, save the
-script to a file, then use the overlay's "Load script..." button to
-point the plugin at that file - no plugin restart needed, and no
-keyboard-layout dependency since the loader overlay is mouse-only.
+1. Write a script in the `hydra` desktop app or any external editor and
+   save it to a file.
+2. Open the plugin window, click **"Load menu"** in the top-left corner,
+   then **"Load script..."** and choose the file.
+3. Edit and save that file to hot-reload it in the plugin without
+   restarting the host. The panel displays the active path and any
+   evaluation or shader-compilation error.
+
+The loader starts closed, but the **"Load menu"** button remains visible
+while it is closed. No keyboard shortcut is needed to open or close it.
+The plugin loads files only; it does not include an inline code editor.
+The `hydra-plugin` standalone binary has the same loader-only interface;
+the `hydra` desktop app is the separate application with a code editor.
+
+Alternatively, set `HYDRA_PLUGIN_SCRIPT` before launching the host to
+select the initial file. Choosing another file in the loader replaces
+that path without changing the environment variable. The selected path,
+script source, and window size are saved in the host project. Reopening
+the editor or restoring a project uses that source snapshot, even if the
+original script is missing or has since changed. Further edits to the
+selected file are still hot-reloaded while the editor is open.
+
+## NSM sessions
+
+The `hydra-plugin` standalone executable automatically joins New/Non
+Session Manager when launched with `NSM_URL`. Add `hydra-plugin` as an
+executable in the manager (ensure it is on `PATH`). It announces, opens
+the assigned project, and acknowledges save requests only after writing
+`plugin-state.json` inside its assigned session directory. This snapshot
+uses the same persistent fields as VST3/CLAP: script path, embedded source,
+and window size. Malformed snapshots and save failures are reported to
+the manager rather than silently replaced with defaults.
+
+No session switching, dirty-state notifications, or optional-GUI
+capabilities are advertised. Invalid/unreachable NSM servers fall back to
+normal standalone operation. The upstream nih-plug standalone JACK
+backend still uses the fixed name `Hydra`, not NSM's assigned client ID;
+stable JACK connection restoration with multiple instances is not
+supported. NSM snapshot restoration is independent of the audio backend.
+
+NSM announce/open/save and consecutive real-process restore/save
+cycles were verified with a local OSC test manager on macOS, using both
+debug and release standalones with the dummy audio backend. Three debug
+restart cycles and unmanaged startup passed after the startup fixes.
+The restored source and size
+survived with the original script file absent. The same restart test
+passed for the desktop `hydra` app, including its settings and scene banks.
+Unit tests also cover host `Params` serialization, restoration into shared
+editor state, legacy size-only state, and corrupt snapshots. A real DAW
+VST3/CLAP project round-trip has not been exercised.
+
+The workspace patches both baseview users (the plugin editor and
+nih-plug's standalone wrapper) to upstream commit
+`3e1297320f6c9feb01993cba7743277b2d645211`, which guards a null `NSWindow`
+in `become_first_responder` during macOS window initialization. The patch
+uses nih-plug's maintainer's fork as its source because Cargo requires a
+different repository URL for git patches; the pinned commit is identical
+to upstream. Audio/MIDI mutexes are initialized before processing, and
+the audio ring buffer evicts old samples before appending, avoiding the
+audio-thread allocations that otherwise abort debug builds. Allocation
+checks remain enabled, with a regression test for first callbacks and
+full buffers.
 
 ## Building
 
@@ -144,16 +199,9 @@ start and run without panicking, and `cargo xtask bundle` still produces
 valid, codesigned bundles after the change - actually dragging the
 resize handle (and a host accepting/rejecting `request_resize()`) has
 not yet been tested interactively in a real DAW or the standalone app.
-The in-window editor overlay's build/clippy/bundle are likewise
-verified and the standalone binary still starts and runs without
-panicking after adding it. After interactive testing on Linux surfaced
-two real bugs - the overlay's typed text following `baseview`'s
-hard-coded US-QWERTY layout regardless of the system's actual layout
-(e.g. AZERTY), and the rendered output not resizing along with the
-window (the final screen blit wasn't keeping the GL viewport in sync
-with the window's actual size on every platform) - the text-editing
-overlay was removed entirely in favor of a mouse-only "Load script..."
-file picker (see "Why no in-window code editor?" above), and the
-viewport is now set explicitly every frame. Both fixes build/clippy/
-bundle clean; re-testing the resize fix and the new loader button on
-Linux is still pending.
+Interactive testing has since confirmed that loading a script works,
+but the shortcut-only loader panel was reported inaccessible. The loader
+now has a visible mouse-accessible entry point; interactive confirmation
+in the affected host is still pending. The former text-editing overlay
+has been removed, and the render viewport is set explicitly every frame
+to follow window resizing.

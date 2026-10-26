@@ -23,6 +23,8 @@ mod jskeywords;
 mod kwargs;
 mod mathjs;
 pub mod midi;
+#[cfg(feature = "nsm")]
+pub mod nsm;
 mod numlit;
 mod objlit;
 pub mod osc;

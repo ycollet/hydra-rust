@@ -59,6 +59,29 @@ hydra-rust = { path = "...", default-features = false, features = ["audio", "web
 
 `ShaderRenderer::new` only requires an `Arc<glow::Context>`, so a host can render into its own window/surface without pulling in the `hydra` binary's UI at all.
 
+## NSM sessions
+
+Both `hydra` and `hydra-plugin` automatically join New/Non Session Manager
+when the manager launches them with `NSM_URL`. Add the executable to the
+manager with its directory on `PATH`. NSM support is enabled by default;
+custom minimal desktop builds need `--features gui,nsm`.
+
+The desktop app saves its code, tempo, editor settings, and scene banks to
+`session.json` in the manager-assigned client directory, independently of
+`~/.hydra-rust.json`. A new managed session starts empty, not from the last
+unmanaged session. Ctrl/Cmd+S saves to the assigned session without a file
+dialog; Ctrl/Cmd+O imports script contents without making the original
+file the save destination. NSM save requests use the same session snapshot.
+Normal unmanaged startup and persistence are unchanged.
+
+The plugin standalone saves its embedded script source, selected path,
+and window size to `plugin-state.json`; see
+[plugin NSM support and JACK limitations](crates/hydra-plugin/README.md#nsm-sessions).
+Neither app advertises live session switching, dirty notifications, or an
+optional GUI. Invalid/unreachable managers fall back to unmanaged mode;
+corrupt session files and failed saves are reported instead of silently
+discarding state.
+
 ## Keyboard shortcuts
 
 The `Enter`-based shortcuts mirror [upstream Hydra](https://github.com/hydra-synth/hydra)'s own CodeMirror keymap (`Ctrl/Cmd+Enter`/`Alt+Enter`/`Ctrl/Cmd+Shift+Enter` for eval line/block/all); `Ctrl/Cmd+Alt+Enter` (eval selection) is specific to this native port, since upstream's `Ctrl/Cmd+Shift+Enter` slot was needed for "eval all" instead.

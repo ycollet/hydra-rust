@@ -16,13 +16,13 @@ crate-type = ["cdylib", "lib"]
 # eframe/winit/arboard pulled in) - this plugin brings its own window via
 # baseview + a raw glow context instead, reusing only `eval()` and
 # `ShaderRenderer`/`render_multipass` from the core library.
-hydra-rust = { path = "../..", default-features = false, features = ["fft", "midi"] }
+hydra-rust = { path = "../..", default-features = false, features = ["fft", "midi", "nsm"] }
 
 nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", features = [
     "assert_process_allocs",
     "standalone",
 ] }
-baseview = { git = "https://github.com/RustAudio/baseview.git", rev = "9a0b42c09d712777b2edb4c5e0cb6baf21e988f0", features = [
+baseview = { git = "https://github.com/RustAudio/baseview.git", rev = "3e1297320f6c9feb01993cba7743277b2d645211", features = [
     "opengl",
 ] }
 raw-window-handle = "0.5"
@@ -33,6 +33,7 @@ glow = "0.16"
 crossbeam = "0.8"
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 # Minimal in-window overlay (see the module doc comment's "Script
 # loader" section) - just a "Load script..." button/status label, not a
 # full text editor, so `egui_glow` (a bare GL-rendering backend for egui
@@ -52,3 +53,6 @@ keyboard-types = "0.6"
 # the main `hydra-rust` desktop app itself uses for its own file open/
 # save dialogs.
 rfd = "0.15"
+
+[dev-dependencies]
+assert_no_alloc = { git = "https://github.com/robbert-vdh/rust-assert-no-alloc.git", branch = "feature/nested-permit-forbid" }

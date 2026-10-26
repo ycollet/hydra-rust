@@ -228,7 +228,10 @@ mod imp {
 
     impl MidiBridge {
         pub fn new() -> Self {
-            Self(Arc::new(Mutex::new(SharedState::new())))
+            let bridge = Self(Arc::new(Mutex::new(SharedState::new())));
+            // Initialize macOS's lazily allocated native mutex off the audio thread.
+            drop(bridge.0.lock().unwrap());
+            bridge
         }
 
         /// `velocity` is normalized to `[0, 1]`, matching nih-plug's own

@@ -35,10 +35,12 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> CliArgs {
     out
 }
 
-fn main() -> eframe::Result {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
 
     let cli = parse_args(std::env::args().skip(1));
+    #[cfg(feature = "nsm")]
+    let managed = app::open_nsm()?;
 
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Glow,
@@ -60,9 +62,12 @@ fn main() -> eframe::Result {
                 cli.bank_load,
                 cli.slot_save,
                 cli.slot_load,
+                #[cfg(feature = "nsm")]
+                managed,
             )))
         }),
-    )
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]

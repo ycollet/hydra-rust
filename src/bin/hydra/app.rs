@@ -149,7 +149,40 @@ impl Session {
 /// struct.
 const CODE_EDITOR_ID: &str = "hydra_code_editor";
 
+#[cfg(feature = "nsm")]
+pub struct ManagedSession {
+    client: hydra_rust::nsm::NsmClient,
+    session: Session,
+}
+
+#[cfg(feature = "nsm")]
+pub fn open_nsm() -> std::io::Result<Option<ManagedSession>> {
+    let Some(client) = hydra_rust::nsm::NsmClient::from_env("Hydra") else {
+        return Ok(None);
+    };
+    let result =
+        hydra_rust::nsm::load(&client.project_dir.join("session.json")).and_then(|session| {
+            std::fs::create_dir_all(&client.project_dir)?;
+            Ok(session)
+        });
+    match result {
+        Ok(session) => {
+            client.reply("/nsm/client/open", Ok(()))?;
+            Ok(Some(ManagedSession { client, session }))
+        }
+        Err(err) => {
+            client.reply(
+                "/nsm/client/open",
+                Err(std::io::Error::other(err.to_string())),
+            )?;
+            Err(err)
+        }
+    }
+}
+
 pub struct HydraApp {
+    #[cfg(feature = "nsm")]
+    nsm: Option<hydra_rust::nsm::NsmClient>,
     code: String,
     renderer: Option<ShaderRenderer>,
     error: Option<(String, Instant)>,
@@ -238,9 +271,16 @@ impl HydraApp {
         bank_load: Option<PathBuf>,
         slot_save: Option<PathBuf>,
         slot_load: Option<PathBuf>,
+        #[cfg(feature = "nsm")] managed: Option<ManagedSession>,
     ) -> Self {
         cc.egui_ctx.set_theme(egui::ThemePreference::Dark);
 
+        #[cfg(feature = "nsm")]
+        let (nsm, mut session) = match managed {
+            Some(managed) => (Some(managed.client), managed.session),
+            None => (None, Session::load()),
+        };
+        #[cfg(not(feature = "nsm"))]
         let mut session = Session::load();
         if session.banks.len() != NUM_BANKS {
             session.banks = vec![Bank::default(); NUM_BANKS];
@@ -249,6 +289,8 @@ impl HydraApp {
             session.current_bank = 0;
         }
         let mut app = Self {
+            #[cfg(feature = "nsm")]
+            nsm,
             code: session.code,
             renderer: cc.gl.clone().map(ShaderRenderer::new),
             error: None,
@@ -343,6 +385,11 @@ impl HydraApp {
             app.pending_confirmation = !app.code.is_empty();
         } else if !app.code.is_empty() {
             app.evaluate();
+        }
+        #[cfg(feature = "nsm")]
+        if app.nsm.is_some() {
+            // Imported scripts belong to the managed project, not their original source file.
+            app.current_file = None;
         }
 
         // `-ss/--slot-save`: snapshot whatever code the app is starting
@@ -675,6 +722,16 @@ impl HydraApp {
     }
 
     fn save_file(&mut self) {
+        #[cfg(feature = "nsm")]
+        if let Some(client) = &self.nsm {
+            if let Err(err) =
+                hydra_rust::nsm::save(&client.project_dir.join("session.json"), &self.session())
+            {
+                log::error!("NSM save failed: {err}");
+                self.error = Some((format!("NSM save failed: {err}"), Instant::now()));
+            }
+            return;
+        }
         let path = if let Some(ref p) = self.current_file {
             Some(p.clone())
         } else {
@@ -698,6 +755,10 @@ impl HydraApp {
         {
             self.code = contents;
             self.current_file = Some(p);
+            #[cfg(feature = "nsm")]
+            if self.nsm.is_some() {
+                self.current_file = None;
+            }
             self.evaluate();
         }
     }
@@ -1388,6 +1449,15 @@ impl eframe::App for HydraApp {
         {
             self.banks[self.current_bank].slots[idx] = Some(self.code.clone());
         }
+        #[cfg(feature = "nsm")]
+        if let Some(client) = &self.nsm
+            && let Err(err) = client.poll_save(|| {
+                hydra_rust::nsm::save(&client.project_dir.join("session.json"), &self.session())
+            })
+        {
+            log::error!("NSM communication failed: {err}");
+            self.error = Some((format!("NSM: {err}"), Instant::now()));
+        }
 
         let is_mac = ctx.os().is_mac();
         let cmd = |i: &egui::InputState, key: egui::Key| {
@@ -1539,6 +1609,10 @@ impl eframe::App for HydraApp {
         self.stream_manager.stop_all();
         #[cfg(feature = "stream")]
         self.broadcast_manager.stop();
+        #[cfg(feature = "nsm")]
+        if self.nsm.is_some() {
+            return;
+        }
         self.session().save();
     }
 }
@@ -1872,6 +1946,28 @@ mod tests {
         let session: Session = serde_json::from_str(old_json).unwrap();
         assert!(session.banks.is_empty());
         assert_eq!(session.current_bank, 0);
+    }
+
+    #[test]
+    fn managed_session_snapshot_restores_code_settings_and_scene_banks() {
+        let mut session = Session {
+            code: "osc(10).out()".into(),
+            tempo: 137.0,
+            font_size: 24.0,
+            text_opacity: 0.7,
+            current_bank: 2,
+            banks: vec![Bank::default(); NUM_BANKS],
+            ..Default::default()
+        };
+        session.banks[2].slots[5] = Some("noise(2).out()".into());
+        let restored: Session =
+            serde_json::from_slice(&serde_json::to_vec(&session).unwrap()).unwrap();
+        assert_eq!(restored.code, session.code);
+        assert_eq!(restored.tempo, session.tempo);
+        assert_eq!(restored.font_size, session.font_size);
+        assert_eq!(restored.text_opacity, session.text_opacity);
+        assert_eq!(restored.current_bank, 2);
+        assert_eq!(restored.banks[2].slots[5], session.banks[2].slots[5]);
     }
 
     #[test]

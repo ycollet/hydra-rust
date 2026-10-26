@@ -40,16 +40,18 @@ mod analysis {
 
     impl AudioBuffer {
         pub fn new() -> Self {
-            Self {
+            let buffer = Self {
                 samples: Arc::new(Mutex::new(VecDeque::with_capacity(FFT_SIZE))),
-            }
+            };
+            // macOS allocates the native mutex on first lock, not in Mutex::new().
+            drop(buffer.samples.lock().unwrap());
+            buffer
         }
 
         /// Pushes samples, downmixing to mono first if `channels > 1`
         /// (assuming `data` is interleaved, matching `cpal`'s own stream
-        /// callback layout). Real-time safe: no allocation once the
-        /// deque has grown to its capacity once (it's capped at
-        /// `FFT_SIZE` below, same as before this was split out).
+        /// callback layout). No allocation after construction; the deque
+        /// never exceeds its preallocated `FFT_SIZE` capacity.
         pub fn push(&self, data: &[f32], channels: usize) {
             push_samples(&self.samples, data, channels);
         }
@@ -183,15 +185,75 @@ mod analysis {
 
     pub(super) fn push_samples(samples: &Arc<Mutex<VecDeque<f32>>>, data: &[f32], channels: usize) {
         let mut buf = samples.lock().unwrap();
-        if channels <= 1 {
-            buf.extend(data.iter().copied());
-        } else {
-            for frame in data.chunks(channels) {
-                buf.push_back(frame.iter().sum::<f32>() / channels as f32);
+        let channels = channels.max(1);
+        for frame in data.chunks(channels) {
+            if buf.len() == FFT_SIZE {
+                buf.pop_front();
             }
+            let sample = if channels == 1 {
+                frame[0]
+            } else {
+                frame.iter().sum::<f32>() / channels as f32
+            };
+            buf.push_back(sample);
         }
-        while buf.len() > FFT_SIZE {
-            buf.pop_front();
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn pushes_keep_only_the_newest_samples_without_growing_the_buffer() {
+            let buffer = AudioBuffer::new();
+            let capacity = buffer.samples.lock().unwrap().capacity();
+            let data: Vec<f32> = (0..FFT_SIZE * 3).map(|i| i as f32).collect();
+            for chunk in data.chunks(512) {
+                buffer.push(chunk, 1);
+            }
+            let samples = buffer.samples.lock().unwrap();
+            assert_eq!(samples.capacity(), capacity);
+            assert_eq!(samples.len(), FFT_SIZE);
+            assert!(
+                samples
+                    .iter()
+                    .copied()
+                    .eq(data[FFT_SIZE * 2..].iter().copied())
+            );
+        }
+
+        #[test]
+        fn oversized_multichannel_push_preserves_downmix_and_partial_frames() {
+            let buffer = AudioBuffer::new();
+            let capacity = buffer.samples.lock().unwrap().capacity();
+            let data: Vec<f32> = (0..FFT_SIZE * 6 + 1).map(|i| i as f32).collect();
+            buffer.push(&data, 2);
+            let expected: Vec<f32> = data
+                .chunks(2)
+                .map(|frame| frame.iter().sum::<f32>() / 2.0)
+                .collect();
+            let samples = buffer.samples.lock().unwrap();
+            assert_eq!(samples.capacity(), capacity);
+            assert_eq!(samples.len(), FFT_SIZE);
+            assert!(
+                samples
+                    .iter()
+                    .copied()
+                    .eq(expected[expected.len() - FFT_SIZE..].iter().copied())
+            );
+        }
+
+        #[test]
+        fn empty_and_zero_channel_pushes_keep_mono_behavior() {
+            let buffer = AudioBuffer::new();
+            buffer.push(&[], 0);
+            buffer.push(&[1.0, -0.0, 3.0], 0);
+            let samples = buffer.samples.lock().unwrap();
+            assert_eq!(
+                samples.iter().copied().collect::<Vec<_>>(),
+                vec![1.0, -0.0, 3.0]
+            );
+            assert!(samples[1].is_sign_negative());
         }
     }
 }
