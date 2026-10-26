@@ -43,6 +43,34 @@ See [SPEC.md](SPEC.md) for the full language specification (reactive values, fun
 
 ## Build
 
+### Installers
+
+Every pushed tag triggers [Release installers](.github/workflows/release.yml).
+Once all builds succeed, installers and `SHA256SUMS` are attached to the tag's
+[GitHub Release](https://github.com/sova-org/hydra-rust/releases):
+
+| Platform | Installer |
+|----------|-----------|
+| Debian 12+ (x86-64) | `.deb` |
+| Fedora 43+ (x86-64) | `.rpm` |
+| macOS 12+ (Intel and Apple Silicon) | Separate `.dmg` files; drag Hydra to Applications |
+| Windows (x86-64) | Per-user setup `.exe`, with Start menu entry and uninstaller |
+
+These package the `hydra` desktop app with the default Cargo features (`gui`,
+`nsm`), not the VST3/CLAP plugin or optional device/network features. Linux
+packages declare their runtime dependencies; install them with `apt install
+./file.deb` or `dnf install ./file.rpm`. All platforms require OpenGL 3.3.
+
+Installer versions come from `[package].version` in `Cargo.toml`; update it
+before tagging (for example, `git tag v0.1.0 && git push origin v0.1.0`).
+Cargo prerelease versions produce prerelease GitHub Releases. The workflow
+can be rerun to replace assets on an existing release.
+
+Windows installers are unsigned; macOS apps are ad-hoc signed, not notarized.
+Windows SmartScreen or macOS Gatekeeper may require explicit approval.
+
+### From source
+
 ```bash
 cargo build          # library + standalone binary (gui feature is on by default)
 cargo run            # standalone binary

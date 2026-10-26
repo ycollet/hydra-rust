@@ -1,0 +1,211 @@
+name: Release installers
+
+on:
+  push:
+    tags:
+      - "**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  metadata:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.package.outputs.version }}
+      numeric-version: ${{ steps.package.outputs.numeric-version }}
+      linux-version: ${{ steps.package.outputs.linux-version }}
+      prerelease: ${{ steps.package.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: package
+        name: Read package version
+        run: |
+          python3 - <<'PY'
+          import os
+          import tomllib
+
+          with open("Cargo.toml", "rb") as manifest:
+              version = tomllib.load(manifest)["package"]["version"]
+          core = version.split("-", 1)[0].split("+", 1)[0]
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              print(f"version={version}", file=output)
+              print(f"numeric-version={core}.0", file=output)
+              print(f"linux-version={version.replace('-', '~', 1)}", file=output)
+              print(f"prerelease={'true' if '-' in version else 'false'}", file=output)
+          PY
+
+  linux:
+    needs: metadata
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - format: deb
+            container: debian:bookworm
+          - format: rpm
+            container: fedora:43
+    container: ${{ matrix.container }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      VERSION: ${{ needs.metadata.outputs.linux-version }}
+    steps:
+      - name: Install Debian build dependencies
+        if: matrix.format == 'deb'
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git build-essential pkg-config dpkg-dev \
+            libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev libegl1-mesa-dev
+      - name: Install Fedora build dependencies
+        if: matrix.format == 'rpm'
+        run: |
+          dnf install -y \
+            ca-certificates curl git gcc gcc-c++ make pkgconf-pkg-config rpm-build \
+            wayland-devel libxkbcommon-devel libxkbcommon-x11-devel mesa-libEGL-devel
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.format }}
+      - name: Build desktop app
+        run: cargo build --locked --release --package hydra-rust --bin hydra
+      - name: Build installer
+        run: bash scripts/package-linux.sh "${{ matrix.format }}"
+      - name: Check Debian installation
+        if: matrix.format == 'deb'
+        run: |
+          apt-get install -y "$PWD"/dist/*.deb
+          ldd /usr/bin/hydra | tee target/installer-libraries.txt
+          if grep -q 'not found' target/installer-libraries.txt; then exit 1; fi
+          dpkg --remove hydra-rust
+      - name: Check Fedora installation
+        if: matrix.format == 'rpm'
+        run: |
+          dnf install -y "$PWD"/dist/*.rpm
+          ldd /usr/bin/hydra | tee target/installer-libraries.txt
+          if grep -q 'not found' target/installer-libraries.txt; then exit 1; fi
+          rpm --erase hydra-rust
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer-${{ matrix.format }}-x86_64
+          path: dist/*
+          if-no-files-found: error
+
+  macos:
+    needs: metadata
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - runner: macos-15
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    env:
+      VERSION: ${{ needs.metadata.outputs.version }}
+      NUMERIC_VERSION: ${{ needs.metadata.outputs.numeric-version }}
+      MACOSX_DEPLOYMENT_TARGET: "12.0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+      - name: Build desktop app
+        run: cargo build --locked --release --package hydra-rust --bin hydra --target "${{ matrix.target }}"
+      - name: Build disk image
+        run: bash scripts/package-macos.sh "${{ matrix.target }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer-${{ matrix.target }}
+          path: dist/*.dmg
+          if-no-files-found: error
+
+  windows:
+    needs: metadata
+    runs-on: windows-2025
+    env:
+      VERSION: ${{ needs.metadata.outputs.version }}
+      NUMERIC_VERSION: ${{ needs.metadata.outputs.numeric-version }}
+      RUSTFLAGS: -C target-feature=+crt-static
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-windows-x86_64
+      - name: Build desktop app
+        run: cargo build --locked --release --package hydra-rust --bin hydra --target x86_64-pc-windows-msvc
+      - name: Install NSIS
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\NSIS\makensis.exe")) {
+            choco install nsis --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+      - name: Build setup executable
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          & "${env:ProgramFiles(x86)}\NSIS\makensis.exe" `
+            "/DVERSION=$env:VERSION" "/DNUMERIC_VERSION=$env:NUMERIC_VERSION" `
+            scripts/installer.nsi
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Check installation and uninstallation
+        shell: pwsh
+        run: |
+          $installer = (Get-ChildItem dist/*.exe).FullName
+          $installDir = "$env:LOCALAPPDATA\Programs\Hydra"
+          $process = Start-Process $installer -ArgumentList "/S" -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "Installer failed: $($process.ExitCode)" }
+          if (-not (Test-Path "$installDir\hydra.exe")) { throw "Missing installed executable" }
+          $process = Start-Process "$installDir\Uninstall.exe" -ArgumentList "/S", "_?=$installDir" -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "Uninstaller failed: $($process.ExitCode)" }
+          if (Test-Path "$installDir\hydra.exe") { throw "Uninstaller left the executable behind" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer-windows-x86_64
+          path: dist/*.exe
+          if-no-files-found: error
+
+  publish:
+    needs: [metadata, linux, macos, windows]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+      PRERELEASE: ${{ needs.metadata.outputs.prerelease }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: installer-*
+          merge-multiple: true
+          path: dist
+      - name: Publish installers and checksums
+        working-directory: dist
+        run: |
+          sha256sum -- * > SHA256SUMS
+          if ! gh release view "$TAG" > /dev/null 2>&1; then
+            options=()
+            if [[ "$PRERELEASE" == true ]]; then
+              options+=(--prerelease)
+            fi
+            gh release create "$TAG" --verify-tag --generate-notes "${options[@]}"
+          fi
+          gh release upload "$TAG" --clobber ./*
