@@ -596,15 +596,24 @@ errors from `eval()`, surfaced to the caller as `Err(String)`.
   rasterizes a string (via the bundled Hack font) into a single shared
   text texture (`iText0`) and returns a chain reading it. Only one call's
   content is visible at a time (last one wins within an evaluation). All
-  four accept an optional second `config` argument (a font/style override
-  in real hydra.js); accepted and ignored, since there's no per-call font
-  configuration here at all.
+  four accept an optional second `config` map. Its `fontSize` and `lineWidth`
+  properties override the shared `hydraText` defaults without mutating them.
+  `fontSize` accepts `"auto"` (default), percentages of the auto-fit size,
+  or numeric pixel values/strings (optional `px`). `lineWidth` accepts
+  pixels or percentages of the resolved font size (default `"2%"`).
+  Fractional widths are supported, and zero disables stroking.
+  These are static settings in the 512x512 texture's coordinate system;
+  larger text clips rather than resizing the texture. Font sizes must
+  resolve to `(0, 4096]` pixels. Invalid/non-static properties warn and use
+  the built-in default for that property; an invalid config object warns
+  and uses global settings. Defaults are local to an evaluation.
   `text` fills glyphs, `strokeText` draws hollow contours, and the other
   two combine fill and stroke. Strokes approximate centered outlines from
-  the raster mask, including letter holes, at roughly 2% of the auto-sized
-  font (minimum two texture pixels). White fill/stroke means both combined
+  an approximate distance field, including letter holes, with processing
+  cost independent of stroke width. White fill/stroke means both combined
   drawing orders produce the same result; this is not browser-exact
-  vector stroking or configurable canvas styling.
+  vector stroking. Font selection, colors, alignment, and other canvas
+  styling remain accepted but ignored, including font-name string shorthand.
 - **`initCam(slot)` / `initCam(slot, cameraIndex)`** (`webcam` feature only):
   requests slot `slot` (must be `s0`-`s3`, i.e. `>= 100`) be filled from
   camera `cameraIndex` (default `0`). This only queues a request in the

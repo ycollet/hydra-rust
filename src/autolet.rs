@@ -9,8 +9,23 @@ use std::collections::HashSet;
 /// Names already in scope before the script runs (see the `Scope` setup in
 /// `eval::eval`) - assignments to these are reassignments, not declarations.
 const BUILTIN_NAMES: &[&str] = &[
-    "time", "beat", "tempo", "phase", "mouseX", "mouseY", "mouse", "a", "o0", "o1", "o2", "o3",
-    "s0", "s1", "s2", "s3",
+    "time",
+    "beat",
+    "tempo",
+    "phase",
+    "mouseX",
+    "mouseY",
+    "mouse",
+    "a",
+    "o0",
+    "o1",
+    "o2",
+    "o3",
+    "s0",
+    "s1",
+    "s2",
+    "s3",
+    "hydraText",
 ];
 
 pub fn insert_missing_let(src: &str) -> String {

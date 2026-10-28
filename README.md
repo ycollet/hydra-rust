@@ -521,10 +521,29 @@ outlines; `fillStrokeText("hello")` and `strokeFillText("hello")` draw
 both. All use the bundled Hack font and one shared text texture (the last
 text call in an evaluation wins).
 
-Outlines use a raster-mask approximation with a width of approximately 2%
-of the auto-sized font, at least two texture pixels. Fill and stroke are
-both white, so their drawing order has the same result. Global/per-call
-font and style settings are still accepted but ignored.
+`hydraText.fontSize` and `.lineWidth` set defaults for subsequent text calls
+in the current evaluation. Each call can override either property without
+changing those defaults:
+
+```javascript
+hydraText.fontSize = "50%"
+hydraText.lineWidth = "4%"
+strokeText("hello", {fontSize: "100px", lineWidth: 3}).out()
+```
+
+`fontSize` accepts `"auto"` (default), a percentage of the auto-fit size,
+or a number/numeric string with optional `px`. `lineWidth` accepts pixels
+or a percentage of the resolved font size (default `"2%"`); zero disables
+the stroke, and fractional widths are supported. Pixels refer to the
+512x512 text texture, not the window. Oversized text is clipped; font sizes
+must resolve to more than zero and at most 4096 pixels.
+
+Invalid or non-static settings log a warning and use the built-in default
+for that property. Defaults reset between evaluations. Outlines use an
+approximate distance field, with bounded processing cost even for wide
+strokes. Fill and stroke remain white, so both drawing orders have the
+same result. Arbitrary font selection and other styling properties remain
+accepted but ignored.
 
 ## Pattern easing
 
@@ -562,7 +581,7 @@ These are registered so scripts calling them don't hard-error, but they don't do
 | `Scene(name)` | No-op — not a hydra.js API at all; some external VJ/live-coding integrations use it to switch named cue banks |
 | `loadScript(url)` | No-op — no dynamic module loading. Some of the most commonly-loaded community extensions' functions are ported natively instead (`spiral`, `turb`, `uturb`, `unoise`, `whitenoise`, `colornoise`, `warp`, `cwarp`, `ncontour`, `pulse`, `pulsetrain`, `hextile`, `concentric`, `brick`, `wave`, `lissa`, `inversion`, `mirrorX`/`mirrorY`/`mirrorX2`/`mirrorY2`/`mirrorWrap`, `mandeloffs`, `colreflect` — see SPEC.md §6); anything else the loaded script would have defined still won't exist |
 | `pb.setName(name)` / `pb.list()` | No-op — not a hydra.js API at all; boilerplate an external platform injects when a sketch is exported/shared |
-| `hydraText.font = ...` / any other property | No-op — the `hydra-text.js` extension's config object (`loadScript`-loaded); accepts assignment to any property, but font/style overrides are not applied. The text functions themselves render filled or outlined text (see above) |
+| `hydraText.font = ...` / other styling properties | Font selection and other styling remain no-ops; `fontSize` and `lineWidth` are implemented globally and per call (see Text rendering above) |
 
 ## License
 

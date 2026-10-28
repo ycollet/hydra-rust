@@ -706,6 +706,125 @@ fn screencap_requests_are_coalesced_and_not_sticky() {
 }
 
 #[test]
+fn text_settings_apply_globals_and_per_call_overrides_without_leaking() {
+    let pixels = |code: &str| eval(code).unwrap().text_data.unwrap().pixels;
+    let small = pixels("text('O', {fontSize: 64}).out()");
+    assert_eq!(pixels("hydraText.fontSize = 64; text('O').out()"), small);
+    assert_eq!(
+        pixels("hydraText.fontSize = 128; text('O', {fontSize: 64}).out()"),
+        small
+    );
+    assert_eq!(
+        pixels("hydraText.fontSize = 64; text('O', {fontSize: 128}); text('O').out()"),
+        small
+    );
+    assert_eq!(pixels("hydraText = {fontSize: 64}; text('O').out()"), small);
+    assert_eq!(
+        pixels("hydraText.font = 'serif'; text('O', {fontSize: 64}).out()"),
+        small
+    );
+    assert_ne!(pixels("text('O').out()"), small);
+    assert_eq!(
+        pixels("hydraText.fontSize = 64; text('O', hydraText).out()"),
+        small
+    );
+}
+
+#[test]
+fn text_size_units_and_percentage_strokes_resolve_consistently() {
+    let pixels = |code: &str| eval(code).unwrap().text_data.unwrap().pixels;
+    let small = pixels("text('O', {fontSize: 64}).out()");
+    for size in ["'64px'", "'64'", "64.0"] {
+        assert_eq!(
+            pixels(&format!("text('O', {{fontSize: {size}}}).out()")),
+            small
+        );
+    }
+    let auto = pixels("text('O').out()");
+    assert_eq!(pixels("text('O', {fontSize: '100%'}).out()"), auto);
+    assert_eq!(pixels("text('O', {fontSize: 'auto'}).out()"), auto);
+    let half = pixels("text('O', {fontSize: '50%'}).out()");
+    assert!(
+        half.chunks(4).filter(|p| p[3] > 0).count() < auto.chunks(4).filter(|p| p[3] > 0).count()
+    );
+    assert_eq!(
+        pixels("hydraText.fontSize = 100; hydraText.lineWidth = '8%'; strokeText('O').out()"),
+        pixels("strokeText('O', {fontSize: '100px', lineWidth: 8}).out()")
+    );
+    assert_eq!(
+        pixels(
+            "hydraText.lineWidth = 20; strokeText('O', {fontSize: 100, lineWidth: '8px'}).out()"
+        ),
+        pixels("strokeText('O', {fontSize: 100, lineWidth: 8}).out()")
+    );
+}
+
+#[test]
+fn fractional_zero_and_wide_text_strokes_are_supported() {
+    let pixels = |code: &str| eval(code).unwrap().text_data.unwrap().pixels;
+    let mut previous = 0u64;
+    for width in ["0.5", "1.5", "8", "'200%'"] {
+        let frame = pixels(&format!(
+            "strokeText('O', {{fontSize: 100, lineWidth: {width}}}).out()"
+        ));
+        let coverage: u64 = frame.chunks(4).map(|p| u64::from(p[3])).sum();
+        assert!(coverage > previous, "{width}");
+        previous = coverage;
+    }
+    assert!(
+        pixels("strokeText('O', {lineWidth: 0}).out()")
+            .iter()
+            .all(|v| *v == 0)
+    );
+    assert_eq!(
+        pixels("fillStrokeText('O', {lineWidth: 0}).out()"),
+        pixels("text('O').out()")
+    );
+}
+
+#[test]
+fn invalid_text_settings_use_defaults() {
+    let defaults = eval("strokeText('O').out()")
+        .unwrap()
+        .text_data
+        .unwrap()
+        .pixels;
+    for config in [
+        "{fontSize: 0}",
+        "{fontSize: -1}",
+        "{fontSize: 4097}",
+        "{fontSize: 'bad'}",
+        "{fontSize: true}",
+        "{fontSize: time}",
+        "{fontSize: '1e40%'}",
+        "{lineWidth: -1}",
+        "{lineWidth: 'auto'}",
+        "{lineWidth: 'bad'}",
+        "{lineWidth: time}",
+        "true",
+    ] {
+        let result = eval(&format!("strokeText('O', {config}).out()"))
+            .unwrap()
+            .text_data
+            .unwrap();
+        assert!(result.pixels == defaults, "{config}");
+    }
+    let expected = eval("strokeText('O', {fontSize: 64}).out()")
+        .unwrap()
+        .text_data
+        .unwrap();
+    let actual =
+        eval("hydraText.fontSize = 64; hydraText.lineWidth = '-5%'; strokeText('O').out()")
+            .unwrap()
+            .text_data
+            .unwrap();
+    assert!(
+        actual.pixels == expected.pixels,
+        "an invalid width must not reset a valid font size"
+    );
+}
+
+#[test]
 fn comma_tuple_call_argument_collapses_to_its_last_value() {
     // real sketches very commonly write this exact shape, plausibly
     // meaning an array `[a,b]` - but real JS's comma operator actually

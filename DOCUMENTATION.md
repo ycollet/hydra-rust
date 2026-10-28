@@ -72,8 +72,15 @@ Start a chain — no chain to call these on.
 | `rings` | `freq=8, speed=0.1` | Concentric animated rings | `rings(8, 0.1).out()` |
 | `checker` | `cols=4, rows=4` | Checkerboard | `checker(8, 8).out()` |
 | `src` | `idx` | Reads buffer/source `idx` as a chain-starting source — `idx` `0`-`3` reads output buffer `o0`-`o3`'s previous frame, `idx` `100`-`103` (i.e. `s0`-`s3`) reads an external source slot (camera/image/GIF/video, see the feature sections below) | `src(0).scale(1.2).out()` |
-| `text` | `content: string` | Rasterizes a string (bundled Hack font) into a shared text texture and returns a chain reading it. Only one call's content is visible at a time (last one wins per evaluation). Accepts an optional second `config` argument for parity with real hydra.js — accepted and ignored | `text("hydra-rust").out()` |
-| `strokeText` / `fillStrokeText` / `strokeFillText` | `content: string` | Hollow outlines / filled outlines / filled outlines, using the same shared texture as `text`. Raster-mask approximation, fixed white fill/stroke with width approximately 2% of auto-sized font (minimum two texture pixels); optional config remains ignored | `strokeText("hi").out()` |
+| `text` | `content: string, config?: map` | Rasterizes a string (bundled Hack font) into one shared text texture; last call wins. `config.fontSize` overrides `hydraText.fontSize`: `"auto"` (default), percent of auto-fit size, or pixels (number/numeric string, optional `px`) | `text("hydra-rust", {fontSize: "50%"}).out()` |
+| `strokeText` / `fillStrokeText` / `strokeFillText` | `content: string, config?: map` | Hollow outlines / filled outlines / filled outlines. `config.lineWidth` overrides `hydraText.lineWidth`: pixels or percent of resolved font size (default `"2%"`). Fractional widths work; zero disables strokes. Approximate distance field, white fill/stroke; other styling remains ignored | `strokeText("hi", {fontSize: 100, lineWidth: 3}).out()` |
+
+Text settings are static and measured in the shared 512x512 texture, not
+window pixels. Global defaults apply to subsequent calls and reset between
+evaluations; per-call overrides do not change them. Font sizes must resolve
+to `(0, 4096]` pixels; oversized text clips. Invalid/non-static values log a
+warning and use that property's built-in default. An invalid config object
+warns and uses global settings. Arbitrary font selection remains deferred.
 
 The following are ported natively from popular real-world `loadScript()`-loaded community
 extensions (`loadScript` itself is a permanent no-op — see [Known gaps](#known-gaps-and-stub-functions)).

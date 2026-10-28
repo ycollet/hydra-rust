@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Global and per-call text font-size/stroke-width settings, supporting pixels and percentages; invalid settings warn and use defaults
 - Desktop script `screencap()` support using the existing UI-free PNG capture path
 - Real rasterized outlines for `strokeText`, `fillStrokeText`, and `strokeFillText`
 - Hydra named pattern easing curves, preserving curve selection through `.fit()`

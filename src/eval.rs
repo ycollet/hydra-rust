@@ -1850,6 +1850,93 @@ fn compile_node(node: &Node) -> Result<String, String> {
     ))
 }
 
+fn text_size(value: &Dynamic, property: &str) -> Result<text::TextSize, Box<rhai::EvalAltResult>> {
+    let (number, percent) = if let Some(value) = value.clone().try_cast::<ImmutableString>() {
+        let value = value.trim();
+        if value == "auto" && property == "fontSize" {
+            return Ok(text::TextSize::Auto);
+        }
+        let percent = value.ends_with('%');
+        let number = value
+            .strip_suffix('%')
+            .or_else(|| value.strip_suffix("px"))
+            .unwrap_or(value)
+            .trim()
+            .parse::<f32>()
+            .map_err(|_| {
+                format!("Text {property} must be a static number, pixel size, or percentage")
+            })?;
+        (number, percent)
+    } else {
+        let number = value
+            .as_float()
+            .ok()
+            .or_else(|| value.as_int().ok().map(|n| n as f64))
+            .ok_or_else(|| {
+                format!("Text {property} must be a static number, pixel size, or percentage")
+            })?;
+        (number as f32, false)
+    };
+    if !number.is_finite() || number < 0.0 || (property == "fontSize" && number == 0.0) {
+        return Err(format!(
+            "Text {property} must be finite and {}",
+            if property == "fontSize" {
+                "positive"
+            } else {
+                "nonnegative"
+            }
+        )
+        .into());
+    }
+    Ok(if percent {
+        text::TextSize::Percent(number)
+    } else {
+        text::TextSize::Pixels(number)
+    })
+}
+
+fn rasterize_text(
+    state: &Mutex<PatchState>,
+    defaults: &Dynamic,
+    content: &str,
+    mode: text::TextMode,
+    overrides: Dynamic,
+) -> Node {
+    let defaults = defaults
+        .read_lock::<Map>()
+        .map(|map| map.clone())
+        .unwrap_or_else(|| {
+            log::warn!("hydraText must be a configuration map; using default text settings");
+            Map::new()
+        });
+    // Strings are font-name shorthand; font selection remains deferred.
+    let overrides = if overrides.is_unit() || overrides.is::<ImmutableString>() {
+        Map::new()
+    } else {
+        overrides.try_cast::<Map>().unwrap_or_else(|| {
+            log::warn!(
+                "Text configuration must be a map or font-name string; using global text settings"
+            );
+            Map::new()
+        })
+    };
+    let mut config = text::TextConfig::default();
+    for (property, destination) in [
+        ("fontSize", &mut config.font_size),
+        ("lineWidth", &mut config.line_width),
+    ] {
+        if let Some(value) = overrides.get(property).or_else(|| defaults.get(property)) {
+            match text_size(value, property) {
+                Ok(size) => *destination = size,
+                Err(error) => log::warn!("{error}; using default {property}"),
+            }
+        }
+    }
+    let data = text::rasterize(content, mode, &config);
+    state.lock().unwrap().text_data = Some(data);
+    Node::source("text_src", vec![])
+}
+
 struct PatchState {
     buffers: [Option<Node>; 4],
     render_mode: RenderMode,
@@ -2373,7 +2460,10 @@ fn eval_impl(
     });
     // s0-s3 constants are 100-103; indices below 100 are internal buffers
     engine.register_fn("src", idx_to_source);
-    // Per-call configuration is still accepted but ignored.
+    let mut text_defaults = Map::new();
+    text_defaults.insert("fontSize".into(), Dynamic::from("auto"));
+    text_defaults.insert("lineWidth".into(), Dynamic::from("2%"));
+    let text_defaults = Dynamic::from_map(text_defaults).into_shared();
     for (name, mode) in [
         ("text", text::TextMode::Fill),
         ("strokeText", text::TextMode::Stroke),
@@ -2381,20 +2471,15 @@ fn eval_impl(
         ("strokeFillText", text::TextMode::FillStroke),
     ] {
         let s = state.clone();
+        let defaults = text_defaults.clone();
         engine.register_fn(name, move |txt: ImmutableString| -> Node {
-            let data = text::rasterize(&txt, mode);
-            s.lock().unwrap().text_data = Some(data);
-            Node::source("text_src", vec![])
+            rasterize_text(&s, &defaults, &txt, mode, Dynamic::UNIT)
         });
         let s = state.clone();
-        engine.register_fn(
-            name,
-            move |txt: ImmutableString, _config: Dynamic| -> Node {
-                let data = text::rasterize(&txt, mode);
-                s.lock().unwrap().text_data = Some(data);
-                Node::source("text_src", vec![])
-            },
-        );
+        let defaults = text_defaults.clone();
+        engine.register_fn(name, move |txt: ImmutableString, config: Dynamic| -> Node {
+            rasterize_text(&s, &defaults, &txt, mode, config)
+        });
     }
     {
         let s = state.clone();
@@ -3188,15 +3273,8 @@ fn eval_impl(
     scope.push("mouse", Mouse);
     scope.push("window", Window);
     scope.push("pb", Pb);
-    // The `hydra-text.js` community extension (loaded via loadScript(),
-    // itself a no-op) exposes a config object real sketches set arbitrary
-    // properties on (`hydraText.font = "serif"`, `.lineWidth`, `.fontSize`,
-    // ...) before calling the extension's own advanced text-rendering
-    // function - which, since the extension never actually loads, still
-    // won't exist. A plain Rhai object map accepts any property name with
-    // no per-property registration needed, so the assignments themselves
-    // at least don't hard-fail the rest of the sketch.
-    scope.push("hydraText", Map::new());
+    // Share the map with the native text functions, keeping arbitrary property support.
+    scope.push_dynamic("hydraText", text_defaults);
     // `document`/`canvas` - see the `createElement`/`setRelativeSize`/etc.
     // registrations above.
     scope.push("document", Map::new());
