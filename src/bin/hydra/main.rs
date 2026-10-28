@@ -11,6 +11,7 @@ use eframe::egui;
 /// as `input` if no flag has already set it.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct CliArgs {
+    jack: bool,
     input: Option<PathBuf>,
     bank_save: Option<PathBuf>,
     bank_load: Option<PathBuf>,
@@ -23,6 +24,7 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> CliArgs {
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--jack" => out.jack = true,
             "-i" | "--input" => out.input = args.next().map(PathBuf::from),
             "-bs" | "--bank-save" => out.bank_save = args.next().map(PathBuf::from),
             "-bl" | "--bank-load" => out.bank_load = args.next().map(PathBuf::from),
@@ -39,8 +41,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
 
     let cli = parse_args(std::env::args().skip(1));
+    if cli.jack && !cfg!(all(feature = "jack", target_os = "linux")) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "--jack requires a Linux build with --features jack",
+        )
+        .into());
+    }
     #[cfg(feature = "nsm")]
     let managed = app::open_nsm()?;
+
+    #[cfg(feature = "audio")]
+    let audio_manager = if cli.jack {
+        #[cfg(feature = "nsm")]
+        let client_name = managed.as_ref().map(|session| session.client_id());
+        #[cfg(not(feature = "nsm"))]
+        let client_name: Option<&str> = None;
+        hydra_rust::audio::AudioManager::with_jack(client_name.unwrap_or("hydra"))?
+    } else {
+        hydra_rust::audio::AudioManager::new()
+    };
 
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Glow,
@@ -57,11 +77,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Box::new(move |cc| {
             Ok(Box::new(app::HydraApp::new(
                 cc,
-                cli.input,
-                cli.bank_save,
-                cli.bank_load,
-                cli.slot_save,
-                cli.slot_load,
+                cli,
+                #[cfg(feature = "audio")]
+                audio_manager,
                 #[cfg(feature = "nsm")]
                 managed,
             )))
@@ -81,6 +99,24 @@ mod tests {
     #[test]
     fn no_args_is_all_none() {
         assert_eq!(parse_args(s(&[])), CliArgs::default());
+    }
+
+    #[test]
+    fn jack_flag_does_not_consume_the_script_argument() {
+        for args in [
+            s(&["--jack", "some.hydra"]),
+            s(&["some.hydra", "--jack"]),
+            s(&["--jack", "-i", "some.hydra"]),
+        ] {
+            assert_eq!(
+                parse_args(args),
+                CliArgs {
+                    jack: true,
+                    input: Some("some.hydra".into()),
+                    ..Default::default()
+                }
+            );
+        }
     }
 
     #[test]

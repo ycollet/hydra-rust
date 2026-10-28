@@ -155,6 +155,13 @@ pub struct ManagedSession {
     session: Session,
 }
 
+#[cfg(all(feature = "nsm", feature = "audio"))]
+impl ManagedSession {
+    pub fn client_id(&self) -> &str {
+        &self.client.client_id
+    }
+}
+
 #[cfg(feature = "nsm")]
 pub fn open_nsm() -> std::io::Result<Option<ManagedSession>> {
     let Some(client) = hydra_rust::nsm::NsmClient::from_env("Hydra") else {
@@ -266,13 +273,18 @@ pub struct HydraApp {
 impl HydraApp {
     pub fn new(
         cc: &eframe::CreationContext,
-        file_arg: Option<PathBuf>,
-        bank_save: Option<PathBuf>,
-        bank_load: Option<PathBuf>,
-        slot_save: Option<PathBuf>,
-        slot_load: Option<PathBuf>,
+        cli: super::CliArgs,
+        #[cfg(feature = "audio")] audio_manager: AudioManager,
         #[cfg(feature = "nsm")] managed: Option<ManagedSession>,
     ) -> Self {
+        let super::CliArgs {
+            input: file_arg,
+            bank_save,
+            bank_load,
+            slot_save,
+            slot_load,
+            ..
+        } = cli;
         cc.egui_ctx.set_theme(egui::ThemePreference::Dark);
 
         #[cfg(feature = "nsm")]
@@ -313,7 +325,7 @@ impl HydraApp {
             #[cfg(feature = "webcam")]
             source_manager: SourceManager::new(),
             #[cfg(feature = "audio")]
-            audio_manager: AudioManager::new(),
+            audio_manager,
             #[cfg(feature = "audio")]
             audio_overlay_visible: false,
             #[cfg(feature = "audio")]
@@ -824,6 +836,9 @@ impl HydraApp {
         #[cfg(feature = "audio")]
         {
             self.last_fft = fft;
+            if let Some(error) = self.audio_manager.take_error() {
+                self.error = Some((error, Instant::now()));
+            }
         }
 
         #[cfg(feature = "midi")]

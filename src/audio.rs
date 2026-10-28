@@ -275,8 +275,17 @@ mod capture {
         Shutdown,
     }
 
+    #[derive(Clone, Default)]
+    enum Backend {
+        #[default]
+        Default,
+        Jack(String),
+    }
+
     pub struct AudioManager {
         command_tx: Option<mpsc::Sender<Command>>,
+        error_rx: Option<mpsc::Receiver<String>>,
+        backend: Backend,
         buffer: AudioBuffer,
         analyzer: AudioAnalyzer,
     }
@@ -294,12 +303,34 @@ mod capture {
         pub fn new() -> Self {
             Self {
                 command_tx: None,
+                error_rx: None,
+                backend: Backend::Default,
                 buffer: AudioBuffer::new(),
                 analyzer: AudioAnalyzer::new(),
             }
         }
 
-        /// Opens the default microphone input stream, if it isn't already
+        /// Select JACK without opening an audio device. CPAL appends `_in`
+        /// to this name; managed callers should pass the NSM client ID.
+        pub fn with_jack(client_name: &str) -> std::io::Result<Self> {
+            if !cfg!(all(feature = "jack", target_os = "linux")) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "JACK input requires a Linux build with --features jack",
+                ));
+            }
+            if client_name.is_empty() || client_name.contains('\0') {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "JACK client name must be nonempty and contain no NUL bytes",
+                ));
+            }
+            let mut manager = Self::new();
+            manager.backend = Backend::Jack(client_name.to_owned());
+            Ok(manager)
+        }
+
+        /// Opens the selected input stream, if it isn't already
         /// open. Idempotent - safe to call on every frame. Call this only
         /// once a script is known to actually reference `a.*` (checking for
         /// an `AudioRequest` or `iFft` in its compiled output), not
@@ -311,12 +342,23 @@ mod capture {
                 return;
             }
             let (command_tx, command_rx) = mpsc::channel();
+            let (error_tx, error_rx) = mpsc::sync_channel(1);
             let buffer = self.buffer.clone();
+            let backend = self.backend.clone();
             thread::Builder::new()
                 .name("hydra-audio".into())
-                .spawn(move || capture_thread(buffer, command_rx))
+                .spawn(move || {
+                    if let Err(error) = capture_thread(buffer, backend, command_rx, &error_tx) {
+                        report_error(&error_tx, error);
+                    }
+                })
                 .expect("spawn audio capture thread");
             self.command_tx = Some(command_tx);
+            self.error_rx = Some(error_rx);
+        }
+
+        pub fn take_error(&self) -> Option<String> {
+            self.error_rx.as_ref()?.try_recv().ok()
         }
 
         pub fn set_bins(&mut self, n: usize) {
@@ -348,29 +390,62 @@ mod capture {
         }
     }
 
-    fn capture_thread(buffer: AudioBuffer, command_rx: mpsc::Receiver<Command>) {
+    fn report_error(error_tx: &mpsc::SyncSender<String>, error: String) {
+        log::error!("{error}");
+        // Keep the first pending error without blocking the audio callback.
+        let _ = error_tx.try_send(error);
+    }
+
+    #[cfg(all(feature = "jack", target_os = "linux"))]
+    fn jack_input(client_name: &str) -> Result<cpal::Device, String> {
+        // CPAL 0.15's Host::input_device_with_name() reuses its cached default
+        // device, so construct the named device directly instead.
+        let device = cpal::platform::JackDevice::default_input_device(client_name, false, false)
+            .map_err(|error| format!("Failed to open JACK input: {error}"))?;
+        let expected_name = format!("{client_name}_in");
+        let actual_name = device.name().map_err(|error| error.to_string())?;
+        if actual_name != expected_name {
+            return Err(format!(
+                "JACK client name {expected_name:?} is unavailable (assigned {actual_name:?})"
+            ));
+        }
+        Ok(device.into())
+    }
+
+    #[cfg(not(all(feature = "jack", target_os = "linux")))]
+    fn jack_input(_client_name: &str) -> Result<cpal::Device, String> {
+        Err("JACK input requires a Linux build with --features jack".into())
+    }
+
+    fn capture_thread(
+        buffer: AudioBuffer,
+        backend: Backend,
+        command_rx: mpsc::Receiver<Command>,
+        error_tx: &mpsc::SyncSender<String>,
+    ) -> Result<(), String> {
         // The cpal Stream must be built and dropped on the thread that owns it: it
         // wraps non-Send platform handles on some backends, so it stays parked here
         // for its whole lifetime rather than being handed back to the caller.
-        let host = cpal::default_host();
-        let Some(device) = host.default_input_device() else {
-            log::warn!("no default audio input device found");
-            let _ = command_rx.recv();
-            return;
+        let device = match backend {
+            Backend::Default => cpal::default_host()
+                .default_input_device()
+                .ok_or("No default audio input device found")?,
+            Backend::Jack(client_name) => jack_input(&client_name)?,
         };
-        let config = match device.default_input_config() {
-            Ok(c) => c,
-            Err(e) => {
-                log::warn!("failed to get default audio input config: {e}");
-                let _ = command_rx.recv();
-                return;
-            }
-        };
+        let config = device
+            .default_input_config()
+            .map_err(|error| format!("Failed to get audio input config: {error}"))?;
 
         let channels = config.channels() as usize;
         let sample_format = config.sample_format();
         let stream_config = config.config();
-        let err_fn = |err| log::warn!("audio input stream error: {err}");
+        let stream_error_tx = error_tx.clone();
+        let err_fn = move |error| {
+            report_error(
+                &stream_error_tx,
+                format!("Audio input stream error: {error}"),
+            );
+        };
 
         let stream_result = match sample_format {
             cpal::SampleFormat::F32 => {
@@ -411,26 +486,61 @@ mod capture {
                 )
             }
             other => {
-                log::warn!("unsupported audio sample format: {other:?}");
-                let _ = command_rx.recv();
-                return;
+                return Err(format!("Unsupported audio sample format: {other:?}"));
             }
         };
 
-        let stream = match stream_result {
-            Ok(s) => s,
-            Err(e) => {
-                log::warn!("failed to build audio input stream: {e}");
-                let _ = command_rx.recv();
-                return;
-            }
-        };
-
-        if let Err(e) = stream.play() {
-            log::warn!("failed to start audio input stream: {e}");
-        }
+        let stream = stream_result
+            .map_err(|error| format!("Failed to build audio input stream: {error}"))?;
+        stream
+            .play()
+            .map_err(|error| format!("Failed to start audio input stream: {error}"))?;
 
         let _ = command_rx.recv();
+        Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[cfg(all(feature = "jack", target_os = "linux"))]
+        #[test]
+        fn jack_selection_is_lazy_and_preserves_the_nsm_name() {
+            let manager = AudioManager::with_jack("Hydra.nABC").unwrap();
+            assert!(matches!(manager.backend, Backend::Jack(ref name) if name == "Hydra.nABC"));
+            assert!(manager.command_tx.is_none());
+            assert!(manager.take_error().is_none());
+            for name in ["", "Hydra\0invalid"] {
+                assert_eq!(
+                    AudioManager::with_jack(name).err().unwrap().kind(),
+                    std::io::ErrorKind::InvalidInput
+                );
+            }
+        }
+
+        #[cfg(not(all(feature = "jack", target_os = "linux")))]
+        #[test]
+        fn unsupported_jack_selection_is_an_error() {
+            assert_eq!(
+                AudioManager::with_jack("hydra").err().unwrap().kind(),
+                std::io::ErrorKind::Unsupported
+            );
+        }
+
+        #[test]
+        fn capture_errors_reach_the_ui_without_blocking() {
+            let (tx, rx) = mpsc::sync_channel(1);
+            let mut manager = AudioManager::new();
+            manager.error_rx = Some(rx);
+            report_error(&tx, "JACK server unavailable".into());
+            report_error(&tx, "Another error".into());
+            assert_eq!(
+                manager.take_error().as_deref(),
+                Some("JACK server unavailable")
+            );
+            assert!(manager.take_error().is_none());
+        }
     }
 }
 

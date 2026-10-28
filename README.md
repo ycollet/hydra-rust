@@ -110,6 +110,44 @@ optional GUI. Invalid/unreachable managers fall back to unmanaged mode;
 corrupt session files and failed saves are reported instead of silently
 discarding state.
 
+### JACK / PipeWire audio input (Linux desktop app)
+
+Build JACK support explicitly, then select it at runtime:
+
+```sh
+# Debian/Ubuntu build dependencies (in addition to the GUI dependencies):
+sudo apt install libasound2-dev libjack-jackd2-dev pkg-config
+cargo build --release --features jack
+./target/release/hydra --jack sketch.hydra
+# With PipeWire's JACK compatibility libraries, where a launcher is needed:
+pw-jack ./target/release/hydra --jack sketch.hydra
+```
+
+`jack` includes the `audio` feature. Without `--jack`, the default audio
+backend is unchanged. The flag is rejected on non-Linux platforms or in
+builds without `jack`; JACK failures are logged and shown in the editor,
+without falling back to another audio backend. A running JACK server (or
+PipeWire's JACK compatibility layer) and its `libjack` library are required;
+Hydra does not start a server automatically.
+
+Audio capture stays lazy: load and explicitly evaluate an audio-reactive
+sketch, for example `osc(10 + a.fft[0] * 100).out()`, before connecting audio.
+The JACK client then appears as `hydra_in`, with input ports
+`in_0` and `in_1`. Connect a DAW or media player's outputs to these ports
+using your JACK/PipeWire patchbay. Hydra downmixes them to mono for FFT
+analysis; this desktop input creates no audio outputs and does not
+automatically connect to the microphone/system capture ports.
+
+For RaySession/NSM, configure the desktop executable's arguments to include
+`--jack` (and launch through `pw-jack` if your setup requires it).
+The JACK client uses `<NSM client ID>_in`, preserving the assigned ID's case
+and punctuation, with the same input port names. Save the connections using
+the session manager's JACK connection-saving facility. On reopening a
+session, evaluate the sketch to recreate the ports before expecting
+connections to be restored. Multiple managed instances get distinct,
+stable names from their NSM IDs. This naming support applies only to
+`hydra`; the plugin standalone's upstream JACK naming limitation remains.
+
 ## Keyboard shortcuts
 
 The `Enter`-based shortcuts mirror [upstream Hydra](https://github.com/hydra-synth/hydra)'s own CodeMirror keymap (`Ctrl/Cmd+Enter`/`Alt+Enter`/`Ctrl/Cmd+Shift+Enter` for eval line/block/all); `Ctrl/Cmd+Alt+Enter` (eval selection) is specific to this native port, since upstream's `Ctrl/Cmd+Shift+Enter` slot was needed for "eval all" instead.

@@ -873,13 +873,14 @@ place and returns nothing).
 
 ## 8. Feature flags
 
-Six Cargo features gate optional hardware/network/dependency-heavy
+Seven Cargo features gate optional hardware/network/dependency-heavy
 functionality, all off by default:
 
 | Feature | Deps | Enables |
 |---|---|---|
 | `webcam` | `nokhwa` | `initCam(slot[, cameraIndex])`, populating `s0`-`s3` from a physical camera |
 | `audio` | `cpal`, `rustfft` | `a.fft[i]`, `a.setBins(n)`, `a.setCutoff(c)`, `a.setScale(s)`, `a.setSmooth(s)`, `a.show()`/`a.hide()` (toggles an on-screen FFT-bins overlay) |
+| `jack` | `audio`, CPAL's `jack` backend | Linux desktop `hydra --jack`: lazy JACK input instead of the default audio backend, also usable through PipeWire's JACK compatibility layer. The client is named `<NSM client ID>_in` when managed, otherwise `hydra_in`; inputs are not automatically connected |
 | `image_url` | `image`, `ureq` | `initImage(slot, url)` / `initGif(slot, url)`, fetching and decoding the URL in the background (see `imageload.rs`) and populating `s0`-`s3` from it, the same way `initCam` populates them from a camera |
 | `midi` | `midir` | `note(...)`, `cc(...)`, `_note`/`_cc`/`_noteVelocity`, `midi.*` - a native port of the real-world `hydra-midi` extension, see §6.1 |
 | `video` | `ffmpeg-sidecar` | `initVideo(slot, url)`, streaming decoded frames from a local file or URL via a standalone `ffmpeg` subprocess (see `video.rs`) into `s0`-`s3`. Unlike the other deps here, `ffmpeg` itself isn't a Rust crate linked into the binary - it must be a separate executable on `PATH` at *runtime* |
@@ -1122,4 +1123,3 @@ the static one in §11):
 - A descriptor built from variables instead of a literal `{...}` object
   (e.g. `setFunction(myConfig)`) isn't recognized by the pre-scan and
   falls through to a harmless no-op stub (logs a warning, nothing crashes).
-

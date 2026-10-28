@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Optional Linux desktop JACK/PipeWire input via `--features jack` and `--jack`,
+  with NSM-assigned client names for session connection restoration
 - Webcam support via `nokhwa`: `initCam(s0)` to capture, `src(s0)` to use as texture source
 - 4 external source slots (`s0`–`s3`) for camera feeds
 - Floating error toast that auto-dismisses after 5 seconds (no longer steals editor focus)

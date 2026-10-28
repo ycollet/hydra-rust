@@ -96,6 +96,8 @@ fft = ["dep:rustfft"]
 # `audio` keeps its old meaning (mic capture via `cpal`, exposed as
 # `AudioManager`) - now built on top of `fft` rather than duplicating it.
 audio = ["dep:cpal", "fft"]
+# Linux JACK input, also usable through PipeWire's JACK compatibility layer.
+jack = ["audio", "cpal/jack"]
 image_url = ["dep:ureq"]
 midi = ["dep:midir"]
 osc = ["dep:rosc"]
