@@ -44,7 +44,7 @@ mod whitespace;
 pub use audio::AudioManager;
 #[cfg(feature = "stream")]
 pub use broadcast::BroadcastManager;
-#[cfg(feature = "audio")]
+#[cfg(feature = "fft")]
 pub use eval::AudioRequest;
 #[cfg(feature = "stream")]
 pub use eval::BroadcastRequest;
@@ -59,6 +59,8 @@ pub use eval::OscRequest;
     feature = "stream"
 ))]
 pub use eval::SourceRequest;
+#[cfg(feature = "fft")]
+pub use eval::eval_with_audio_settings;
 pub use eval::{EvalResult, RenderMode, eval, preprocess};
 pub use fmt::format_code;
 #[cfg(feature = "midi")]

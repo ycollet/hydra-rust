@@ -38,7 +38,10 @@ library-embedding path the main crate's README documents for Sova.
   so `a.fft[]` reacts to whatever audio the host feeds the plugin's input
   (e.g. a track routed into it), the same FFT-reactive pipeline the
   desktop app's microphone-based `AudioManager` uses internally - just fed
-  by the host instead of a mic. Audio is still passed through unchanged
+  by the host instead of a mic. `a.setBins`, `a.setCutoff`, `a.setScale`,
+  `a.setSmooth`, and indexed `a.settings[i]` cutoff/scale/smooth controls
+  configure that analyzer without requiring microphone capture.
+  Audio is still passed through unchanged
   (this is an analysis tap, not an audio effect). Tempo/transport sync
   (via nih-plug's host-transport info) is a natural follow-up, not yet
   wired up.
@@ -54,7 +57,12 @@ library-embedding path the main crate's README documents for Sova.
   MIDI routing (e.g. a MIDI track feeding this plugin). `midi.start()`/
   `.pause()`/`.show()`/`.hide()` are accepted but are no-ops (there's no
   system MIDI port to start/stop, and no MIDI monitor overlay in this v1
-  window).
+  window). Channels are preserved as zero-based indices `0`–`15`;
+  `midi.channel(n)` and explicit channel arguments filter host events.
+  Device selectors see only the routed host input (index `0`, name
+  `"host"`), not the external device names hidden by the DAW.
+  Pure inline `.value(v => expression)` transforms compile to GLSL;
+  callbacks requiring runtime branching or side effects are rejected.
 - **Mouse**: wired into `mouse`/`m` reads from the window's actual
   cursor position, normalized to `[0, 1]` with the Y axis flipped to
   match the desktop app's own convention (origin at the bottom-left).

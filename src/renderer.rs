@@ -5,7 +5,7 @@ use glow::{HasContext, PixelUnpackData};
 
 use crate::audio::NUM_FFT_BINS;
 use crate::eval::{BufferFilter, RenderMode};
-use crate::midi::{NUM_MIDI_CC, NUM_MIDI_ENVELOPES, NUM_MIDI_NOTES};
+use crate::midi::{NUM_MIDI_CC, NUM_MIDI_ENVELOPES, NUM_MIDI_NOTES, NUM_MIDI_VALUES};
 use crate::osc::NUM_OSC_SLOTS;
 use crate::shader;
 use crate::source::{NUM_SOURCES, SourceFrame};
@@ -27,6 +27,7 @@ pub struct RenderUniforms {
     pub midi_envelope: [f32; NUM_MIDI_ENVELOPES],
     pub midi_aftertouch: [f32; NUM_MIDI_NOTES],
     pub midi_channel_aftertouch: f32,
+    pub midi_values: [f32; NUM_MIDI_VALUES],
     pub osc: [f32; NUM_OSC_SLOTS],
 }
 
@@ -49,6 +50,7 @@ struct ProgramState {
     loc_midi_envelope: Option<glow::UniformLocation>,
     loc_midi_aftertouch: Option<glow::UniformLocation>,
     loc_midi_channel_aftertouch: Option<glow::UniformLocation>,
+    loc_midi_values: Option<glow::UniformLocation>,
     loc_osc: Option<glow::UniformLocation>,
     loc_buffers: [Option<glow::UniformLocation>; NUM_BUFFERS],
     loc_text0: Option<glow::UniformLocation>,
@@ -356,6 +358,7 @@ fn resolve_program_state(gl: &glow::Context, program: glow::Program) -> ProgramS
             loc_midi_envelope: gl.get_uniform_location(program, "iMidiEnvelope"),
             loc_midi_aftertouch: gl.get_uniform_location(program, "iMidiAftertouch"),
             loc_midi_channel_aftertouch: gl.get_uniform_location(program, "iMidiChannelAftertouch"),
+            loc_midi_values: gl.get_uniform_location(program, "iMidiValue"),
             loc_osc: gl.get_uniform_location(program, "iOsc"),
             loc_buffers: [
                 gl.get_uniform_location(program, "iBuffer0"),
@@ -481,6 +484,9 @@ pub fn render_multipass(
             }
             if let Some(ref loc) = p.loc_midi_channel_aftertouch {
                 gl.uniform_1_f32(Some(loc), u.midi_channel_aftertouch);
+            }
+            if let Some(ref loc) = p.loc_midi_values {
+                gl.uniform_1_f32_slice(Some(loc), &u.midi_values);
             }
             if let Some(ref loc) = p.loc_osc {
                 gl.uniform_1_f32_slice(Some(loc), &u.osc);

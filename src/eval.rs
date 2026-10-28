@@ -6,8 +6,8 @@ use crate::argtrunc;
 use crate::arrow;
 use crate::arrowfn;
 use crate::asi;
-#[cfg(feature = "audio")]
-use crate::audio::NUM_FFT_BINS;
+#[cfg(feature = "fft")]
+use crate::audio::{AudioSettings, BinProperty, NUM_FFT_BINS};
 use crate::autolet;
 use crate::closurefn;
 use crate::commaexpr;
@@ -23,7 +23,10 @@ use crate::jskeywords;
 use crate::kwargs;
 use crate::mathjs;
 #[cfg(feature = "midi")]
-use crate::midi::{NUM_MIDI_CC, NUM_MIDI_ENVELOPES, NUM_MIDI_NOTES};
+use crate::midi::{
+    InputFilter, MidiBinding, MidiFilter, MidiValueKind, NUM_MIDI_CC, NUM_MIDI_ENVELOPES,
+    NUM_MIDI_NOTES, NUM_MIDI_VALUES,
+};
 use crate::numlit;
 use crate::objlit;
 #[cfg(feature = "osc")]
@@ -77,13 +80,18 @@ pub enum SourceRequest {
     InitStream { slot: usize, addr: String },
 }
 
-#[cfg(feature = "audio")]
+#[cfg(feature = "fft")]
 #[derive(Debug, Clone, Copy)]
 pub enum AudioRequest {
     SetBins(usize),
     SetCutoff(f32),
     SetScale(f32),
     SetSmooth(f32),
+    SetBin {
+        index: usize,
+        property: BinProperty,
+        value: f32,
+    },
     /// `a.show()`/`a.hide()` - toggles the host's on-screen FFT-bins
     /// overlay (see `HydraApp::show_audio_overlay`). Real hydra.js's own
     /// debug graph is drawn on the same canvas the visuals render to;
@@ -94,13 +102,23 @@ pub enum AudioRequest {
 }
 
 #[cfg(feature = "midi")]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum MidiRequest {
     Start,
     Pause,
     SetCcSmooth {
         index: usize,
         factor: f32,
+    },
+    Bind {
+        slot: usize,
+        binding: MidiBinding,
+    },
+    FilteredAdsrSlot {
+        slot: usize,
+        note: i64,
+        filter: MidiFilter,
+        adsr: [f32; 4],
     },
     AdsrSlot {
         slot: usize,
@@ -166,7 +184,7 @@ pub struct EvalResult {
         feature = "stream"
     ))]
     pub source_requests: Vec<SourceRequest>,
-    #[cfg(feature = "audio")]
+    #[cfg(feature = "fft")]
     pub audio_requests: Vec<AudioRequest>,
     #[cfg(feature = "midi")]
     pub midi_requests: Vec<MidiRequest>,
@@ -185,19 +203,29 @@ pub struct EvalResult {
 }
 
 /// The `a` audio object (`a.fft[i]`, `a.setBins(...)`, ...).
-#[cfg(feature = "audio")]
+#[cfg(feature = "fft")]
 #[derive(Debug, Clone, Copy)]
 struct Audio;
 
 /// Returned by `a.fft`; indexing it yields a `GlslExpr` reading `iFft[i]`.
-#[cfg(feature = "audio")]
+#[cfg(feature = "fft")]
 #[derive(Debug, Clone, Copy)]
 struct AudioFft;
 
+#[cfg(feature = "fft")]
+#[derive(Debug, Clone, Copy)]
+struct AudioBins;
+
+#[cfg(feature = "fft")]
+#[derive(Debug, Clone, Copy)]
+struct AudioBin(usize);
+
 /// The `midi` object (`midi.start()`, `.pause()`, `.channel(n)`, ...).
 #[cfg(feature = "midi")]
-#[derive(Debug, Clone, Copy)]
-struct Midi;
+#[derive(Debug, Clone, Default)]
+struct Midi {
+    filter: Option<MidiFilter>,
+}
 
 /// The `_osc` object (`_osc.start()`, `.get(address)`, ...) - named with
 /// the leading underscore real hydra-osc/atom-hydra both use for their own
@@ -212,28 +240,10 @@ struct Osc;
 /// Also accepted directly wherever a `GlslExpr` is (see `as_arg`), so a bare
 /// `note(60)` is usable as any hydra numeric argument.
 #[cfg(feature = "midi")]
-#[derive(Debug, Clone, Copy)]
-struct MidiNote {
-    note: i64,
-}
-
-/// Returned by `cc(...)`: a chainable, normalized (0-1) CC value.
-#[cfg(feature = "midi")]
-#[derive(Debug, Clone, Copy)]
-struct MidiCc {
-    index: i64,
-}
-
-/// Returned by `aft(...)`: a chainable, normalized (0-1) aftertouch value.
-/// `note: None` is real hydra-midi's channel-wide aftertouch (MIDI status
-/// `0xD0`, `aft()` called with no note argument); `note: Some(n)` is
-/// per-note polyphonic key pressure (`0xA0`, `aft(60)`) - both unified
-/// under one function in real hydra-midi, distinguished only by whether a
-/// note argument was given.
-#[cfg(feature = "midi")]
-#[derive(Debug, Clone, Copy)]
-struct MidiAft {
-    note: Option<i64>,
+#[derive(Debug, Clone)]
+struct MidiSignal {
+    binding: MidiBinding,
+    expr: String,
 }
 
 /// The `mouse` object (`mouse.x`, `mouse.y`), matching real hydra.js.
@@ -265,6 +275,57 @@ enum Arg {
 #[derive(Debug, Clone)]
 struct GlslExpr(String);
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum Easing {
+    #[default]
+    Linear,
+    In(u8),
+    Out(u8),
+    InOut(u8),
+    Sin,
+}
+
+impl Easing {
+    fn named(name: &str) -> Option<Self> {
+        Some(match name {
+            "linear" => Self::Linear,
+            "sin" => Self::Sin,
+            "easeInQuad" => Self::In(2),
+            "easeOutQuad" => Self::Out(2),
+            "easeInOutQuad" => Self::InOut(2),
+            "easeInCubic" => Self::In(3),
+            "easeOutCubic" => Self::Out(3),
+            "easeInOutCubic" => Self::InOut(3),
+            "easeInQuart" => Self::In(4),
+            "easeOutQuart" => Self::Out(4),
+            "easeInOutQuart" => Self::InOut(4),
+            "easeInQuint" => Self::In(5),
+            "easeOutQuint" => Self::Out(5),
+            "easeInOutQuint" => Self::InOut(5),
+            _ => return None,
+        })
+    }
+
+    fn to_glsl(self, t: &str) -> String {
+        let power = |value: &str, degree: u8| {
+            std::iter::repeat_n(format!("({value})"), degree as usize)
+                .collect::<Vec<_>>()
+                .join(" * ")
+        };
+        match self {
+            Self::Linear => t.to_owned(),
+            Self::In(degree) => format!("({})", power(t, degree)),
+            Self::Out(degree) => format!("(1.0 - ({}))", power(&format!("1.0 - ({t})"), degree)),
+            Self::InOut(degree) => format!(
+                "(({t}) < 0.5 ? 0.5 * ({}) : 1.0 - 0.5 * ({}))",
+                power(&format!("2.0 * ({t})"), degree),
+                power(&format!("2.0 * (1.0 - ({t}))"), degree),
+            ),
+            Self::Sin => format!("((1.0 - cos(3.141592653589793 * ({t}))) / 2.0)"),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct Pattern {
     values: Vec<f64>,
@@ -273,6 +334,7 @@ struct Pattern {
     // 0.0 = no smoothing (stepped), matching real hydra.js's
     // `arr._smooth` (falsy/unset = 0). See array-utils.js's `getValue`.
     smooth: f64,
+    easing: Easing,
 }
 
 impl Pattern {
@@ -289,6 +351,7 @@ impl Pattern {
             speed: 1.0,
             offset: 0.0,
             smooth: 0.0,
+            easing: Easing::Linear,
         }
     }
 
@@ -322,6 +385,7 @@ impl Pattern {
             speed: self.speed,
             offset: 0.0,
             smooth: self.smooth,
+            easing: self.easing,
         }
     }
 
@@ -346,19 +410,28 @@ impl Pattern {
         if self.smooth != 0.0 {
             // _index = index - smooth/2; currValue/nextValue are the
             // values at floor(mod(_index, n))/floor(mod(_index+1, n));
-            // t = min(mod(_index, 1)/smooth, 1); linearly interpolate
-            // between them (real hydra.js also allows a non-linear
-            // .ease() curve here in place of the plain `t`; not yet
-            // supported, so this always behaves like the 'linear' default).
+            // Apply the easing curve to the interpolation fraction.
             let smooth = fmt_f(self.smooth);
             let sub_idx = format!("({idx} - {smooth} / 2.0)");
             let curr = self.select_term(&format!("mod({sub_idx}, {n}.0)"));
             let next = self.select_term(&format!("mod({sub_idx} + 1.0, {n}.0)"));
-            let t = format!("min(mod({sub_idx}, 1.0) / {smooth}, 1.0)");
+            let t = self
+                .easing
+                .to_glsl(&format!("min(mod({sub_idx}, 1.0) / {smooth}, 1.0)"));
             format!("(({t}) * (({next}) - ({curr})) + ({curr}))")
         } else {
             format!("({})", self.select_term(&format!("mod({idx}, {n}.0)")))
         }
+    }
+
+    fn ease(mut self, name: &str) -> Self {
+        if let Some(easing) = Easing::named(name) {
+            self.easing = easing;
+            self.smooth = 1.0;
+        } else {
+            log::warn!("Unknown pattern easing curve {name:?}; keeping the current curve");
+        }
+        self
     }
 
     /// `values[floor(wrapped_idx)]`, built as a sum of step-masked terms:
@@ -875,12 +948,8 @@ fn as_arg(d: Dynamic) -> Arg {
         Arg::Expr(Pattern::from_array(d.into_array().unwrap()).to_glsl())
     } else {
         #[cfg(feature = "midi")]
-        if d.is::<MidiNote>() {
-            return Arg::Expr(midi_note_glsl(d.cast::<MidiNote>().note));
-        } else if d.is::<MidiCc>() {
-            return Arg::Expr(midi_cc_glsl(d.cast::<MidiCc>().index));
-        } else if d.is::<MidiAft>() {
-            return Arg::Expr(midi_aft_glsl(d.cast::<MidiAft>().note));
+        if d.is::<MidiSignal>() {
+            return Arg::Expr(d.cast::<MidiSignal>().expr);
         }
         Arg::Lit(0.0)
     }
@@ -929,6 +998,564 @@ fn midi_aft_glsl(note: Option<i64>) -> String {
 #[cfg(feature = "midi")]
 fn midi_envelope_glsl(slot: usize) -> String {
     format!("iMidiEnvelope[{slot}]")
+}
+
+#[cfg(feature = "midi")]
+type MidiResult<T> = Result<T, Box<rhai::EvalAltResult>>;
+
+#[cfg(feature = "midi")]
+fn midi_channel(value: Dynamic) -> MidiResult<Option<u8>> {
+    if value.is_unit()
+        || value
+            .clone()
+            .try_cast::<ImmutableString>()
+            .is_some_and(|s| s == "*")
+    {
+        return Ok(None);
+    }
+    let channel = value
+        .as_int()
+        .ok()
+        .or_else(|| {
+            value
+                .as_float()
+                .ok()
+                .filter(|v| v.fract() == 0.0)
+                .map(|v| v as i64)
+        })
+        .ok_or("MIDI channel must be an integer in 0..15 or '*'")?;
+    if !(0..16).contains(&channel) {
+        return Err("MIDI channel must be in 0..15 (zero-based)".into());
+    }
+    Ok(Some(channel as u8))
+}
+
+#[cfg(feature = "midi")]
+fn midi_input(value: Dynamic) -> MidiResult<InputFilter> {
+    if value.is_unit() {
+        return Ok(InputFilter::Any);
+    }
+    if let Some(name) = value.clone().try_cast::<ImmutableString>() {
+        return if name == "*" {
+            Ok(InputFilter::Any)
+        } else if name.is_empty() {
+            Err("MIDI input name must not be empty".into())
+        } else {
+            Ok(InputFilter::Name(name.into()))
+        };
+    }
+    let index = value
+        .as_int()
+        .ok()
+        .or_else(|| {
+            value
+                .as_float()
+                .ok()
+                .filter(|v| v.fract() == 0.0)
+                .map(|v| v as i64)
+        })
+        .filter(|v| *v >= 0)
+        .ok_or("MIDI input must be a nonnegative index, name, or '*'")?;
+    Ok(InputFilter::Index(index as usize))
+}
+
+#[cfg(feature = "midi")]
+fn midi_binding_glsl(state: &mut PatchState, binding: MidiBinding) -> MidiResult<String> {
+    if binding.filter == MidiFilter::default() {
+        if binding.kind == MidiValueKind::ChannelAftertouch {
+            return Ok(midi_aft_glsl(None));
+        }
+        if let Some(index) = binding.index {
+            return Ok(match binding.kind {
+                MidiValueKind::Note => midi_note_glsl(index as i64),
+                MidiValueKind::Velocity => midi_velocity_glsl(index as i64),
+                MidiValueKind::Cc => {
+                    if let Some(factor) = binding.smooth {
+                        state.midi_requests.push(MidiRequest::SetCcSmooth {
+                            index: index as usize,
+                            factor,
+                        });
+                        midi_cc_smoothed_glsl(index as i64)
+                    } else {
+                        midi_cc_glsl(index as i64)
+                    }
+                }
+                MidiValueKind::Aftertouch => midi_aft_glsl(Some(index as i64)),
+                MidiValueKind::ChannelAftertouch => unreachable!(),
+            });
+        }
+    }
+    let slot = if let Some(slot) = state
+        .midi_bindings
+        .iter()
+        .position(|existing| existing == &binding)
+    {
+        slot
+    } else {
+        let slot = state.midi_bindings.len();
+        if slot >= NUM_MIDI_VALUES {
+            return Err(
+                format!("A script can use at most {NUM_MIDI_VALUES} filtered MIDI values").into(),
+            );
+        }
+        state.midi_bindings.push(binding.clone());
+        state
+            .midi_requests
+            .push(MidiRequest::Bind { slot, binding });
+        slot
+    };
+    Ok(format!("iMidiValue[{slot}]"))
+}
+
+#[cfg(feature = "midi")]
+fn midi_source(
+    state: &Mutex<PatchState>,
+    mut kind: MidiValueKind,
+    key: Dynamic,
+    channel: Dynamic,
+    input: Dynamic,
+    selector: Midi,
+    raw: bool,
+) -> MidiResult<Dynamic> {
+    let wildcard = key.is_unit()
+        || key
+            .clone()
+            .try_cast::<ImmutableString>()
+            .is_some_and(|s| s == "*");
+    if key.is_unit() && kind == MidiValueKind::Aftertouch {
+        kind = MidiValueKind::ChannelAftertouch;
+    }
+    let index = if wildcard {
+        None
+    } else {
+        Some(midi_clamp(
+            if kind == MidiValueKind::Cc {
+                dyn_to_f64(key) as i64
+            } else {
+                note_number_from_dynamic(key)
+            },
+            NUM_MIDI_NOTES,
+        ) as u8)
+    };
+    let mut st = state.lock().unwrap();
+    let mut filter = selector.filter.unwrap_or_else(|| st.midi_defaults.clone());
+    if !channel.is_unit() {
+        filter.channel = midi_channel(channel)?;
+    }
+    if !input.is_unit() {
+        filter.input = midi_input(input)?;
+    }
+    let binding = MidiBinding {
+        kind,
+        index,
+        filter,
+        smooth: None,
+    };
+    let expr = midi_binding_glsl(&mut st, binding.clone())?;
+    Ok(if raw {
+        Dynamic::from(GlslExpr(expr))
+    } else {
+        Dynamic::from(MidiSignal { binding, expr })
+    })
+}
+
+#[cfg(feature = "midi")]
+fn register_midi_source(
+    engine: &mut Engine,
+    state: Arc<Mutex<PatchState>>,
+    name: &'static str,
+    kind: MidiValueKind,
+) {
+    let raw = name.starts_with('_');
+    let s = state.clone();
+    engine.register_fn(name, move || {
+        midi_source(
+            &s,
+            kind,
+            Dynamic::UNIT,
+            Dynamic::UNIT,
+            Dynamic::UNIT,
+            Midi::default(),
+            raw,
+        )
+    });
+    let s = state.clone();
+    engine.register_fn(name, move |key: Dynamic| {
+        midi_source(
+            &s,
+            kind,
+            key,
+            Dynamic::UNIT,
+            Dynamic::UNIT,
+            Midi::default(),
+            raw,
+        )
+    });
+    let s = state.clone();
+    engine.register_fn(name, move |key: Dynamic, channel: Dynamic| {
+        midi_source(&s, kind, key, channel, Dynamic::UNIT, Midi::default(), raw)
+    });
+    let s = state.clone();
+    engine.register_fn(
+        name,
+        move |key: Dynamic, channel: Dynamic, input: Dynamic| {
+            midi_source(&s, kind, key, channel, input, Midi::default(), raw)
+        },
+    );
+    if !raw {
+        let s = state.clone();
+        engine.register_fn(name, move |selector: Midi| {
+            midi_source(
+                &s,
+                kind,
+                Dynamic::UNIT,
+                Dynamic::UNIT,
+                Dynamic::UNIT,
+                selector,
+                false,
+            )
+        });
+        let s = state.clone();
+        engine.register_fn(name, move |selector: Midi, key: Dynamic| {
+            midi_source(&s, kind, key, Dynamic::UNIT, Dynamic::UNIT, selector, false)
+        });
+        let s = state.clone();
+        engine.register_fn(
+            name,
+            move |selector: Midi, key: Dynamic, channel: Dynamic| {
+                midi_source(&s, kind, key, channel, Dynamic::UNIT, selector, false)
+            },
+        );
+        engine.register_fn(
+            name,
+            move |selector: Midi, key: Dynamic, channel: Dynamic, input: Dynamic| {
+                midi_source(&state, kind, key, channel, input, selector, false)
+            },
+        );
+    }
+}
+
+#[cfg(feature = "midi")]
+fn midi_value(
+    context: rhai::NativeCallContext,
+    expr: String,
+    callback: rhai::FnPtr,
+) -> MidiResult<GlslExpr> {
+    let result = callback
+        .call_within_context::<Dynamic>(&context, (GlslExpr(expr),))
+        .map_err(|error| format!("MIDI .value() callback is not shader-compatible: {error}"))?;
+    if !(result.is::<GlslExpr>() || result.is::<f64>() || result.is::<i64>()) {
+        return Err("MIDI .value() callback must return a numeric shader expression".into());
+    }
+    Ok(GlslExpr(match as_arg(result) {
+        Arg::Lit(number) => fmt_f(number),
+        Arg::Expr(expr) => expr,
+    }))
+}
+
+#[cfg(feature = "midi")]
+fn register_midi(engine: &mut Engine, state: Arc<Mutex<PatchState>>) {
+    for (name, request) in [
+        ("start", MidiRequest::Start),
+        ("pause", MidiRequest::Pause),
+        ("show", MidiRequest::Show),
+        ("hide", MidiRequest::Hide),
+    ] {
+        let s = state.clone();
+        engine.register_fn(name, move |selector: Midi| -> Midi {
+            s.lock().unwrap().midi_requests.push(request.clone());
+            selector
+        });
+    }
+    let s = state.clone();
+    engine.register_fn("start", move |_selector: Midi, defaults: Map| -> MidiResult<Midi> {
+        let mut st = s.lock().unwrap();
+        for (key, value) in defaults {
+            match key.as_str() {
+                "channel" => st.midi_defaults.channel = midi_channel(value)?,
+                "input" => st.midi_defaults.input = midi_input(value)?,
+                _ => return Err(format!("Unsupported midi.start() option {key:?}; supported options are channel and input").into()),
+            }
+        }
+        st.midi_requests.push(MidiRequest::Start);
+        Ok(Midi::default())
+    });
+    for (name, kind) in [
+        ("note", MidiValueKind::Note),
+        ("_note", MidiValueKind::Note),
+        ("_noteVelocity", MidiValueKind::Velocity),
+        ("cc", MidiValueKind::Cc),
+        ("_cc", MidiValueKind::Cc),
+        ("aft", MidiValueKind::Aftertouch),
+        ("_aft", MidiValueKind::Aftertouch),
+    ] {
+        register_midi_source(engine, state.clone(), name, kind);
+    }
+    let s = state.clone();
+    engine.register_fn(
+        "channel",
+        move |selector: Midi, value: Dynamic| -> MidiResult<Midi> {
+            let mut filter = selector
+                .filter
+                .unwrap_or_else(|| s.lock().unwrap().midi_defaults.clone());
+            filter.channel = midi_channel(value)?;
+            Ok(Midi {
+                filter: Some(filter),
+            })
+        },
+    );
+    let s = state.clone();
+    engine.register_fn(
+        "input",
+        move |selector: Midi, value: Dynamic| -> MidiResult<Midi> {
+            let mut filter = selector
+                .filter
+                .unwrap_or_else(|| s.lock().unwrap().midi_defaults.clone());
+            filter.input = midi_input(value)?;
+            Ok(Midi {
+                filter: Some(filter),
+            })
+        },
+    );
+    let s = state.clone();
+    engine.register_fn(
+        "velocity",
+        move |mut signal: MidiSignal| -> MidiResult<MidiSignal> {
+            if signal.binding.kind != MidiValueKind::Note {
+                return Err(".velocity() requires a MIDI note".into());
+            }
+            signal.binding.kind = MidiValueKind::Velocity;
+            signal.expr = midi_binding_glsl(&mut s.lock().unwrap(), signal.binding.clone())?;
+            Ok(signal)
+        },
+    );
+    let s = state.clone();
+    engine.register_fn(
+        "adsr",
+        move |signal: MidiSignal,
+              a: Dynamic,
+              d: Dynamic,
+              sus: Dynamic,
+              r: Dynamic|
+              -> MidiResult<GlslExpr> {
+            if !matches!(
+                signal.binding.kind,
+                MidiValueKind::Note | MidiValueKind::Velocity
+            ) {
+                return Err(".adsr() requires a MIDI note".into());
+            }
+            let mut st = s.lock().unwrap();
+            let slot = st.next_midi_envelope_slot;
+            if slot >= NUM_MIDI_ENVELOPES {
+                return Err(format!(
+                    "A script can use at most {NUM_MIDI_ENVELOPES} MIDI envelopes"
+                )
+                .into());
+            }
+            st.next_midi_envelope_slot += 1;
+            let note = signal.binding.index.map_or(-1, i64::from);
+            let [a, d, s, r] = [a, d, sus, r].map(|v| dyn_to_f64(v) as f32);
+            if signal.binding.filter == MidiFilter::default() {
+                st.midi_requests.push(MidiRequest::AdsrSlot {
+                    slot,
+                    note,
+                    a,
+                    d,
+                    s,
+                    r,
+                });
+            } else {
+                st.midi_requests.push(MidiRequest::FilteredAdsrSlot {
+                    slot,
+                    note,
+                    filter: signal.binding.filter,
+                    adsr: [a, d, s, r],
+                });
+            }
+            Ok(GlslExpr(midi_envelope_glsl(slot)))
+        },
+    );
+    let smooth = move |mut signal: MidiSignal, factor: f32| -> MidiResult<GlslExpr> {
+        if signal.binding.kind != MidiValueKind::Cc {
+            return Err(".smooth() requires a MIDI CC value".into());
+        }
+        if !factor.is_finite() || !(0.0..=1.0).contains(&factor) {
+            return Err("MIDI smoothing factor must be in 0..1".into());
+        }
+        signal.binding.smooth = Some(factor);
+        Ok(GlslExpr(midi_binding_glsl(
+            &mut state.lock().unwrap(),
+            signal.binding,
+        )?))
+    };
+    let smooth_default = smooth.clone();
+    engine.register_fn("smooth", move |signal: MidiSignal| {
+        smooth_default(signal, crate::midi::DEFAULT_CC_SMOOTH)
+    });
+    engine.register_fn(
+        "smooth",
+        move |signal: MidiSignal, factor: Dynamic| -> MidiResult<GlslExpr> {
+            let factor = factor
+                .as_float()
+                .ok()
+                .or_else(|| factor.as_int().ok().map(|n| n as f64))
+                .ok_or("MIDI smoothing factor must be a static number in 0..1")?;
+            smooth(signal, factor as f32)
+        },
+    );
+    engine.register_fn("range", |signal: MidiSignal, lo: Dynamic, hi: Dynamic| {
+        midi_range(signal.expr, lo, hi)
+    });
+    engine.register_fn("scale", |signal: MidiSignal, factor: Dynamic| {
+        midi_scale(signal.expr, factor)
+    });
+    engine.register_fn("range", |expr: GlslExpr, lo: Dynamic, hi: Dynamic| {
+        midi_range(expr.0, lo, hi)
+    });
+    engine.register_fn("scale", |expr: GlslExpr, factor: Dynamic| {
+        midi_scale(expr.0, factor)
+    });
+    engine.register_fn(
+        "value",
+        |context: rhai::NativeCallContext, signal: MidiSignal, callback: rhai::FnPtr| {
+            midi_value(context, signal.expr, callback)
+        },
+    );
+    engine.register_fn(
+        "value",
+        |context: rhai::NativeCallContext, expr: GlslExpr, callback: rhai::FnPtr| {
+            midi_value(context, expr.0, callback)
+        },
+    );
+}
+
+#[cfg(feature = "midi")]
+fn validate_midi_value_callbacks(code: &str) -> Result<(), String> {
+    use crate::jsfunctions::matching_close;
+    use crate::srcscan::mask_strings_and_comments;
+    let chars: Vec<char> = code.chars().collect();
+    let mask = mask_strings_and_comments(&chars);
+    for i in 0..chars.len() {
+        if mask[i] || chars[i] != '.' {
+            continue;
+        }
+        let mut start = i + 1;
+        while start < chars.len() && (mask[start] || chars[start].is_whitespace()) {
+            start += 1;
+        }
+        if chars.get(start..start + 5) != Some(&['v', 'a', 'l', 'u', 'e']) {
+            continue;
+        }
+        let mut open = start + 5;
+        while open < chars.len() && (mask[open] || chars[open].is_whitespace()) {
+            open += 1;
+        }
+        if chars.get(open) != Some(&'(') {
+            continue;
+        }
+        let close = matching_close(&chars, &mask, open, '(', ')')
+            .ok_or("Unclosed MIDI .value() callback")?;
+        let mut body = open + 1;
+        while body < close && (mask[body] || chars[body].is_whitespace()) {
+            body += 1;
+        }
+        let parameters = if chars.get(body) == Some(&'|') {
+            let begin = body + 1;
+            body = begin;
+            while body < close && chars[body] != '|' {
+                body += 1;
+            }
+            let parameters: String = (begin..body)
+                .map(|i| if mask[i] { ' ' } else { chars[i] })
+                .collect();
+            body += 1;
+            parameters
+        } else {
+            let begin = body;
+            while body + 1 < close && !(chars[body] == '=' && chars[body + 1] == '>' && !mask[body])
+            {
+                body += 1;
+            }
+            if body + 1 >= close {
+                return Err("MIDI .value() requires an inline single-parameter expression callback (v => expression)".into());
+            }
+            let parameters: String = (begin..body)
+                .map(|i| if mask[i] { ' ' } else { chars[i] })
+                .collect();
+            body += 2;
+            parameters
+        };
+        let parameters = parameters
+            .trim()
+            .trim_start_matches('(')
+            .trim_end_matches(')')
+            .trim();
+        if parameters.is_empty()
+            || !parameters
+                .chars()
+                .enumerate()
+                .all(|(i, c)| c == '_' || c.is_alphabetic() || (i > 0 && c.is_ascii_digit()))
+        {
+            return Err("MIDI .value() requires exactly one plain callback parameter".into());
+        }
+        let mut j = body;
+        while j < close {
+            if mask[j] {
+                j += 1;
+                continue;
+            }
+            if matches!(chars[j], '{' | '}' | ';')
+                || (chars[j] == '='
+                    && !matches!(chars.get(j.wrapping_sub(1)), Some('=' | '<' | '>' | '!'))
+                    && chars.get(j + 1) != Some(&'='))
+            {
+                return Err(
+                    "MIDI .value() supports pure shader expressions, not blocks or assignments"
+                        .into(),
+                );
+            }
+            if chars[j].is_alphabetic() || chars[j] == '_' {
+                let begin = j;
+                while j < close && (chars[j].is_alphanumeric() || chars[j] == '_') {
+                    j += 1;
+                }
+                let name: String = chars[begin..j].iter().collect();
+                let mut next = j;
+                while next < close && (mask[next] || chars[next].is_whitespace()) {
+                    next += 1;
+                }
+                if chars.get(next) == Some(&'(')
+                    && !matches!(
+                        name.as_str(),
+                        "sin"
+                            | "cos"
+                            | "tan"
+                            | "asin"
+                            | "acos"
+                            | "atan"
+                            | "abs"
+                            | "fract"
+                            | "floor"
+                            | "ceil"
+                            | "sqrt"
+                            | "sign"
+                            | "exp"
+                            | "log"
+                            | "pow"
+                            | "min"
+                            | "max"
+                    )
+                {
+                    return Err(format!(
+                        "MIDI .value() cannot call {name:?}; only pure shader math functions are supported"
+                    ));
+                }
+                continue;
+            }
+            j += 1;
+        }
+    }
+    Ok(())
 }
 
 /// Real hydra-midi's `range(min=0, max=1)`: linearly remaps a value already
@@ -1234,12 +1861,18 @@ struct PatchState {
         feature = "stream"
     ))]
     source_requests: Vec<SourceRequest>,
-    #[cfg(feature = "audio")]
+    #[cfg(feature = "fft")]
     audio_requests: Vec<AudioRequest>,
+    #[cfg(feature = "fft")]
+    audio_settings: AudioSettings,
     #[cfg(feature = "midi")]
     midi_requests: Vec<MidiRequest>,
     #[cfg(feature = "midi")]
     next_midi_envelope_slot: usize,
+    #[cfg(feature = "midi")]
+    midi_bindings: Vec<MidiBinding>,
+    #[cfg(feature = "midi")]
+    midi_defaults: MidiFilter,
     #[cfg(feature = "osc")]
     osc_requests: Vec<OscRequest>,
     #[cfg(feature = "osc")]
@@ -1529,16 +2162,27 @@ fn register_patterns(engine: &mut Engine) {
         p.offset = dyn_to_f64(o) % 1.0;
         p
     });
-    // ease(name) is a real hydra.js pattern utility (named interpolation
-    // curve); no curve machinery exists here, so it passes the pattern
-    // through unchanged (smoothing still applies, just always linear)
-    // rather than hard-erroring.
-    engine.register_fn("ease", |arr: Array| -> Pattern { Pattern::from_array(arr) });
-    engine.register_fn("ease", |p: Pattern| -> Pattern { p });
-    engine.register_fn("ease", |arr: Array, _name: Dynamic| -> Pattern {
-        Pattern::from_array(arr)
+    engine.register_fn("ease", |arr: Array| -> Pattern {
+        Pattern::from_array(arr).ease("linear")
     });
-    engine.register_fn("ease", |p: Pattern, _name: Dynamic| -> Pattern { p });
+    engine.register_fn("ease", |p: Pattern| -> Pattern { p.ease("linear") });
+    engine.register_fn("ease", |arr: Array, name: Dynamic| -> Pattern {
+        let pattern = Pattern::from_array(arr);
+        if let Some(name) = name.try_cast::<ImmutableString>() {
+            pattern.ease(&name)
+        } else {
+            log::warn!("Unsupported pattern easing value; keeping the current curve");
+            pattern
+        }
+    });
+    engine.register_fn("ease", |pattern: Pattern, name: Dynamic| -> Pattern {
+        if let Some(name) = name.try_cast::<ImmutableString>() {
+            pattern.ease(&name)
+        } else {
+            log::warn!("Unsupported pattern easing value; keeping the current curve");
+            pattern
+        }
+    });
     // fit(low=0, high=1): remaps the array's own [min,max] into [low,high]
     // (real hydra.js: array-utils.js's `Array.prototype.fit`).
     engine.register_fn("fit", |arr: Array| -> Pattern {
@@ -1599,11 +2243,34 @@ pub fn preprocess(code: &str) -> String {
 }
 
 pub fn eval(code: &str) -> Result<EvalResult, String> {
+    eval_impl(
+        code,
+        #[cfg(feature = "fft")]
+        AudioSettings::default(),
+    )
+}
+
+/// Evaluate against the host's current audio configuration, so settings
+/// reads and indexed writes remain consistent across live-code evaluations.
+#[cfg(feature = "fft")]
+pub fn eval_with_audio_settings(
+    code: &str,
+    settings: &AudioSettings,
+) -> Result<EvalResult, String> {
+    eval_impl(code, settings.clone())
+}
+
+fn eval_impl(
+    code: &str,
+    #[cfg(feature = "fft")] audio_settings: AudioSettings,
+) -> Result<EvalResult, String> {
     // Must run before `preprocess` (and before anything else touches the
     // source): pulls `setFunction({...})` calls out whole, so the raw
     // GLSL body text inside them never gets rewritten by a later pass
     // that doesn't know it's looking at embedded shader code.
     let (code, custom_fns) = customfn::extract(code);
+    #[cfg(feature = "midi")]
+    validate_midi_value_callbacks(&code)?;
     let code = &preprocess(&code);
     let state = Arc::new(Mutex::new(PatchState {
         buffers: [None, None, None, None],
@@ -1618,12 +2285,18 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
             feature = "stream"
         ))]
         source_requests: Vec::new(),
-        #[cfg(feature = "audio")]
+        #[cfg(feature = "fft")]
         audio_requests: Vec::new(),
+        #[cfg(feature = "fft")]
+        audio_settings,
         #[cfg(feature = "midi")]
         midi_requests: Vec::new(),
         #[cfg(feature = "midi")]
         next_midi_envelope_slot: 0,
+        #[cfg(feature = "midi")]
+        midi_bindings: Vec::new(),
+        #[cfg(feature = "midi")]
+        midi_defaults: MidiFilter::default(),
         #[cfg(feature = "osc")]
         osc_requests: Vec::new(),
         #[cfg(feature = "osc")]
@@ -1808,9 +2481,65 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
         }
     }
 
-    #[cfg(feature = "audio")]
+    #[cfg(feature = "fft")]
     {
         engine.register_get("fft", |_a: &mut Audio| -> AudioFft { AudioFft });
+        engine.register_get("settings", |_a: &mut Audio| AudioBins);
+        {
+            let s = state.clone();
+            engine.register_get("length", move |_bins: &mut AudioBins| {
+                s.lock().unwrap().audio_settings.bins as i64
+            });
+        }
+        {
+            let s = state.clone();
+            engine.register_indexer_get(
+                move |_bins: &mut AudioBins,
+                      index: i64|
+                      -> Result<AudioBin, Box<rhai::EvalAltResult>> {
+                    let bins = s.lock().unwrap().audio_settings.bins;
+                    if index < 0 || index as usize >= bins {
+                        return Err(format!("Audio bin index {index} is outside 0..{bins}").into());
+                    }
+                    Ok(AudioBin(index as usize))
+                },
+            );
+        }
+        for (name, property) in [
+            ("cutoff", BinProperty::Cutoff),
+            ("scale", BinProperty::Scale),
+            ("smooth", BinProperty::Smooth),
+        ] {
+            let s = state.clone();
+            engine.register_get(name, move |bin: &mut AudioBin| -> f64 {
+                let settings = s.lock().unwrap().audio_settings.settings[bin.0];
+                match property {
+                    BinProperty::Cutoff => settings.cutoff as f64,
+                    BinProperty::Scale => settings.scale as f64,
+                    BinProperty::Smooth => settings.smooth as f64,
+                }
+            });
+            let s = state.clone();
+            engine.register_set(
+                name,
+                move |bin: &mut AudioBin, value: Dynamic| -> Result<(), Box<rhai::EvalAltResult>> {
+                    let value = value
+                        .as_float()
+                        .ok()
+                        .or_else(|| value.as_int().ok().map(|n| n as f64))
+                        .ok_or("Audio bin settings require a static numeric value")?
+                        as f32;
+                    let mut st = s.lock().unwrap();
+                    st.audio_settings.set(Some(bin.0), property, value)?;
+                    st.audio_requests.push(AudioRequest::SetBin {
+                        index: bin.0,
+                        property,
+                        value,
+                    });
+                    Ok(())
+                },
+            );
+        }
 
         engine.register_indexer_get(|_f: &mut AudioFft, i: i64| -> GlslExpr {
             GlslExpr(format!(
@@ -1826,38 +2555,49 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
             let s = state.clone();
             engine.register_fn("setBins", move |_a: Audio, n: Dynamic| {
                 let n = dyn_to_f64(n).max(1.0) as usize;
-                s.lock()
-                    .unwrap()
-                    .audio_requests
-                    .push(AudioRequest::SetBins(n));
+                let mut st = s.lock().unwrap();
+                st.audio_settings.set_bins(n);
+                st.audio_requests.push(AudioRequest::SetBins(n));
             });
         }
         {
             let s = state.clone();
-            engine.register_fn("setCutoff", move |_a: Audio, c: Dynamic| {
-                s.lock()
-                    .unwrap()
-                    .audio_requests
-                    .push(AudioRequest::SetCutoff(dyn_to_f64(c) as f32));
-            });
+            engine.register_fn(
+                "setCutoff",
+                move |_a: Audio, c: Dynamic| -> Result<(), Box<rhai::EvalAltResult>> {
+                    let value = dyn_to_f64(c) as f32;
+                    let mut st = s.lock().unwrap();
+                    st.audio_settings.set(None, BinProperty::Cutoff, value)?;
+                    st.audio_requests.push(AudioRequest::SetCutoff(value));
+                    Ok(())
+                },
+            );
         }
         {
             let s = state.clone();
-            engine.register_fn("setScale", move |_a: Audio, sc: Dynamic| {
-                s.lock()
-                    .unwrap()
-                    .audio_requests
-                    .push(AudioRequest::SetScale(dyn_to_f64(sc) as f32));
-            });
+            engine.register_fn(
+                "setScale",
+                move |_a: Audio, sc: Dynamic| -> Result<(), Box<rhai::EvalAltResult>> {
+                    let value = dyn_to_f64(sc) as f32;
+                    let mut st = s.lock().unwrap();
+                    st.audio_settings.set(None, BinProperty::Scale, value)?;
+                    st.audio_requests.push(AudioRequest::SetScale(value));
+                    Ok(())
+                },
+            );
         }
         {
             let s = state.clone();
-            engine.register_fn("setSmooth", move |_a: Audio, sm: Dynamic| {
-                s.lock()
-                    .unwrap()
-                    .audio_requests
-                    .push(AudioRequest::SetSmooth(dyn_to_f64(sm) as f32));
-            });
+            engine.register_fn(
+                "setSmooth",
+                move |_a: Audio, sm: Dynamic| -> Result<(), Box<rhai::EvalAltResult>> {
+                    let value = dyn_to_f64(sm) as f32;
+                    let mut st = s.lock().unwrap();
+                    st.audio_settings.set(None, BinProperty::Smooth, value)?;
+                    st.audio_requests.push(AudioRequest::SetSmooth(value));
+                    Ok(())
+                },
+            );
         }
         // Real hydra.js's a.show()/a.hide() toggle an on-screen debug graph
         // of the FFT bins - here they toggle the host's own egui overlay
@@ -1877,229 +2617,9 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
         }
     }
 
-    // Real-world `hydra-midi` community extension (loadScript-loaded in
-    // real hydra.js; no MIDI support exists in hydra-synth's own core at
-    // all), ported natively - see src/midi.rs's module doc comment for the
-    // faithfulness notes and deliberate scope reductions (merged channels/
-    // inputs, `.value(fn)` unsupported).
     #[cfg(feature = "midi")]
     {
-        engine.register_fn("note", |n: Dynamic| -> MidiNote {
-            MidiNote {
-                note: note_number_from_dynamic(n),
-            }
-        });
-        engine.register_fn("note", |n: Dynamic, _channel: Dynamic| -> MidiNote {
-            MidiNote {
-                note: note_number_from_dynamic(n),
-            }
-        });
-        engine.register_fn(
-            "note",
-            |n: Dynamic, _channel: Dynamic, _input: Dynamic| -> MidiNote {
-                MidiNote {
-                    note: note_number_from_dynamic(n),
-                }
-            },
-        );
-        engine.register_fn("_note", |n: Dynamic| -> GlslExpr {
-            GlslExpr(midi_note_glsl(note_number_from_dynamic(n)))
-        });
-        engine.register_fn("_note", |n: Dynamic, _channel: Dynamic| -> GlslExpr {
-            GlslExpr(midi_note_glsl(note_number_from_dynamic(n)))
-        });
-        engine.register_fn("_noteVelocity", |n: Dynamic| -> GlslExpr {
-            GlslExpr(midi_velocity_glsl(note_number_from_dynamic(n)))
-        });
-        engine.register_fn(
-            "_noteVelocity",
-            |n: Dynamic, _channel: Dynamic| -> GlslExpr {
-                GlslExpr(midi_velocity_glsl(note_number_from_dynamic(n)))
-            },
-        );
-        engine.register_fn("velocity", |n: MidiNote| -> GlslExpr {
-            GlslExpr(midi_velocity_glsl(n.note))
-        });
-        {
-            let s = state.clone();
-            engine.register_fn(
-                "adsr",
-                move |n: MidiNote, a: Dynamic, d: Dynamic, sus: Dynamic, r: Dynamic| -> GlslExpr {
-                    let mut st = s.lock().unwrap();
-                    let slot = st.next_midi_envelope_slot;
-                    st.next_midi_envelope_slot = (slot + 1) % NUM_MIDI_ENVELOPES;
-                    st.midi_requests.push(MidiRequest::AdsrSlot {
-                        slot,
-                        note: n.note,
-                        a: dyn_to_f64(a) as f32,
-                        d: dyn_to_f64(d) as f32,
-                        s: dyn_to_f64(sus) as f32,
-                        r: dyn_to_f64(r) as f32,
-                    });
-                    GlslExpr(midi_envelope_glsl(slot))
-                },
-            );
-        }
-
-        engine.register_fn("cc", |i: Dynamic| -> MidiCc {
-            MidiCc {
-                index: dyn_to_f64(i) as i64,
-            }
-        });
-        engine.register_fn("cc", |i: Dynamic, _channel: Dynamic| -> MidiCc {
-            MidiCc {
-                index: dyn_to_f64(i) as i64,
-            }
-        });
-        engine.register_fn(
-            "cc",
-            |i: Dynamic, _channel: Dynamic, _input: Dynamic| -> MidiCc {
-                MidiCc {
-                    index: dyn_to_f64(i) as i64,
-                }
-            },
-        );
-        engine.register_fn("_cc", |i: Dynamic| -> GlslExpr {
-            GlslExpr(midi_cc_glsl(dyn_to_f64(i) as i64))
-        });
-        engine.register_fn("_cc", |i: Dynamic, _channel: Dynamic| -> GlslExpr {
-            GlslExpr(midi_cc_glsl(dyn_to_f64(i) as i64))
-        });
-        {
-            let s = state.clone();
-            engine.register_fn("smooth", move |c: MidiCc| -> GlslExpr {
-                s.lock()
-                    .unwrap()
-                    .midi_requests
-                    .push(MidiRequest::SetCcSmooth {
-                        index: c.index as usize,
-                        factor: crate::midi::DEFAULT_CC_SMOOTH,
-                    });
-                GlslExpr(midi_cc_smoothed_glsl(c.index))
-            });
-        }
-        {
-            let s = state.clone();
-            engine.register_fn("smooth", move |c: MidiCc, factor: Dynamic| -> GlslExpr {
-                s.lock()
-                    .unwrap()
-                    .midi_requests
-                    .push(MidiRequest::SetCcSmooth {
-                        index: c.index as usize,
-                        factor: dyn_to_f64(factor) as f32,
-                    });
-                GlslExpr(midi_cc_smoothed_glsl(c.index))
-            });
-        }
-
-        // aft(note?, channel?, input?)/_aft(...): real hydra-midi unifies
-        // channel-wide aftertouch (status 0xD0) and per-note polyphonic
-        // aftertouch (0xA0) under one function, distinguished only by
-        // whether a note argument was given - see MidiAft's own doc
-        // comment. `channel`/`input` are accepted but ignored, same
-        // merged-channel treatment `note`/`cc` already get.
-        engine.register_fn("aft", || -> MidiAft { MidiAft { note: None } });
-        engine.register_fn("aft", |n: Dynamic| -> MidiAft {
-            MidiAft {
-                note: Some(note_number_from_dynamic(n)),
-            }
-        });
-        engine.register_fn("aft", |n: Dynamic, _channel: Dynamic| -> MidiAft {
-            MidiAft {
-                note: Some(note_number_from_dynamic(n)),
-            }
-        });
-        engine.register_fn(
-            "aft",
-            |n: Dynamic, _channel: Dynamic, _input: Dynamic| -> MidiAft {
-                MidiAft {
-                    note: Some(note_number_from_dynamic(n)),
-                }
-            },
-        );
-        engine.register_fn("_aft", || -> GlslExpr { GlslExpr(midi_aft_glsl(None)) });
-        engine.register_fn("_aft", |n: Dynamic| -> GlslExpr {
-            GlslExpr(midi_aft_glsl(Some(note_number_from_dynamic(n))))
-        });
-        engine.register_fn("_aft", |n: Dynamic, _channel: Dynamic| -> GlslExpr {
-            GlslExpr(midi_aft_glsl(Some(note_number_from_dynamic(n))))
-        });
-
-        // .range(lo,hi)/.scale(factor): a generic linear remap/multiply,
-        // registered for every reactive-value type this module can hand
-        // back, matching real hydra-midi's own `range`/`scale` transforms
-        // (which apply the same way regardless of what's upstream in the
-        // chain).
-        engine.register_fn(
-            "range",
-            |e: GlslExpr, lo: Dynamic, hi: Dynamic| -> GlslExpr { midi_range(e.0, lo, hi) },
-        );
-        engine.register_fn(
-            "range",
-            |n: MidiNote, lo: Dynamic, hi: Dynamic| -> GlslExpr {
-                midi_range(midi_note_glsl(n.note), lo, hi)
-            },
-        );
-        engine.register_fn("range", |c: MidiCc, lo: Dynamic, hi: Dynamic| -> GlslExpr {
-            midi_range(midi_cc_glsl(c.index), lo, hi)
-        });
-        engine.register_fn(
-            "range",
-            |a: MidiAft, lo: Dynamic, hi: Dynamic| -> GlslExpr {
-                midi_range(midi_aft_glsl(a.note), lo, hi)
-            },
-        );
-        engine.register_fn("scale", |e: GlslExpr, factor: Dynamic| -> GlslExpr {
-            midi_scale(e.0, factor)
-        });
-        engine.register_fn("scale", |n: MidiNote, factor: Dynamic| -> GlslExpr {
-            midi_scale(midi_note_glsl(n.note), factor)
-        });
-        engine.register_fn("scale", |c: MidiCc, factor: Dynamic| -> GlslExpr {
-            midi_scale(midi_cc_glsl(c.index), factor)
-        });
-        engine.register_fn("scale", |a: MidiAft, factor: Dynamic| -> GlslExpr {
-            midi_scale(midi_aft_glsl(a.note), factor)
-        });
-
-        {
-            let s = state.clone();
-            // Real hydra-midi's start() returns a promise with its own
-            // `.show()` (`await midi.start().show()` is the documented
-            // idiom); there's no promise/async model here, so this just
-            // returns `Midi` again so the same chaining still works,
-            // dispatching straight to the no-op `show(Midi)` below.
-            engine.register_fn("start", move |_m: Midi| -> Midi {
-                s.lock().unwrap().midi_requests.push(MidiRequest::Start);
-                Midi
-            });
-        }
-        {
-            let s = state.clone();
-            engine.register_fn("pause", move |_m: Midi| {
-                s.lock().unwrap().midi_requests.push(MidiRequest::Pause);
-            });
-        }
-        // Real hydra-midi's midi.show()/.hide() toggle an on-screen MIDI
-        // monitor overlay - here they toggle the host's own egui overlay
-        // (see `MidiRequest::Show`/`Hide`) instead. `.channel(n)`/
-        // `.input(n)` set script-wide defaults for per-channel/per-input
-        // filtering, which this port doesn't do faithfully (see the
-        // module doc comment) - accepted and ignored.
-        {
-            let s = state.clone();
-            engine.register_fn("show", move |_m: Midi| {
-                s.lock().unwrap().midi_requests.push(MidiRequest::Show);
-            });
-        }
-        {
-            let s = state.clone();
-            engine.register_fn("hide", move |_m: Midi| {
-                s.lock().unwrap().midi_requests.push(MidiRequest::Hide);
-            });
-        }
-        engine.register_fn("channel", |_m: Midi, _n: Dynamic| {});
-        engine.register_fn("input", |_m: Midi, _n: Dynamic| {});
+        register_midi(&mut engine, state.clone());
     }
 
     // OSC input - see src/osc.rs's module doc comment for the faithfulness
@@ -2350,8 +2870,8 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
     // keep tracking the window size), since that's already the correct
     // behavior for the `window.innerWidth`/`innerHeight` idiom - there's
     // no per-frame callback here to re-evaluate a reactive expression
-    // against, the same fundamental limit already documented for MIDI's
-    // `.value(fn)`. Clamped to a sane ceiling as a light guard against a
+    // against: render-target allocation isn't a shader expression.
+    // Clamped to a sane ceiling as a light guard against a
     // copy-pasted/untrusted script requesting an enormous GPU allocation.
     {
         let s = state.clone();
@@ -2682,10 +3202,10 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
     // Pushed as a regular (non-constant) variable, unlike the GlslExpr constants above:
     // Rhai forbids mutable-receiver method calls on constants, and `a.setBins(...)`
     // dispatches as one even though the registered fns take `Audio` by value.
-    #[cfg(feature = "audio")]
+    #[cfg(feature = "fft")]
     scope.push("a", Audio);
     #[cfg(feature = "midi")]
-    scope.push("midi", Midi);
+    scope.push("midi", Midi::default());
     #[cfg(feature = "osc")]
     scope.push("_osc", Osc);
 
@@ -2724,7 +3244,7 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
             feature = "stream"
         ))]
         source_requests: std::mem::take(&mut patch.source_requests),
-        #[cfg(feature = "audio")]
+        #[cfg(feature = "fft")]
         audio_requests: std::mem::take(&mut patch.audio_requests),
         #[cfg(feature = "midi")]
         midi_requests: std::mem::take(&mut patch.midi_requests),
@@ -3069,6 +3589,43 @@ fn register_modulate(engine: &mut Engine, meta: &FnMeta) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn named_easing_curves_match_upstream_samples_and_enable_smoothing() {
+        let mut engine = Engine::new();
+        register_glsl_ops(&mut engine);
+        for degree in 2..=5 {
+            for easing in [
+                Easing::In(degree),
+                Easing::Out(degree),
+                Easing::InOut(degree),
+            ] {
+                for t in [0.0_f64, 0.25, 0.5, 0.75, 1.0] {
+                    let expected = match easing {
+                        Easing::In(_) => t.powi(degree as i32),
+                        Easing::Out(_) => 1.0 - (1.0 - t).powi(degree as i32),
+                        _ if t < 0.5 => 0.5 * (2.0 * t).powi(degree as i32),
+                        _ => 1.0 - 0.5 * (2.0 * (1.0 - t)).powi(degree as i32),
+                    };
+                    let expression = ternary::rewrite_ternaries(&easing.to_glsl(&fmt_f(t)));
+                    let actual = engine
+                        .eval::<f64>(&expression)
+                        .unwrap_or_else(|error| panic!("{expression}: {error}"));
+                    assert!(
+                        (actual - expected).abs() < 1e-10,
+                        "{easing:?} at {t}: {actual}"
+                    );
+                }
+            }
+        }
+        let pattern = Pattern::from_array(vec![0.into(), 1.into()]).ease("easeInCubic");
+        assert_eq!(pattern.smooth, 1.0);
+        assert_eq!(pattern.fit(0.0, 10.0).easing, Easing::In(3));
+        let unchanged = pattern.clone().ease("unknown");
+        assert_eq!(unchanged.easing, pattern.easing);
+        let sin = engine.eval::<f64>(&Easing::Sin.to_glsl("0.25")).unwrap();
+        assert!((sin - (1.0 - std::f64::consts::FRAC_1_SQRT_2) / 2.0).abs() < 1e-10);
+    }
 
     // --- fmt_f ---
 

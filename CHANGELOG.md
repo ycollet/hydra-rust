@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Hydra named pattern easing curves, preserving curve selection through `.fit()`
+- MIDI channel/device selectors and wildcard values, including filtered CC smoothing and ADSR
+- Shader-compatible inline MIDI `.value(v => expression)` transforms, with explicit rejection of unsupported callbacks
+- Per-bin audio cutoff/scale/smooth settings in the desktop app and plugin, with settings-aware evaluation for embedding hosts
 - Optional Linux desktop JACK/PipeWire input via `--features jack` and `--jack`,
   with NSM-assigned client names for session connection restoration
 - Webcam support via `nokhwa`: `initCam(s0)` to capture, `src(s0)` to use as texture source

@@ -214,6 +214,8 @@ cargo run --features audio --bin hydra
 ```
 
 The microphone is only opened once a script actually uses one of these (calls a setter, or reads `a.fft[i]`) — never just because the feature is compiled in.
+The scripting API also exists with `fft` alone for host-fed audio, as used
+by the plugin, without opening a microphone.
 
 | Function | Description | Example |
 |----------|-------------|---------|
@@ -222,7 +224,16 @@ The microphone is only opened once a script actually uses one of these (calls a 
 | `a.setCutoff(c)` | Zeroes out bin values below this noise-floor threshold (default `0`) | `a.setCutoff(0.15)` |
 | `a.setScale(s)` | Multiplies every bin's value (default `1`) | `a.setScale(2)` |
 | `a.setSmooth(s)` | Exponential smoothing between frames, `0`-`1` (default `0.4`) | `a.setSmooth(0.8)` |
+| `a.settings[i].cutoff` / `.scale` / `.smooth` | Read or change one active bin's settings; static numeric values only | `a.settings[0].scale = 3` |
 | `a.show()` / `a.hide()` | Shows/hides a small on-screen bar-graph overlay of the current FFT bins — an egui overlay standing in for real hydra.js's own on-screen debug graph, since nothing else here draws directly into the GL canvas | `a.show()` |
+
+`a.settings.length` is the active bin count (maximum 8). Global setters
+update all bins; `a.setBins(n)` resets the per-bin settings to the current
+global defaults and clears smoothing history. Cutoff, gain, and FFT
+normalization retain hydra-rust's existing behavior, not Hydra's Meyda
+loudness units. Embedding hosts can use `eval_with_audio_settings()` with
+their analyzer's `settings()` to preserve config reads between evaluations;
+the desktop app and plugin do this automatically.
 
 ### `image_url` — load an image or animated GIF from a URL
 
@@ -241,24 +252,45 @@ cargo run --features image_url --bin hydra
 cargo run --features midi --bin hydra
 ```
 
-A native port of the [hydra-midi](https://github.com/arnoson/hydra-midi) community extension's API — real hydra.js has no MIDI support in its own core at all. Note names use standard scientific-pitch-notation/General-MIDI numbering (`"C4"` is 60, middle C). All MIDI channels and input devices are merged into one rather than filtered separately.
+A native port of the [hydra-midi](https://github.com/arnoson/hydra-midi) community extension's API — real hydra.js has no MIDI support in its own core at all. Note names use standard scientific-pitch-notation/General-MIDI numbering (`"C4"` is 60, middle C). Channels are zero-based (`0`–`15`); inputs accept a zero-based port index or an exact name. `'*'` selects any channel/input (the default), and any note or CC index.
 
 | Function | Description | Example |
 |----------|-------------|---------|
-| `note(nameOrNumber[, channel])` | A gate: `1` while the note is held, `0` otherwise (not velocity) | `osc().invert(note(60)).out()` |
+| `note(nameOrNumber[, channel[, input]])` | A gate: `1` while the note is held, `0` otherwise (not velocity) | `osc().invert(note(60, 0, 'Keys')).out()` |
 | `note(...).velocity()` | The note's last velocity, `0`-`1` (`0` once released) | `osc(60, 0.1, note("C4").velocity()).out()` |
 | `note(...).adsr(a, d, s, r)` | An ADSR envelope (`a`/`d`/`r` in milliseconds, `s` a `0`-`1` sustain level) triggered by the note's on/off events | `solid(1, 0, note(60).adsr(50, 100, 0.7, 300)).out()` |
-| `cc(index[, channel])` | A CC controller's value, normalized to `0`-`1` | `osc().rotate(cc(1)).out()` |
+| `cc(index[, channel[, input]])` | A CC controller's value, normalized to `0`-`1` | `osc().rotate(cc(1)).out()` |
 | `cc(...).smooth(factor=0.01)` | Exponential slew of a CC value between frames | `osc(cc(1).smooth(0.2)).out()` |
 | `aft()` | Channel-wide aftertouch (channel pressure), normalized to `0`-`1` | `osc().brightness(aft()).out()` |
 | `aft(nameOrNumber[, channel])` | Per-note polyphonic aftertouch (key pressure) for that note, normalized to `0`-`1` — passing a note is what distinguishes this from channel-wide `aft()` | `osc(60, 0.1, aft(60)).out()` |
 | `.range(lo, hi)` (on `note`/`cc`/`aft`/`.velocity()`) | Remaps a `0`-`1` value into `[lo, hi]` | `osc().rotate(cc(1).range(0, 6.28)).out()` |
 | `.scale(factor)` (on `note`/`cc`/`aft`/`.velocity()`) | Multiplies a value | `osc(1, 1, note(60).scale(0.5)).out()` |
+| `.value(v => expression)` | Compiles a pure inline numeric transform into live GLSL; also works after `.smooth()`, `.adsr()`, `.range()`, or `.scale()` | `osc(cc(1).value(v => v * 20 + time)).out()` |
 | `_note(...)` / `_cc(...)` / `_noteVelocity(...)` / `_aft(...)` | Plain (non-chainable) equivalents, for use inside a `()=>` wrapper | `osc(1, 1, _note(60) * 0.5).out()` |
 | `midi.start()` | Connects to every available MIDI input device (required before any of the above reacts to anything) | `midi.start()` |
+| `midi.start({channel, input})` | Sets defaults for values created in this evaluation, then starts input | `midi.start({channel: 0, input: 'Keys'})` |
 | `midi.pause()` | Disconnects from all MIDI input devices | `midi.pause()` |
 | `midi.show()` / `.hide()` | Shows/hides an on-screen overlay listing currently-held notes (with velocity) and non-zero CC values — a "current state" snapshot rather than real hydra-midi's own scrolling raw-message log, simpler to implement and just as useful for confirming a controller is connected | `midi.show()` |
-| `midi.channel(n)` / `.input(n)` | Accepted, logged, ignored — channels/inputs are merged (see above) | `midi.channel(0)` |
+| `midi.channel(n)` / `.input(indexOrName)` | Returns a reusable selector without changing global defaults; supports chained `note`, `cc`, and `aft` calls with explicit overrides | `midi.input('Keys').channel(0).cc(74)` |
+
+Filtering also applies to the `_note`/`_cc`/`_noteVelocity`/`_aft` forms,
+aftertouch, CC smoothing, and ADSR triggers. There are 64 filtered/wildcard
+value slots and 16 envelope slots per evaluated script; exceeding either
+limit is an error. Wildcard values follow the latest matching event.
+Like envelope slots, filtered value slots are assigned per evaluation:
+reevaluate all affected output buffers together, rather than leaving older
+shaders running with slot IDs that a partial evaluation could reuse.
+Run with `RUST_LOG=info` to see connected device names; port indices follow
+the system's enumeration order. The plugin sees one host-routed input,
+index `0`, named `"host"`, and preserves event channels.
+
+`.value()` accepts one-parameter expression callbacks, captured constants,
+`time`, and numeric math functions (`sin`, `cos`, `tan`, `asin`, `acos`,
+`atan`, `abs`, `fract`, `floor`, `ceil`, `sqrt`, `sign`, `exp`, `log`,
+`pow`, `min`, `max`, including supported `Math.*` aliases). It does not run JS/Rhai
+callbacks every frame: blocks, assignments, runtime branching, arbitrary
+function calls, and side effects are rejected explicitly. Smoothing a
+transformed `.value()` result is not supported; smooth the CC first.
 
 ### `osc` — OSC (Open Sound Control) input
 
@@ -266,7 +298,7 @@ A native port of the [hydra-midi](https://github.com/arnoson/hydra-midi) communi
 cargo run --features osc --bin hydra
 ```
 
-A native UDP OSC listener, modeled on the [hydra-osc](https://github.com/ojack/hydra-osc) example and atom-hydra's more complete [`osc-loader.js`](https://github.com/hydra-synth/atom-hydra/blob/master/lib/osc-loader.js) (default port `57101`, matching atom-hydra's own). Exposed as `_osc` rather than `osc` — real hydra.js's `osc(freq, sync, offset)` is already the sine-oscillator source function, so a bare `osc` would collide with it. Unlike real hydra-osc/atom-hydra's `_osc.on(address, callback)` event style (there's nowhere to run an arbitrary per-frame JS callback here — every hydra-rust chain compiles to one static GLSL expression, the same reason `.value(fn)` on MIDI `note`/`cc` isn't implemented either), values are read reactively instead, the same shape MIDI's `note()`/`cc()` already use.
+A native UDP OSC listener, modeled on the [hydra-osc](https://github.com/ojack/hydra-osc) example and atom-hydra's more complete [`osc-loader.js`](https://github.com/hydra-synth/atom-hydra/blob/master/lib/osc-loader.js) (default port `57101`, matching atom-hydra's own). Exposed as `_osc` rather than `osc` — real hydra.js's `osc(freq, sync, offset)` is already the sine-oscillator source function, so a bare `osc` would collide with it. Unlike real hydra-osc/atom-hydra's `_osc.on(address, callback)` event style, values are read reactively instead: compiled shader expressions do not run arbitrary per-message callbacks.
 
 | Function | Description | Example |
 |----------|-------------|---------|
@@ -470,6 +502,15 @@ Every input is treated as a plain `float` regardless of its declared
 project's own `iTime`/`iResolution` uniform names. See `SPEC.md` §12 for
 the full details and limitations.
 
+## Pattern easing
+
+`[0, 1].ease('easeInOutCubic')` uses Hydra's named interpolation curves:
+`linear`, `sin`, and `easeIn`/`easeOut`/`easeInOut` with `Quad`, `Cubic`,
+`Quart`, or `Quint`. Calling `.ease()` selects `linear`; a recognized
+curve resets the smoothing window to `1`. A later `.smooth(amount)`
+changes that window, and `.fit()` preserves the curve. Unknown names
+log a warning and leave the pattern unchanged.
+
 ## Current limitations
 
 - Max nesting depth of 16
@@ -495,9 +536,6 @@ These are registered so scripts calling them don't hard-error, but they don't do
 | `document.createElement(...)` / `.getElementById(...)` / `.querySelector(...)` / `.getElementsByTagName(...)` | Each returns a plain settable map (like `P5(...)`) rather than hard-erroring — real sketches commonly build an offscreen `<canvas>`/`<img>` element this way, usually to feed a p5.js overlay or draw text via a 2D canvas context; no DOM exists here to back it. `.getContext("2d")` on the resulting map returns another settable map with its own common methods (`fillText`, `fillRect`, `clearRect`, `strokeText`, `save`/`restore`, `translate`/`scale`, `measureText`, `createLinearGradient`) registered as no-ops; properties like `.fillStyle`/`.font` need no registration, same as `hydraText` |
 | `canvas.setRelativeSize(...)` / `.setAlign(...)` / `.setLinear()` / `.setNearest()` | No-op — a top-level `canvas` config object the `hyper-hydra` community extension exposes, not a real hydra.js API at all |
 | `Scene(name)` | No-op — not a hydra.js API at all; some external VJ/live-coding integrations use it to switch named cue banks |
-| `.value(fn)` (MIDI `note`/`cc`, `midi` feature) | Not implemented — each chain compiles to a static GLSL expression once, so there's nowhere to run an arbitrary per-frame Rhai closure the way a real per-frame JS callback would; calling it cleanly fails as "Function not found" |
-| `midi.channel(n)` / `.input(n)` | Accepted, logged, ignored — MIDI channels and input devices are all merged into one rather than faithfully filtered (see SPEC.md §6.1) |
-| `ease(name)` (pattern) | Accepted but not faithful — `smooth()` still interpolates linearly regardless of the named curve; no non-linear easing curves are implemented |
 | `screencap()` | No-op — saving/sharing a screenshot isn't supported |
 | `loadScript(url)` | No-op — no dynamic module loading. Some of the most commonly-loaded community extensions' functions are ported natively instead (`spiral`, `turb`, `uturb`, `unoise`, `whitenoise`, `colornoise`, `warp`, `cwarp`, `ncontour`, `pulse`, `pulsetrain`, `hextile`, `concentric`, `brick`, `wave`, `lissa`, `inversion`, `mirrorX`/`mirrorY`/`mirrorX2`/`mirrorY2`/`mirrorWrap`, `mandeloffs`, `colreflect` — see SPEC.md §6); anything else the loaded script would have defined still won't exist |
 | `pb.setName(name)` / `pb.list()` | No-op — not a hydra.js API at all; boilerplate an external platform injects when a sketch is exported/shared |

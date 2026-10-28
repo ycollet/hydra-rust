@@ -450,6 +450,131 @@ fn midi_start_requires_no_other_setup_to_evaluate() {
 
 #[test]
 #[cfg(feature = "midi")]
+fn midi_selectors_preserve_channels_devices_and_explicit_overrides() {
+    use hydra_rust::{
+        MidiRequest,
+        midi::{InputFilter, MidiValueKind},
+    };
+    let result = eval(
+        r#"
+        midi.start({channel: 2, input: 'Keys'})
+        let keys = midi.input(1).channel(3)
+        osc(keys.cc(74), keys.note('C4', 4).velocity(), cc(74)).out()
+        solid(_aft(60, 5, 'Pads'), note('*', '*', 0), cc(74, '*', '*')).out(o1)
+    "#,
+    )
+    .unwrap();
+    let bindings: Vec<_> = result
+        .midi_requests
+        .iter()
+        .filter_map(|request| match request {
+            MidiRequest::Bind { binding, .. } => Some(binding),
+            _ => None,
+        })
+        .collect();
+    assert!(bindings.iter().any(|b| b.kind == MidiValueKind::Cc
+        && b.filter.channel == Some(3)
+        && b.filter.input == InputFilter::Index(1)));
+    assert!(bindings.iter().any(|b| b.kind == MidiValueKind::Velocity
+        && b.filter.channel == Some(4)
+        && b.filter.input == InputFilter::Index(1)));
+    assert!(bindings.iter().any(|b| b.kind == MidiValueKind::Cc
+        && b.filter.channel == Some(2)
+        && b.filter.input == InputFilter::Name("Keys".into())));
+    assert!(bindings.iter().any(|b| b.kind == MidiValueKind::Aftertouch
+        && b.filter.channel == Some(5)
+        && b.filter.input == InputFilter::Name("Pads".into())));
+    assert!(bindings.iter().any(|b| b.kind == MidiValueKind::Note
+        && b.index.is_none()
+        && b.filter.input == InputFilter::Index(0)));
+    assert!(result.shaders[1].as_ref().unwrap().contains("iMidiCC[74]"));
+    for code in [
+        "osc(cc(1, 16)).out()",
+        "midi.input(-1)",
+        "midi.channel(0.5)",
+    ] {
+        assert!(eval(code).is_err(), "{code}");
+    }
+}
+
+#[test]
+#[cfg(feature = "midi")]
+fn midi_value_callbacks_compile_live_math_and_captured_constants() {
+    let glsl = ok_shader0(
+        r#"
+        let gain = 3
+        osc(cc(1).smooth(0.2).value(v => Math.max(v * gain + time, 0.1)).range(1, 20),
+            note(60).velocity().value((v) => v * 2),
+            aft(60).value(v => Math.sin(v))).out()
+    "#,
+    );
+    for expression in [
+        "iMidiCCSmoothed[1]",
+        "iMidiVelocity[60]",
+        "iMidiAftertouch[60]",
+        "iTime",
+        "max(",
+        "sin(",
+        "3.0",
+    ] {
+        assert!(glsl.contains(expression), "{expression}: {glsl}");
+    }
+    for callback in [
+        "v => { return v * 2; }",
+        "v => random()",
+        "v => midi.start()",
+        "v => v > 0.5",
+        "v => (gain = 2)",
+    ] {
+        assert!(
+            eval(&format!("let gain = 1; osc(cc(1).value({callback})).out()")).is_err(),
+            "{callback}"
+        );
+    }
+    assert!(eval("osc(cc(1).value((/* input */ v) => v * 2)).out()").is_ok());
+    for factor in ["'oops'", "time", "-0.1", "1.1"] {
+        assert!(
+            eval(&format!("osc(cc(1).smooth({factor})).out()")).is_err(),
+            "{factor}"
+        );
+    }
+}
+
+#[test]
+#[cfg(feature = "midi")]
+fn midi_filtered_bindings_deduplicate_and_report_pool_exhaustion() {
+    use hydra_rust::MidiRequest;
+    let result = eval("osc(cc(74, 2), cc(74, 2), cc(74, 3)).out()").unwrap();
+    assert_eq!(
+        result
+            .midi_requests
+            .iter()
+            .filter(|r| matches!(r, MidiRequest::Bind { .. }))
+            .count(),
+        2
+    );
+    let values = (0..65)
+        .map(|index| format!("let v{index} = cc({index}, 2);"))
+        .collect::<String>();
+    assert!(
+        eval(&values)
+            .err()
+            .unwrap()
+            .contains("at most 64 filtered MIDI values")
+    );
+    let envelopes = (0..17)
+        .map(|index| format!("let v{index} = note({index}).adsr(0, 0, 1, 0);"))
+        .collect::<String>();
+    assert!(
+        eval(&envelopes)
+            .err()
+            .unwrap()
+            .contains("at most 16 MIDI envelopes")
+    );
+}
+
+#[test]
+#[cfg(feature = "midi")]
 fn midi_show_and_hide_queue_requests_without_touching_real_midi() {
     use hydra_rust::eval::MidiRequest;
     let result = eval("midi.hide()\nosc(60).out()").unwrap();
@@ -489,6 +614,49 @@ fn audio_show_and_hide_queue_requests_without_touching_the_microphone() {
             .audio_requests
             .iter()
             .any(|r| matches!(r, AudioRequest::Hide))
+    );
+}
+
+#[test]
+#[cfg(feature = "fft")]
+fn audio_bin_settings_support_nested_reads_and_writes() {
+    use hydra_rust::{AudioRequest, audio::BinProperty};
+    let result = eval(
+        r#"
+        a.setBins(8)
+        a.setCutoff(0.1)
+        a.settings[5].cutoff = 0.3
+        a.settings[5].scale = 2
+        a.settings[5].smooth = a.settings[4].smooth / 2
+        osc(a.settings[5].scale, 0.1, a.fft[5]).out()
+    "#,
+    )
+    .unwrap();
+    assert!(result.shaders[0].as_ref().unwrap().contains("osc(st, 2.0,"));
+    assert!(result.audio_requests.iter().any(|request| matches!(
+        request, AudioRequest::SetBin { index: 5, property: BinProperty::Smooth, value }
+        if (*value - 0.2).abs() < 1e-6
+    )));
+    for code in [
+        "a.settings[-1].cutoff = 0",
+        "a.settings[4].scale = 2",
+        "a.settings[0].smooth = time",
+    ] {
+        assert!(eval(code).is_err(), "{code}");
+    }
+    let mut analyzer = hydra_rust::audio::AudioAnalyzer::new();
+    analyzer.set_scale(3.0);
+    analyzer.set_bins(8);
+    let result = hydra_rust::eval_with_audio_settings(
+        "a.settings[5].smooth = 0.1; osc(a.settings[5].scale, a.settings.length).out()",
+        analyzer.settings(),
+    )
+    .unwrap();
+    assert!(
+        result.shaders[0]
+            .as_ref()
+            .unwrap()
+            .contains("osc(st, 3.0, 8.0,")
     );
 }
 

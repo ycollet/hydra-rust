@@ -215,7 +215,7 @@ the compiled shader. Usable anywhere a plain number is expected.
 | `mouse.x`, `mouse.y` | `iMouse.x`, `iMouse.y` | Same values, object-property form |
 | `width`, `height` | `iResolution.x`, `iResolution.y` | Canvas resolution in pixels |
 | `innerWidth`, `innerHeight` / `window.innerWidth`, `window.innerHeight` | `iResolution.x`, `iResolution.y` | Same values, DOM-style form |
-| `a.fft[i]` | `iFft[i]` | **`audio` feature only** — see [below](#feature-audio) |
+| `a.fft[i]` | `iFft[i]` | **`fft` feature** (included by `audio`) — see [below](#feature-audio) |
 
 Example:
 
@@ -245,7 +245,7 @@ compiles to a step function that cycles through the values once per beat, one va
 | `.fast(speed)` | Multiplies the cycle rate (default `1`) |
 | `.smooth()` / `.smooth(amount)` | Linearly interpolates between the current and next value over an `amount`-beat-wide window (default `1`) |
 | `.offset(amount)` | Shifts the pattern's phase (default `0.5`) |
-| `.ease(name)` | Accepted (any curve name), but only toggles smoothing on if not already smoothed — always linear, no named easing curves |
+| `.ease(name='linear')` | Named interpolation: `linear`, `sin`, or `easeIn`/`easeOut`/`easeInOut` with `Quad`, `Cubic`, `Quart`, or `Quint`. Resets smoothing to `1`; unknown names log a warning and leave the pattern unchanged |
 | `.fit(lo, hi)` | Remaps the array's own `[min, max]` into `[lo, hi]` (default `0, 1`); resets `.offset()` but keeps `.fast()`/`.smooth()` |
 | `.reverse()` | Returns the reversed array for chaining, matching JS's `Array.prototype.reverse()` (non-mutating) |
 
@@ -290,7 +290,16 @@ The microphone only opens once a script actually uses one of these (a setter, or
 | `a.setCutoff(c)` | Zeroes out bin values below this noise-floor threshold (default `0`) | `a.setCutoff(0.15)` |
 | `a.setScale(s)` | Multiplies every bin's value (default `1`) | `a.setScale(2)` |
 | `a.setSmooth(s)` | Exponential smoothing between frames, `0`-`1` (default `0.4`) | `a.setSmooth(0.8)` |
+| `a.settings[i].cutoff` / `.scale` / `.smooth` | Reads or sets one active bin's static numeric setting | `a.settings[0].scale = 3` |
 | `a.show()` / `a.hide()` | Shows/hides a small on-screen bar-graph overlay of the current FFT bins | `a.show()` |
+
+`a.settings.length` returns the active bin count (maximum 8). Global
+setters update every bin; `setBins` resets settings to current global
+defaults and clears smoothing history. The `fft` feature alone registers
+this API for host-fed audio; only `audio` enables microphone capture.
+The desktop and plugin evaluate against their current settings so reads
+remain correct between evaluations. Embedding hosts can do the same via
+`eval_with_audio_settings(code, analyzer.settings())`.
 
 ## Feature: `image_url`
 
@@ -314,20 +323,23 @@ cargo run --features midi --bin hydra
 
 A native port of the [hydra-midi](https://github.com/arnoson/hydra-midi) community
 extension's API — real hydra.js has no MIDI support in its own core. Note names use standard
-scientific-pitch-notation/General-MIDI numbering (`"C4"` is 60, middle C). All MIDI channels
-and input devices are merged into one rather than filtered separately.
+scientific-pitch-notation/General-MIDI numbering (`"C4"` is 60, middle C).
+Channels are zero-based (`0`–`15`), inputs accept a zero-based index or an
+exact port name, and `'*'` selects any channel/input (the default).
+Notes and CC indices also support `'*'` to read the latest matching event.
 
 | Function | Description | Example |
 |---|---|---|
-| `note(nameOrNumber[, channel])` | A chainable gate: `1` while the note is held, `0` otherwise (not velocity). `channel` is accepted but ignored | `osc().invert(note(60)).out()` |
+| `note(nameOrNumber[, channel[, input]])` | A chainable gate: `1` while the note is held, `0` otherwise (not velocity) | `osc().invert(note(60, 0, 'Keys')).out()` |
 | `note(...).velocity()` | The note's last velocity, `0`-`1` (`0` once released) | `osc(60, 0.1, note("C4").velocity()).out()` |
 | `note(...).adsr(a, d, s, r)` | An ADSR envelope (`a`/`d`/`r` in milliseconds, `s` a `0`-`1` sustain level), keyed to that note's on/off events, multiplied by the velocity captured at trigger time | `solid(1, 0, 0, note(60).adsr(50, 100, 0.7, 300)).out()` |
-| `cc(index[, channel])` | A chainable, raw CC value normalized to `0`-`1` | `osc().rotate(cc(1)).out()` |
+| `cc(index[, channel[, input]])` | A chainable, raw CC value normalized to `0`-`1` | `osc().rotate(cc(1)).out()` |
 | `cc(...).smooth(factor=0.01)` | Exponential slew (temporal smoothing) of the CC value | `osc(60, 0.1, cc(1).smooth(0.2)).out()` |
 | `aft()` | Channel-wide aftertouch (MIDI channel pressure), normalized to `0`-`1` | `osc().brightness(aft()).out()` |
 | `aft(nameOrNumber[, channel])` | Per-note polyphonic aftertouch (key pressure) for that note, normalized to `0`-`1` — passing a note is what distinguishes this from channel-wide `aft()`, matching real hydra-midi | `osc(60, 0.1, aft(60)).out()` |
 | `.range(lo, hi)` (on `note`/`cc`/`aft`/`.velocity()`) | Linearly remaps a `0`-`1` value into `[lo, hi]` | `osc().rotate(cc(1).range(0, 6.28)).out()` |
 | `.scale(factor)` (on `note`/`cc`/`aft`/`.velocity()`) | Multiplies a value | `osc(1, 1, note(60).scale(0.5)).out()` |
+| `.value(v => expression)` | Compiles a pure inline numeric transform into live GLSL, including captured constants and shader math | `osc(cc(1).value(v => v * 20 + time)).out()` |
 | `_note(nameOrNumber[, channel])` | Plain (non-chainable) equivalent of `note(...)`, for use inside a `()=>` wrapper | `osc(1, 1, _note(60) * 0.5).out()` |
 | `_cc(index[, channel])` | Plain (non-chainable) equivalent of `cc(...)` | `osc(1, 1, _cc(1) * 6.28).out()` |
 | `_noteVelocity(nameOrNumber[, channel])` | Plain (non-chainable) equivalent of `note(...).velocity()` | `osc(1, 1, _noteVelocity(60)).out()` |
@@ -335,7 +347,19 @@ and input devices are merged into one rather than filtered separately.
 | `midi.start()` | Connects to every available MIDI input device — required before anything above reacts to input. Returns `midi` again, so `midi.start().show()` still parses | `midi.start()` |
 | `midi.pause()` | Disconnects from all MIDI input devices | `midi.pause()` |
 | `midi.show()` / `.hide()` | Shows/hides an on-screen overlay listing currently-held notes (with velocity) and non-zero CC values — a "current state" snapshot rather than real hydra-midi's own scrolling raw-message log | `midi.show()` |
-| `midi.channel(n)` / `.input(n)` | Accepted, logged, ignored — channels/inputs are merged (see above) | `midi.channel(0)` |
+| `midi.channel(n)` / `.input(n)` | Returns a reusable selector without changing global defaults; explicit function arguments override it | `midi.input('Keys').channel(0).cc(74)` |
+| `midi.start({channel, input})` | Sets defaults for values created in this evaluation and starts input; other options are rejected | `midi.start({channel: 0, input: 'Keys'})` |
+
+Selectors also apply to aftertouch, `_note`/`_cc`/`_noteVelocity`/`_aft`,
+smoothing, and ADSR triggers. There are 64 filtered/wildcard value slots
+and 16 envelope slots per evaluated script; excess allocations fail
+explicitly. Plugins preserve MIDI channels but expose only one routed
+input, index `0`, named `"host"`, not the original external devices.
+
+`.value()` is symbolic, not a per-frame CPU callback. It accepts pure
+single-parameter expression callbacks, not blocks, assignments, runtime
+branching, arbitrary function calls, or side effects. Put CC smoothing
+before `.value()`; smoothing an arbitrary transformed result is unsupported.
 
 ## Feature: `osc`
 
@@ -352,8 +376,7 @@ source function, so a bare `osc` identifier would collide with it.
 
 Real hydra-osc/atom-hydra expose an `EventEmitter`-style `_osc.on(address, callback)`, running
 an arbitrary per-message JS callback. hydra-rust scripts compile to one static GLSL expression
-per chain (the same reason MIDI's `.value(fn)` isn't implemented either — see the `midi`
-feature section above) — there's nowhere to run a per-frame Rhai closure. Instead,
+per chain rather than running arbitrary per-message callbacks. Instead,
 `_osc.get(address[, argIndex])` returns a reactive value read directly into a GLSL uniform,
 the same value-not-callback shape `note()`/`cc()` already use for MIDI. Each distinct
 `_osc.get(...)` call site claims one slot from a small fixed pool (32 total), assigned
@@ -478,7 +501,7 @@ detail on the `.bhr`/`.shr` formats.
 A handful of functions are registered (so a script calling them doesn't hard-error) but don't
 do anything real, or only partially implement real hydra.js/community-extension behavior —
 `initScreen`, `P5(...)`, `Scene(...)`,
-`loadScript`, `ease` (non-linear curves), `.value(fn)`, and a few others. See
+`loadScript`, and a few others. See
 [README.md's stub-function table](README.md#stub-functions-accepted-but-not-yet-implemented)
 for the complete, currently-accurate list with rationale for each, and SPEC.md §9 for the
 same list in the language-spec context.

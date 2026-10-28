@@ -598,7 +598,11 @@ impl HydraApp {
             self.error = None;
             return;
         }
-        match hydra_rust::eval(code) {
+        #[cfg(feature = "audio")]
+        let result = hydra_rust::eval_with_audio_settings(code, self.audio_manager.settings());
+        #[cfg(not(feature = "audio"))]
+        let result = hydra_rust::eval(code);
+        match result {
             Ok(result) => {
                 if let Some(ref td) = result.text_data {
                     renderer.upload_text(td);
@@ -669,6 +673,18 @@ impl HydraApp {
                             AudioRequest::SetCutoff(c) => self.audio_manager.set_cutoff(*c),
                             AudioRequest::SetScale(s) => self.audio_manager.set_scale(*s),
                             AudioRequest::SetSmooth(s) => self.audio_manager.set_smooth(*s),
+                            AudioRequest::SetBin {
+                                index,
+                                property,
+                                value,
+                            } => {
+                                if let Err(error) =
+                                    self.audio_manager.set_bin(*index, *property, *value)
+                                {
+                                    log::error!("{error}");
+                                    self.error = Some((error, Instant::now()));
+                                }
+                            }
                             AudioRequest::Show => self.audio_overlay_visible = true,
                             AudioRequest::Hide => self.audio_overlay_visible = false,
                         }
@@ -685,6 +701,25 @@ impl HydraApp {
                         MidiRequest::Pause => self.midi_manager.pause(),
                         MidiRequest::SetCcSmooth { index, factor } => {
                             self.midi_manager.set_cc_smooth(*index, *factor);
+                        }
+                        MidiRequest::Bind { slot, binding } => {
+                            if let Err(error) = self.midi_manager.bind(*slot, binding.clone()) {
+                                log::error!("{error}");
+                                self.error = Some((error, Instant::now()));
+                            }
+                        }
+                        MidiRequest::FilteredAdsrSlot {
+                            slot,
+                            note,
+                            filter,
+                            adsr,
+                        } => {
+                            self.midi_manager.set_filtered_adsr_slot(
+                                *slot,
+                                *note,
+                                filter.clone(),
+                                *adsr,
+                            );
                         }
                         MidiRequest::AdsrSlot {
                             slot,
@@ -851,6 +886,7 @@ impl HydraApp {
         #[cfg(not(feature = "midi"))]
         let midi_frame = {
             struct EmptyMidiFrame {
+                values: [f32; hydra_rust::midi::NUM_MIDI_VALUES],
                 note: [f32; hydra_rust::midi::NUM_MIDI_NOTES],
                 velocity: [f32; hydra_rust::midi::NUM_MIDI_NOTES],
                 cc: [f32; hydra_rust::midi::NUM_MIDI_CC],
@@ -860,6 +896,7 @@ impl HydraApp {
                 channel_aftertouch: f32,
             }
             EmptyMidiFrame {
+                values: [0.0; hydra_rust::midi::NUM_MIDI_VALUES],
                 note: [0.0; hydra_rust::midi::NUM_MIDI_NOTES],
                 velocity: [0.0; hydra_rust::midi::NUM_MIDI_NOTES],
                 cc: [0.0; hydra_rust::midi::NUM_MIDI_CC],
@@ -914,6 +951,7 @@ impl HydraApp {
             midi_envelope: midi_frame.envelope,
             midi_aftertouch: midi_frame.aftertouch,
             midi_channel_aftertouch: midi_frame.channel_aftertouch,
+            midi_values: midi_frame.values,
             osc: osc_frame_values,
         };
 

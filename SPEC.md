@@ -80,7 +80,7 @@ script does anyway).
 | `mouse.x`, `mouse.y` | `iMouse.x`, `iMouse.y` | Same values, object-property form matching real hydra.js. `mouse` itself is a marker value, not reassignable in any useful way. |
 | `width`, `height` | `iResolution.x`, `iResolution.y` | Constants — canvas resolution in pixels. |
 | `window.innerWidth`, `window.innerHeight` / bare `innerWidth`, `innerHeight` | `iResolution.x`, `iResolution.y` | Same values, DOM-style form some sketches use instead (bare, since in a real browser `window` is the global object). |
-| `a.fft[i]` | `iFft[i]` | **`audio` feature only.** `i` may be an integer literal (clamped to `[0, NUM_FFT_BINS-1]`, currently 8 bins) or itself a reactive `GlslExpr`, in which case the index becomes `int(mod(expr, 8.0))` in GLSL. |
+| `a.fft[i]` | `iFft[i]` | **`fft` feature** (included by `audio`). `i` may be an integer literal (clamped to `[0, NUM_FFT_BINS-1]`, currently 8 bins) or itself a reactive `GlslExpr`, in which case the index becomes `int(mod(expr, 8.0))` in GLSL. |
 
 Arithmetic between these values and plain numbers works via operator
 overloads registered on the underlying `GlslExpr` wrapper type (`+ - * / %`,
@@ -564,8 +564,7 @@ code. What's still unhandled — `await`/`async`/`new`/`var`/`null` (reserved
 Rhai keywords colliding with real JS syntax, mostly from module-loading code
 outside the scope of a visual patch DSL), `function(...) {...}` expression
 syntax (same "block body doesn't reduce to an expression" limitation as
-multi-statement arrows), and `a.settings[i].cutoff = ...` (a bigger,
-not-yet-designed indexable-config feature) — is left as syntax or semantic
+multi-statement arrows) — is left as syntax or semantic
 errors from `eval()`, surfaced to the caller as `Err(String)`.
 
 ## 5. Buffers, sources, and text
@@ -786,7 +785,7 @@ itself is a permanent no-op, see README.md):
 | `render()` / `render(bufIdx)` | Display mode (see §2) |
 | `hush()` | Clear all buffers (see §2) |
 | `random()` / `random(...)` | One-shot pseudo-random `f64` in `[0, 1)`, called once at script-eval time (target of `Math.random()`, see §4). Accepts and ignores 0-2 extra arguments, matching real JS's own excess-argument tolerance (real `Math.random()` takes none either) rather than implementing an actual ranged random some sketches seem to expect |
-| `setResolution(w, h)` | Overrides the render buffers' own resolution, independent of the actual window size - the final display is still stretched to fill the window regardless (the classic hydra.js low-res/pixelation trick). Only applies when `w`/`h` are *statically* known numbers (clamped to `1..=4096`); a reactive argument (e.g. `setResolution(window.innerWidth, window.innerHeight)`, a common real-sketch idiom) is treated as "no override" instead, since there's no per-frame callback here to re-evaluate a reactive expression against - the same limitation as MIDI's `.value(fn)` (§6.1). Sticky: an evaluation that doesn't call `setResolution` at all leaves a previous override in place, rather than reverting to the window size |
+| `setResolution(w, h)` | Overrides the render buffers' own resolution, independent of the actual window size - the final display is still stretched to fill the window regardless (the classic hydra.js low-res/pixelation trick). Only applies when `w`/`h` are *statically* known numbers (clamped to `1..=4096`); reactive arguments (e.g. `setResolution(window.innerWidth, window.innerHeight)`) are treated as "no override" because render-target allocation is not a shader expression. Sticky: an evaluation that doesn't call `setResolution` at all leaves a previous override in place, rather than reverting to the window size |
 | `o0-o3.setNearest()` / `.setLinear()` / `.setMode("nearest"\|"linear")` | Sets that buffer's texture sampling mode (both its ping-pong textures). Sticky like `setResolution`, unlike `render_mode` (§2) - matches real hydra.js, where the WebGL texture object isn't recreated on a re-eval either, so not calling these again on a later evaluation leaves whatever was last set alone. An unrecognized `setMode(...)` string is logged and ignored, not a hard error |
 | `broadcastStream(port)` (`stream` feature) | Broadcasts this sketch's own rendered output - whatever `render()` (§2) currently displays - to any number of `initStream` (§5) connections on `port`, over WebRTC. Each viewer gets its own `RTCPeerConnection` (WebRTC has no multi-peer connection concept), but all share one `ffmpeg` encode - each encoded RTP packet is cloned and fanned out (`rtc::rtp::packet::Packet` derives `Clone`; `TrackLocalStaticRTP::write_rtp` takes `&self`, safe to call per-viewer without extra synchronization beyond the viewer-registry lock). A disconnected viewer's failed `write_rtp` prunes it from the registry; `ffmpeg` itself is only kept running while at least one viewer is connected. Captured off the GPU at the real window resolution, but a frame wider than 1280px (`broadcast.rs`'s `MAX_BROADCAST_WIDTH`) is downscaled by `ffmpeg` before the VP8 encode step, not sent at native resolution - found necessary via real testing, since realtime software encoding of a Retina display's actual (2x+) framebuffer resolution badly overwhelmed the CPU with no output ever reaching the peer. Not a real hydra.js function (unlike `initStream`, which mirrors one) - registered only behind `stream`, a plain "Function not found" without it, same as `note()`/`midi.*`. A second call while already broadcasting is a no-op (call `stopBroadcast()` first to change ports). See `broadcast.rs` |
 | `stopBroadcast()` (`stream` feature) | Stops broadcasting |
@@ -803,19 +802,21 @@ not found").
 
 | Function | Description |
 |---|---|
-| `note(nameOrNumber[, channel])` | A chainable gate: `1` while the note is held, `0` otherwise (not velocity). `channel` (and a real hydra-midi `input` argument) is accepted but ignored - see below |
+| `note(nameOrNumber[, channel[, input]])` | A chainable gate: `1` while the note is held, `0` otherwise (not velocity). Channels use indices `0`–`15`; inputs accept a zero-based port index or exact name; `'*'` means any note/channel/input |
 | `.velocity()` (on `note(...)`) | The note's last velocity, `0`-`1`, `0` once released |
 | `.adsr(a, d, s, r)` (on `note(...)`) | An ADSR envelope (`a`/`d`/`r` in milliseconds, `s` a `0`-`1` sustain level) keyed to that note's on/off events, multiplied by the velocity captured when the note was triggered - ported from `hydra-midi`'s `lib/Envelope.ts`. A small fixed pool of 16 concurrent envelopes (`midi::NUM_MIDI_ENVELOPES`) is available per script |
-| `cc(index[, channel])` | A chainable, raw CC value normalized to `0`-`1` |
+| `cc(index[, channel[, input]])` | A chainable, raw CC value normalized to `0`-`1`, with the same selectors and wildcards as `note` |
 | `.smooth(factor=0.01)` (on `cc(...)`) | Exponential slew (temporal smoothing) of the CC value |
 | `aft()` | A chainable, channel-wide aftertouch value (MIDI status `0xD0`, channel pressure), normalized `0`-`1` |
 | `aft(nameOrNumber[, channel])` | A chainable, per-note polyphonic aftertouch value (status `0xA0`, key pressure) for that note, normalized `0`-`1` - the *presence* of a note argument is what distinguishes this from channel-wide `aft()`, matching real hydra-midi exactly |
 | `.range(lo, hi)` | Linearly remaps a `0`-`1` value (any of the above) into `[lo, hi]` |
 | `.scale(factor)` | Multiplies a value (any of the above) |
+| `.value(v => expression)` | Compiles a pure inline one-parameter numeric callback to live GLSL. Supports captured constants and shader math, including `time`; rejects blocks, assignments, arbitrary calls, and runtime-only branching |
 | `_note(...)` / `_cc(...)` / `_noteVelocity(...)` / `_aft(...)` | The plain (non-chainable) equivalents of `note(...)`, `cc(...)`, `note(...).velocity()`, and `aft(...)`, for use inside a `()=>` wrapper (stripped by `arrow.rs`, see §4 step 14) |
 | `midi.start()` / `.pause()` | Connects to (or disconnects from) every available MIDI input port - see below. `.start()` returns `midi` again, so `midi.start().show()` (the documented real hydra-midi idiom) still parses |
 | `midi.show()` / `.hide()` | Shows/hides an egui overlay (`HydraApp::show_midi_overlay`) listing currently-held notes (with velocity) and non-zero CC values - a "current state" snapshot rather than real hydra-midi's own scrolling raw-message log (see below) |
-| `midi.channel(n)` / `.input(n)` | Accepted, logged, ignored - see below |
+| `midi.channel(n)` / `.input(n)` | Returns a reusable selector with local channel/input defaults, not a global mutation; chain `.input('Keys').channel(0).note(60)` or override with explicit call arguments |
+| `midi.start({channel, input})` | Starts input and sets defaults for values created during this evaluation; other options are rejected |
 
 Note names use standard scientific-pitch-notation/General-MIDI numbering
 (`"C4"` -> 60, middle C), ported from `hydra-midi`'s own
@@ -823,23 +824,29 @@ Note names use standard scientific-pitch-notation/General-MIDI numbering
 *not* what that file's own doc comment claims (`"C3"` as middle C); the
 comment contradicts its own code, so this port follows the code.
 
-**Deliberate simplifications**, each a "no worse than a hard error"
-trade-off matching this project's existing precedent for things it can't
-fully implement (e.g. `ease()`, §7):
-- **All MIDI channels and input devices are merged into one.** `channel`/
-  `midi.channel(n)`/`.input(n)` are accepted but ignored, rather than
-  faithfully filtering per real hydra-midi's own wildcard-keyed system -
-  a reasonable trade for a typical one-controller setup.
+Unfiltered fixed note/CC values retain their original uniform arrays.
+Filtered or wildcard values use up to 64 scalar `iMidiValue` slots per
+evaluation, with matching performed against per-input/per-channel event
+history before upload. Wildcards read the latest matching event. Filters
+also gate ADSR triggers and maintain independent filtered CC smoothing.
+Slot IDs are local to an evaluation, as with envelopes; evaluate all
+affected output buffers together to avoid reusing slots still referenced
+by retained shaders from a previous evaluation.
+The plugin preserves channels and exposes its one host-routed input as
+index `0`, name `"host"`; it cannot identify devices hidden by DAW routing.
+
+**Deliberate differences and limits:**
 - **`midi.show()`'s overlay is a state snapshot, not a message log.** Real
   hydra-midi's monitor scrolls raw incoming MIDI messages as they arrive;
   this shows the currently-held notes and non-zero CC values instead
   (`MidiFrame`'s own per-frame snapshot, already computed for the GLSL
   uniforms), which is simpler to implement and just as useful for
   confirming a controller is connected and being read correctly.
-- **`.value(fn)` isn't implemented.** Each hydra-rust chain compiles to a
-  *static* GLSL expression once, so there's nowhere to run an arbitrary
-  Rhai closure per-frame the way a real per-frame JS callback would;
-  calling `.value(...)` cleanly fails as "Function not found".
+- **`.value()` is symbolic, not a per-frame CPU callback.** Its pure inline
+  expression is compiled once with a reactive argument, then evaluated by
+  GLSL every frame. Unsupported callbacks fail explicitly. Use
+  `cc(...).smooth(...).value(...)`; smoothing an arbitrary transformed
+  expression is not supported.
 - **`.adsr(...)`'s envelope is multiplied by the velocity captured at
   trigger time, held through the whole envelope (including release)** -
   real hydra-midi's own JS instead reads the note's *live* velocity every
@@ -861,10 +868,10 @@ beat (not once per raw second — ported from real hydra.js's
 | Modifier | Effect |
 |---|---|
 | `.fast(speed)` | Multiplies the cycle rate (default `1`) |
-| `.smooth()` / `.smooth(amount)` | Linearly interpolates between the current and next value over an `amount`-beat-wide window (default `1`), ported from real hydra.js's `getValue` formula. Faithful except that a chained `.ease(name)` still always blends linearly, never the named curve. |
+| `.smooth()` / `.smooth(amount)` | Interpolates between the current and next value over an `amount`-beat-wide window (default `1`), using the selected easing curve or linear interpolation by default |
 | `.offset(amount)` | Shifts the pattern's phase (default `0.5`, matching real hydra.js) |
-| `.ease(name)` | Accepted (any curve name) but only toggles smoothing on (`amount = 1`) if not already smoothed — the interpolation itself is always linear; no named easing curves are implemented. |
-| `.fit(lo, hi)` | Remaps the array's own `[min, max]` into `[lo, hi]` (default `0, 1`), matching real hydra.js's `Array.prototype.fit`. Faithfully resets `.offset()` (real hydra.js's `fit` doesn't carry it over) while preserving `.fast()`/`.smooth()`. |
+| `.ease(name='linear')` | Selects `linear`, `sin`, or `easeIn`/`easeOut`/`easeInOut` with `Quad`, `Cubic`, `Quart`, or `Quint`; resets the smoothing window to `1`, matching upstream. Unknown names are logged and leave the pattern unchanged |
+| `.fit(lo, hi)` | Remaps the array's own `[min, max]` into `[lo, hi]` (default `0, 1`), matching real hydra.js's `Array.prototype.fit`. Resets `.offset()` while preserving `.fast()`, `.smooth()`, and the easing curve |
 
 `.reverse()` (Rhai's own array method, overridden here) returns the
 reversed array for chaining (`[0,1].reverse().smooth()`), matching JS's
@@ -894,6 +901,16 @@ registered (see §9), so they never hard-error either way; without
 `image_url`/`video`/`stream` they're just no-ops instead of a real
 fetch/decode/connect.
 
+The `fft` feature alone registers the audio scripting API for host-fed
+audio without CPAL capture. `a.settings[i].cutoff`, `.scale`, and `.smooth`
+are readable and writable static numeric settings for active bins;
+`a.settings.length` is the bin count (maximum 8). Global setters update
+every bin, and `setBins` resets settings to global defaults and clears
+smoothing history. The existing magnitude/gain normalization is unchanged.
+Hosts can pass `AudioAnalyzer::settings()` (or `AudioManager::settings()`)
+to `eval_with_audio_settings()` to preserve reads across evaluations;
+plain `eval()` starts with default settings.
+
 Without `image_url`, `initImage`'s network fetch obviously can't happen at
 all - but even *with* it enabled, note that `eval()` itself never touches
 the network: it only records an `InitImage` request (see `SourceRequest`
@@ -912,14 +929,12 @@ there's one place to update). As of this writing it covers `initScreen`
 `initVideo`/`initStream` are real implementations behind `image_url`/
 `video`/`stream` respectively, see §8; `setResolution`/`o0-o3.setNearest()`/
 `.setLinear()`/`.setMode()` are real too, see §6), `screencap`,
-`ease` (patterns, see §7), and `loadScript` (see §6 for the community-extension
+and `loadScript` (see §6 for the community-extension
 functions ported natively instead).
 
-Not registered at all, and not silently tolerated: `a.settings[i].cutoff =
-...` (real hydra.js exposes indexable, mutable per-bin audio config; this
-would need a materially different, indexable settings type — bigger than
-the flat `setBins`/`setCutoff`/etc. setters here), multi-param or
-block-bodied arrow functions, `var`/`new`/`async`/`await`/`null` as used in
+Not registered at all, and not silently tolerated: general JS callback
+execution outside the supported shader-expression and setup-time closure
+forms, and `var`/`new`/`async`/`await`/`null` as used in
 JS module-loading or class-based code.
 
 ## 10. Standalone binary

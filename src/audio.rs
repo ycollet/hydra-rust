@@ -1,5 +1,90 @@
 pub const NUM_FFT_BINS: usize = 8;
 
+#[cfg(feature = "fft")]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BinSettings {
+    pub cutoff: f32,
+    pub scale: f32,
+    pub smooth: f32,
+}
+
+#[cfg(feature = "fft")]
+impl Default for BinSettings {
+    fn default() -> Self {
+        Self {
+            cutoff: 0.0,
+            scale: 1.0,
+            smooth: 0.4,
+        }
+    }
+}
+
+#[cfg(feature = "fft")]
+#[derive(Debug, Clone, Copy)]
+pub enum BinProperty {
+    Cutoff,
+    Scale,
+    Smooth,
+}
+
+#[cfg(feature = "fft")]
+#[derive(Debug, Clone)]
+pub struct AudioSettings {
+    pub(crate) bins: usize,
+    pub(crate) defaults: BinSettings,
+    pub(crate) settings: [BinSettings; NUM_FFT_BINS],
+}
+
+#[cfg(feature = "fft")]
+impl Default for AudioSettings {
+    fn default() -> Self {
+        Self {
+            bins: 4,
+            defaults: BinSettings::default(),
+            settings: [BinSettings::default(); NUM_FFT_BINS],
+        }
+    }
+}
+
+#[cfg(feature = "fft")]
+impl AudioSettings {
+    pub fn set_bins(&mut self, n: usize) {
+        self.bins = n.clamp(1, NUM_FFT_BINS);
+        self.settings.fill(self.defaults);
+    }
+
+    pub fn set(
+        &mut self,
+        index: Option<usize>,
+        property: BinProperty,
+        value: f32,
+    ) -> Result<(), String> {
+        if !value.is_finite() {
+            return Err("Audio settings must be finite numbers".into());
+        }
+        let update = |settings: &mut BinSettings| match property {
+            BinProperty::Cutoff => settings.cutoff = value.max(0.0),
+            BinProperty::Scale => settings.scale = value,
+            BinProperty::Smooth => settings.smooth = value.clamp(0.0, 1.0),
+        };
+        if let Some(index) = index {
+            if index >= self.bins {
+                return Err(format!(
+                    "Audio bin index {index} is outside 0..{}",
+                    self.bins
+                ));
+            }
+            update(&mut self.settings[index]);
+        } else {
+            update(&mut self.defaults);
+            for settings in &mut self.settings {
+                update(settings);
+            }
+        }
+        Ok(())
+    }
+}
+
 // The FFT-reactive pipeline (`AudioBuffer`/`AudioAnalyzer`) is split out
 // from mic capture (`AudioManager`, below) so a host other than this
 // crate's own cpal-based desktop app - e.g. the `hydra-plugin` crate,
@@ -12,7 +97,7 @@ mod analysis {
 
     use rustfft::{Fft, FftPlanner, num_complex::Complex};
 
-    use super::NUM_FFT_BINS;
+    use super::{AudioSettings, BinProperty, NUM_FFT_BINS};
 
     pub(super) const FFT_SIZE: usize = 1024;
 
@@ -69,10 +154,7 @@ mod analysis {
         /// call (once per rendered frame) would be pure waste.
         window: [f32; FFT_SIZE],
         smoothed: [f32; NUM_FFT_BINS],
-        num_bins: usize,
-        cutoff: f32,
-        scale: f32,
-        smooth: f32,
+        settings: AudioSettings,
     }
 
     impl Default for AudioAnalyzer {
@@ -90,27 +172,44 @@ mod analysis {
                 scratch: vec![Complex { re: 0.0, im: 0.0 }; FFT_SIZE],
                 window: std::array::from_fn(|i| hann(i, FFT_SIZE)),
                 smoothed: [0.0; NUM_FFT_BINS],
-                num_bins: 4,
-                cutoff: 0.0,
-                scale: 1.0,
-                smooth: 0.4,
+                settings: AudioSettings::default(),
             }
         }
 
         pub fn set_bins(&mut self, n: usize) {
-            self.num_bins = n.clamp(1, NUM_FFT_BINS);
+            self.settings.set_bins(n);
+            self.smoothed.fill(0.0);
+        }
+
+        pub fn settings(&self) -> &AudioSettings {
+            &self.settings
         }
 
         pub fn set_cutoff(&mut self, c: f32) {
-            self.cutoff = c.max(0.0);
+            if let Err(error) = self.settings.set(None, BinProperty::Cutoff, c) {
+                log::error!("{error}");
+            }
         }
 
         pub fn set_scale(&mut self, s: f32) {
-            self.scale = s;
+            if let Err(error) = self.settings.set(None, BinProperty::Scale, s) {
+                log::error!("{error}");
+            }
         }
 
         pub fn set_smooth(&mut self, s: f32) {
-            self.smooth = s.clamp(0.0, 1.0);
+            if let Err(error) = self.settings.set(None, BinProperty::Smooth, s) {
+                log::error!("{error}");
+            }
+        }
+
+        pub fn set_bin(
+            &mut self,
+            index: usize,
+            property: BinProperty,
+            value: f32,
+        ) -> Result<(), String> {
+            self.settings.set(Some(index), property, value)
         }
 
         pub fn poll(&mut self, buffer: &AudioBuffer) -> [f32; NUM_FFT_BINS] {
@@ -139,17 +238,19 @@ mod analysis {
                 .map(|c| c.norm() / FFT_SIZE as f32)
                 .collect();
 
-            let bins = reduce_to_bins(&magnitudes, self.num_bins);
+            let bins = reduce_to_bins(&magnitudes, self.settings.bins);
 
             let mut out = [0.0f32; NUM_FFT_BINS];
-            for i in 0..self.num_bins {
+            for i in 0..self.settings.bins {
+                let settings = self.settings.settings[i];
                 let raw = bins[i];
-                let gated = if raw < self.cutoff {
+                let gated = if raw < settings.cutoff {
                     0.0
                 } else {
-                    raw * self.scale
+                    raw * settings.scale
                 };
-                self.smoothed[i] = self.smoothed[i] * self.smooth + gated * (1.0 - self.smooth);
+                self.smoothed[i] =
+                    self.smoothed[i] * settings.smooth + gated * (1.0 - settings.smooth);
                 out[i] = self.smoothed[i];
             }
             out
@@ -202,6 +303,30 @@ mod analysis {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn per_bin_settings_affect_only_the_selected_frequency_band() {
+            let buffer = AudioBuffer::new();
+            let samples: Vec<_> = (0..FFT_SIZE).map(|i| (i as f32 * 0.17).sin()).collect();
+            buffer.push(&samples, 1);
+            let mut analyzer = AudioAnalyzer::new();
+            analyzer.set_smooth(0.0);
+            let baseline = analyzer.poll(&buffer);
+            assert!(baseline[1] > 0.0);
+            analyzer.set_bin(1, BinProperty::Scale, 3.0).unwrap();
+            let scaled = analyzer.poll(&buffer);
+            assert!((scaled[1] - baseline[1] * 3.0).abs() < 1e-6);
+            for i in [0, 2, 3] {
+                assert_eq!(scaled[i], baseline[i]);
+            }
+            analyzer.set_bin(1, BinProperty::Smooth, 1.0).unwrap();
+            analyzer.set_bin(1, BinProperty::Cutoff, 100.0).unwrap();
+            assert_eq!(analyzer.poll(&buffer)[1], scaled[1]);
+            analyzer.set_smooth(0.0);
+            assert_eq!(analyzer.poll(&buffer)[1], 0.0);
+            analyzer.set_bins(4);
+            assert_eq!(analyzer.poll(&buffer)[1], baseline[1]);
+        }
 
         #[test]
         fn pushes_keep_only_the_newest_samples_without_growing_the_buffer() {
@@ -365,6 +490,10 @@ mod capture {
             self.analyzer.set_bins(n);
         }
 
+        pub fn settings(&self) -> &super::AudioSettings {
+            self.analyzer.settings()
+        }
+
         pub fn set_cutoff(&mut self, c: f32) {
             self.analyzer.set_cutoff(c);
         }
@@ -375,6 +504,15 @@ mod capture {
 
         pub fn set_smooth(&mut self, s: f32) {
             self.analyzer.set_smooth(s);
+        }
+
+        pub fn set_bin(
+            &mut self,
+            index: usize,
+            property: super::BinProperty,
+            value: f32,
+        ) -> Result<(), String> {
+            self.analyzer.set_bin(index, property, value)
         }
 
         pub fn poll(&mut self) -> [f32; NUM_FFT_BINS] {

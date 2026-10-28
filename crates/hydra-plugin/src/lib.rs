@@ -234,6 +234,16 @@ mod tests {
     fn first_audio_and_midi_callbacks_and_full_buffers_do_not_allocate() {
         let audio = AudioBuffer::new();
         let midi = MidiBridge::new();
+        midi.register_input(1, "Keys");
+        midi.set_filtered_adsr_slot(
+            0,
+            60,
+            hydra_rust::midi::MidiFilter {
+                channel: Some(2),
+                input: hydra_rust::midi::InputFilter::Name("Keys".into()),
+            },
+            [0.0, 0.0, 1.0, 0.0],
+        );
         std::thread::spawn(move || {
             let samples = [0.25; 4096];
             assert_no_alloc::assert_no_alloc(|| {
@@ -245,6 +255,11 @@ mod tests {
                 midi.control_change(1, 0.5);
                 midi.channel_pressure(0.3);
                 midi.note_off(60);
+                midi.note_on_from(1, 2, 60, 0.8);
+                midi.poly_pressure_from(1, 2, 60, 0.4);
+                midi.control_change_from(1, 2, 1, 0.5);
+                midi.channel_pressure_from(1, 2, 0.3);
+                midi.note_off_from(1, 2, 60);
             });
         })
         .join()
@@ -511,6 +526,7 @@ impl HydraGlWindow {
             .as_ref()
             .and_then(|path| std::fs::metadata(path).and_then(|m| m.modified()).ok());
 
+        let mut audio_analyzer = AudioAnalyzer::new();
         let (gl, renderer, render_mode, last_error, egui_painter) = unsafe {
             gl_context.make_current();
             #[allow(clippy::arc_with_non_send_sync)]
@@ -518,7 +534,8 @@ impl HydraGlWindow {
                 gl_context.get_proc_address(s)
             }));
             let mut renderer = ShaderRenderer::new(gl.clone());
-            let (render_mode, last_error) = Self::compile(&mut renderer, code, &midi_bridge);
+            let (render_mode, last_error) =
+                Self::compile(&mut renderer, code, &midi_bridge, &mut audio_analyzer);
             // `egui_glow::Painter` needs its own `glow::Context` handle
             // (a different `glow` crate version than `hydra_rust`'s
             // renderer uses) - both just wrap the same underlying GL
@@ -545,7 +562,7 @@ impl HydraGlWindow {
             last_mtime: mtime,
             render_mode,
             audio_buffer,
-            audio_analyzer: AudioAnalyzer::new(),
+            audio_analyzer,
             midi_bridge,
             midi_poller,
             gui_context,
@@ -577,13 +594,14 @@ impl HydraGlWindow {
         renderer: &mut ShaderRenderer,
         code: &str,
         midi_bridge: &MidiBridge,
+        audio_analyzer: &mut AudioAnalyzer,
     ) -> (RenderMode, Option<String>) {
-        match hydra_rust::eval(code) {
+        match hydra_rust::eval_with_audio_settings(code, audio_analyzer.settings()) {
             Ok(result) => {
                 if let Some(ref td) = result.text_data {
                     renderer.upload_text(td);
                 }
-                let errs = renderer.compile_buffers(&result.shaders, result.render_mode);
+                let mut errs = renderer.compile_buffers(&result.shaders, result.render_mode);
                 if !errs.is_empty() {
                     log::warn!("hydra-plugin: shader compile error(s): {errs:?}");
                 }
@@ -592,10 +610,44 @@ impl HydraGlWindow {
                         renderer.set_buffer_filter(i, *mode);
                     }
                 }
+                for req in &result.audio_requests {
+                    use hydra_rust::AudioRequest;
+                    match *req {
+                        AudioRequest::SetBins(n) => audio_analyzer.set_bins(n),
+                        AudioRequest::SetCutoff(value) => audio_analyzer.set_cutoff(value),
+                        AudioRequest::SetScale(value) => audio_analyzer.set_scale(value),
+                        AudioRequest::SetSmooth(value) => audio_analyzer.set_smooth(value),
+                        AudioRequest::SetBin {
+                            index,
+                            property,
+                            value,
+                        } => {
+                            if let Err(error) = audio_analyzer.set_bin(index, property, value) {
+                                log::error!("hydra-plugin: {error}");
+                                errs.push(error);
+                            }
+                        }
+                        AudioRequest::Show | AudioRequest::Hide => {}
+                    }
+                }
                 for req in &result.midi_requests {
                     match *req {
                         MidiRequest::SetCcSmooth { index, factor } => {
                             midi_bridge.set_cc_smooth(index, factor);
+                        }
+                        MidiRequest::Bind { slot, ref binding } => {
+                            if let Err(error) = midi_bridge.bind(slot, binding.clone()) {
+                                log::error!("hydra-plugin: {error}");
+                                errs.push(error);
+                            }
+                        }
+                        MidiRequest::FilteredAdsrSlot {
+                            slot,
+                            note,
+                            ref filter,
+                            adsr,
+                        } => {
+                            midi_bridge.set_filtered_adsr_slot(slot, note, filter.clone(), adsr);
                         }
                         MidiRequest::AdsrSlot {
                             slot,
@@ -645,7 +697,12 @@ impl HydraGlWindow {
                 .script_path
                 .as_ref()
                 .and_then(|path| std::fs::metadata(path).and_then(|m| m.modified()).ok());
-            let (mode, error) = Self::compile(&mut self.renderer, &state.source, &self.midi_bridge);
+            let (mode, error) = Self::compile(
+                &mut self.renderer,
+                &state.source,
+                &self.midi_bridge,
+                &mut self.audio_analyzer,
+            );
             self.render_mode = mode;
             self.last_error = error;
             self.applied_script = state;
@@ -675,7 +732,12 @@ impl HydraGlWindow {
             };
             *self.script_state.write().expect("Poisoned script state") =
                 self.applied_script.clone();
-            let (render_mode, error) = Self::compile(&mut self.renderer, &code, &self.midi_bridge);
+            let (render_mode, error) = Self::compile(
+                &mut self.renderer,
+                &code,
+                &self.midi_bridge,
+                &mut self.audio_analyzer,
+            );
             self.render_mode = render_mode;
             self.last_error = error;
         }
@@ -880,6 +942,7 @@ impl baseview::WindowHandler for HydraGlWindow {
             midi_envelope: midi_frame.envelope,
             midi_aftertouch: midi_frame.aftertouch,
             midi_channel_aftertouch: midi_frame.channel_aftertouch,
+            midi_values: midi_frame.values,
             osc: [0.0; hydra_rust::osc::NUM_OSC_SLOTS],
         };
 
@@ -1231,25 +1294,45 @@ impl Plugin for HydraPlugin {
         // from `process()`.
         while let Some(event) = context.next_event() {
             match event {
-                NoteEvent::NoteOn { note, velocity, .. } => {
-                    self.midi_bridge.note_on(note, velocity);
+                NoteEvent::NoteOn {
+                    channel,
+                    note,
+                    velocity,
+                    ..
+                } => {
+                    self.midi_bridge.note_on_from(0, channel, note, velocity);
                 }
-                NoteEvent::NoteOff { note, velocity, .. } => {
+                NoteEvent::NoteOff {
+                    channel,
+                    note,
+                    velocity,
+                    ..
+                } => {
                     // A real note-off always clears the note regardless of
                     // its (released) velocity - `MidiBridge::note_on`'s
                     // own velocity<=0 shorthand only matters for the raw
                     // system-MIDI-port path.
                     let _ = velocity;
-                    self.midi_bridge.note_off(note);
+                    self.midi_bridge.note_off_from(0, channel, note);
                 }
-                NoteEvent::PolyPressure { note, pressure, .. } => {
-                    self.midi_bridge.poly_pressure(note, pressure);
+                NoteEvent::PolyPressure {
+                    channel,
+                    note,
+                    pressure,
+                    ..
+                } => {
+                    self.midi_bridge
+                        .poly_pressure_from(0, channel, note, pressure);
                 }
-                NoteEvent::MidiCC { cc, value, .. } => {
-                    self.midi_bridge.control_change(cc, value);
+                NoteEvent::MidiCC {
+                    channel, cc, value, ..
+                } => {
+                    self.midi_bridge.control_change_from(0, channel, cc, value);
                 }
-                NoteEvent::MidiChannelPressure { pressure, .. } => {
-                    self.midi_bridge.channel_pressure(pressure);
+                NoteEvent::MidiChannelPressure {
+                    channel, pressure, ..
+                } => {
+                    self.midi_bridge.channel_pressure_from(0, channel, pressure);
                 }
                 _ => {}
             }
