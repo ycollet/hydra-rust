@@ -73,7 +73,7 @@ Start a chain — no chain to call these on.
 | `checker` | `cols=4, rows=4` | Checkerboard | `checker(8, 8).out()` |
 | `src` | `idx` | Reads buffer/source `idx` as a chain-starting source — `idx` `0`-`3` reads output buffer `o0`-`o3`'s previous frame, `idx` `100`-`103` (i.e. `s0`-`s3`) reads an external source slot (camera/image/GIF/video, see the feature sections below) | `src(0).scale(1.2).out()` |
 | `text` | `content: string` | Rasterizes a string (bundled Hack font) into a shared text texture and returns a chain reading it. Only one call's content is visible at a time (last one wins per evaluation). Accepts an optional second `config` argument for parity with real hydra.js — accepted and ignored | `text("hydra-rust").out()` |
-| `strokeText` / `fillStrokeText` / `strokeFillText` | `content: string` | Aliases of `text(...)` — the `hydra-text.js` extension's stroke/outline variants; not faithful (no separate stroke/outline rendering mode exists here, they render exactly like `text`) | `strokeText("hi").out()` |
+| `strokeText` / `fillStrokeText` / `strokeFillText` | `content: string` | Hollow outlines / filled outlines / filled outlines, using the same shared texture as `text`. Raster-mask approximation, fixed white fill/stroke with width approximately 2% of auto-sized font (minimum two texture pixels); optional config remains ignored | `strokeText("hi").out()` |
 
 The following are ported natively from popular real-world `loadScript()`-loaded community
 extensions (`loadScript` itself is a permanent no-op — see [Known gaps](#known-gaps-and-stub-functions)).
@@ -194,6 +194,7 @@ Use another chain's color output to distort a chain's coordinates. Same `other` 
 | `out` | *(none)* or `bufIdx` | Writes the chain to buffer `o0`, or `bufIdx` (`o0`-`o3`) if given | `osc().out(); shape().out(o1)` |
 | `render` | *(none)* or `bufIdx` | Sets the display mode: all 4 buffers in a 2x2 grid, or just buffer `bufIdx` | `osc().out(); render()` |
 | `hush` | *(none)* | Clears all four buffers and resets `o0` to solid black | `hush()` |
+| `screencap` | *(none)* | Requests one desktop PNG of the next rendered frame, without UI, using the screenshot-shortcut filename. Calls coalesce per evaluation; failed evaluation/shader compilation does not queue a capture. Plugin logs a warning; embedding hosts can handle `EvalResult.screencap` | `osc().out(); screencap()` |
 | `random` | *(none)*, or 0-2 ignored extra args | A one-shot pseudo-random `f64` in `[0, 1)`, computed once at script-eval time (not per-frame) — the target of `Math.random()` | `osc(random() * 100, 0.1, 0).out()` |
 | `setResolution` | `w, h` (must be static numbers, clamped to `1..=4096`) | Overrides the render buffers' own resolution, independent of the window size — the display still stretches to fill the window (the classic low-res/pixelation trick). A reactive argument (e.g. `window.innerWidth`) is treated as "no override" instead, since there's no per-frame callback to re-evaluate it against. Sticky — persists across evaluations that don't call it again | `setResolution(320, 240)` |
 | `o0`-`o3`.`setNearest()` | *(none)* | Sets that buffer's texture sampling to nearest-neighbor (blocky) instead of linear. Sticky, like `setResolution` | `o0.setNearest()` |

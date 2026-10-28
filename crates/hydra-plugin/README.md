@@ -21,6 +21,8 @@ library-embedding path the main crate's README documents for Sova.
 
 ## Status: v1 (functional, with real limitations)
 
+- **Screenshots**: script `screencap()` is currently desktop-only; the plugin
+  logs an explicit warning instead of saving a file.
 - **Script source**: new instances read from the file at the `HYDRA_PLUGIN_SCRIPT`
   environment variable (falls back to a small built-in default sketch if
   unset/unreadable); restored host state uses its saved script snapshot.

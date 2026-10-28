@@ -754,6 +754,7 @@ impl HydraApp {
                     }
                 }
                 if compile_errors.is_empty() {
+                    self.pending_screenshot |= result.screencap;
                     self.error = None;
                 } else {
                     let msg = format!("shader compile error: {}", compile_errors.join("; "));
@@ -988,6 +989,8 @@ impl HydraApp {
                 let gl = painter.gl();
                 let mut buf = vec![0u8; (res_w * res_h * 3) as usize];
                 unsafe {
+                    let alignment = gl.get_parameter_i32(glow::PACK_ALIGNMENT);
+                    gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
                     gl.read_pixels(
                         0,
                         0,
@@ -997,6 +1000,7 @@ impl HydraApp {
                         glow::UNSIGNED_BYTE,
                         glow::PixelPackData::Slice(Some(&mut buf)),
                     );
+                    gl.pixel_store_i32(glow::PACK_ALIGNMENT, alignment);
                 }
                 save_screenshot(res_w, res_h, &buf);
             }

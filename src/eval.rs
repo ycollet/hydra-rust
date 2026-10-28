@@ -168,6 +168,8 @@ pub struct EvalResult {
     pub shaders: [Option<String>; 4],
     pub render_mode: RenderMode,
     pub text_data: Option<TextData>,
+    /// Requests one screenshot after rendering. Evaluation itself never writes a file.
+    pub screencap: bool,
     /// Set only if *this* evaluation's script called `setResolution` with
     /// two statically-known numeric arguments - `None` (including for a
     /// reactive-argument call like `setResolution(window.innerWidth,
@@ -1852,6 +1854,7 @@ struct PatchState {
     buffers: [Option<Node>; 4],
     render_mode: RenderMode,
     text_data: Option<TextData>,
+    screencap: bool,
     render_resolution: Option<(u32, u32)>,
     buffer_filter: [Option<BufferFilter>; 4],
     #[cfg(any(
@@ -2276,6 +2279,7 @@ fn eval_impl(
         buffers: [None, None, None, None],
         render_mode: RenderMode::default(),
         text_data: None,
+        screencap: false,
         render_resolution: None,
         buffer_filter: [None; 4],
         #[cfg(any(
@@ -2369,19 +2373,16 @@ fn eval_impl(
     });
     // s0-s3 constants are 100-103; indices below 100 are internal buffers
     engine.register_fn("src", idx_to_source);
-    // strokeText/fillStrokeText/strokeFillText are the hydra-text.js
-    // community extension's stroke/outline text variants (loadScript-
-    // loaded, so otherwise entirely absent) - aliased to the exact same
-    // rendering as our own text(): "accepted but not faithful" (no
-    // separate stroke-vs-fill rendering mode here), the same treatment
-    // already given to e.g. smooth()'s approximated interpolation curve.
-    // Real hydra.js's text() and friends also accept an optional second
-    // `config` argument (font/style overrides); accepted and ignored,
-    // since there's no per-call font configuration here at all.
-    for name in ["text", "strokeText", "fillStrokeText", "strokeFillText"] {
+    // Per-call configuration is still accepted but ignored.
+    for (name, mode) in [
+        ("text", text::TextMode::Fill),
+        ("strokeText", text::TextMode::Stroke),
+        ("fillStrokeText", text::TextMode::FillStroke),
+        ("strokeFillText", text::TextMode::FillStroke),
+    ] {
         let s = state.clone();
         engine.register_fn(name, move |txt: ImmutableString| -> Node {
-            let data = text::rasterize(&txt);
+            let data = text::rasterize(&txt, mode);
             s.lock().unwrap().text_data = Some(data);
             Node::source("text_src", vec![])
         });
@@ -2389,7 +2390,7 @@ fn eval_impl(
         engine.register_fn(
             name,
             move |txt: ImmutableString, _config: Dynamic| -> Node {
-                let data = text::rasterize(&txt);
+                let data = text::rasterize(&txt, mode);
                 s.lock().unwrap().text_data = Some(data);
                 Node::source("text_src", vec![])
             },
@@ -2926,8 +2927,9 @@ fn eval_impl(
             }
         });
     }
-    engine.register_fn("screencap", || {
-        log::warn!("screencap() ignored: saving a screenshot is not supported");
+    let s = state.clone();
+    engine.register_fn("screencap", move || {
+        s.lock().unwrap().screencap = true;
     });
     // Real hydra.js sketches use loadScript(url) to fetch and run an
     // extension library at runtime (custom functions, effects, etc.).
@@ -3235,6 +3237,7 @@ fn eval_impl(
         shaders,
         render_mode: patch.render_mode,
         text_data: patch.text_data.take(),
+        screencap: patch.screencap,
         render_resolution: patch.render_resolution,
         buffer_filter: patch.buffer_filter,
         #[cfg(any(

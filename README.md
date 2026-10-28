@@ -502,6 +502,30 @@ Every input is treated as a plain `float` regardless of its declared
 project's own `iTime`/`iResolution` uniform names. See `SPEC.md` §12 for
 the full details and limitations.
 
+## Screenshots
+
+Call `screencap()` in a script to save the next rendered frame, without the
+editor/sidebar, using the same PNG path as the screenshot keyboard shortcuts:
+`hydra_screenshot_DD_MM_YYYY.png` in the current directory, with a numeric
+suffix when needed. Multiple calls in one evaluation produce one capture;
+evaluating the script again requests another. Failed evaluations or shader
+compilation do not queue a capture.
+
+This is desktop-only for now. The plugin logs a warning, and library hosts
+can handle `EvalResult.screencap` themselves; `eval()` never writes a file.
+
+## Text rendering
+
+`text("hello")` draws filled text; `strokeText("hello")` draws hollow
+outlines; `fillStrokeText("hello")` and `strokeFillText("hello")` draw
+both. All use the bundled Hack font and one shared text texture (the last
+text call in an evaluation wins).
+
+Outlines use a raster-mask approximation with a width of approximately 2%
+of the auto-sized font, at least two texture pixels. Fill and stroke are
+both white, so their drawing order has the same result. Global/per-call
+font and style settings are still accepted but ignored.
+
 ## Pattern easing
 
 `[0, 1].ease('easeInOutCubic')` uses Hydra's named interpolation curves:
@@ -536,10 +560,9 @@ These are registered so scripts calling them don't hard-error, but they don't do
 | `document.createElement(...)` / `.getElementById(...)` / `.querySelector(...)` / `.getElementsByTagName(...)` | Each returns a plain settable map (like `P5(...)`) rather than hard-erroring — real sketches commonly build an offscreen `<canvas>`/`<img>` element this way, usually to feed a p5.js overlay or draw text via a 2D canvas context; no DOM exists here to back it. `.getContext("2d")` on the resulting map returns another settable map with its own common methods (`fillText`, `fillRect`, `clearRect`, `strokeText`, `save`/`restore`, `translate`/`scale`, `measureText`, `createLinearGradient`) registered as no-ops; properties like `.fillStyle`/`.font` need no registration, same as `hydraText` |
 | `canvas.setRelativeSize(...)` / `.setAlign(...)` / `.setLinear()` / `.setNearest()` | No-op — a top-level `canvas` config object the `hyper-hydra` community extension exposes, not a real hydra.js API at all |
 | `Scene(name)` | No-op — not a hydra.js API at all; some external VJ/live-coding integrations use it to switch named cue banks |
-| `screencap()` | No-op — saving/sharing a screenshot isn't supported |
 | `loadScript(url)` | No-op — no dynamic module loading. Some of the most commonly-loaded community extensions' functions are ported natively instead (`spiral`, `turb`, `uturb`, `unoise`, `whitenoise`, `colornoise`, `warp`, `cwarp`, `ncontour`, `pulse`, `pulsetrain`, `hextile`, `concentric`, `brick`, `wave`, `lissa`, `inversion`, `mirrorX`/`mirrorY`/`mirrorX2`/`mirrorY2`/`mirrorWrap`, `mandeloffs`, `colreflect` — see SPEC.md §6); anything else the loaded script would have defined still won't exist |
 | `pb.setName(name)` / `pb.list()` | No-op — not a hydra.js API at all; boilerplate an external platform injects when a sketch is exported/shared |
-| `hydraText.font = ...` / any other property | No-op — the `hydra-text.js` extension's config object (`loadScript`-loaded); accepts assignment to any property. `strokeText`/`fillStrokeText`/`strokeFillText` themselves are aliased to `text()`'s own rendering (not faithful - no separate stroke/outline mode) |
+| `hydraText.font = ...` / any other property | No-op — the `hydra-text.js` extension's config object (`loadScript`-loaded); accepts assignment to any property, but font/style overrides are not applied. The text functions themselves render filled or outlined text (see above) |
 
 ## License
 

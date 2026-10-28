@@ -670,18 +670,39 @@ fn ranged_random_and_mixed_numeric_math_calls_are_accepted() {
 }
 
 #[test]
-fn stroke_text_variants_alias_the_same_rendering_as_text() {
-    // hydra-text.js's strokeText/fillStrokeText/strokeFillText - not a
-    // faithful stroke-vs-fill render, but shouldn't hard-fail, and should
-    // accept the optional config argument real sketches often pass.
+fn stroke_text_variants_render_outlines_and_accept_existing_config() {
+    let fill = eval("text('hi').out()").unwrap().text_data.unwrap();
+    let stroke = eval("strokeText('hi').out()").unwrap().text_data.unwrap();
+    assert_ne!(fill.pixels, stroke.pixels);
+    let combined = eval("fillStrokeText('hi', hydraText).out()")
+        .unwrap()
+        .text_data
+        .unwrap();
+    let reversed = eval("strokeFillText('hi').out()")
+        .unwrap()
+        .text_data
+        .unwrap();
+    assert_ne!(fill.pixels, combined.pixels);
+    assert_eq!(combined.pixels, reversed.pixels);
     for call in [
-        "strokeText(\"hi\")",
-        "fillStrokeText(\"hi\", hydraText)",
-        "strokeFillText(\"hi\")",
+        "strokeText('hi')",
+        "fillStrokeText('hi', hydraText)",
+        "strokeFillText('hi')",
     ] {
-        let src = format!("solid(0,0,0,1).diff({call}).out()");
-        assert!(eval(&src).is_ok(), "{call} failed");
+        assert!(eval(&format!("solid(0,0,0,1).diff({call}).out()")).is_ok());
     }
+}
+
+#[test]
+fn screencap_requests_are_coalesced_and_not_sticky() {
+    assert!(
+        eval("screencap(); screencap(); solid(1,0,0).out()")
+            .unwrap()
+            .screencap
+    );
+    assert!(eval("screencap()").unwrap().screencap);
+    assert!(!eval("solid(1,0,0).out()").unwrap().screencap);
+    assert!(eval("screencap(); notARealFunction()").is_err());
 }
 
 #[test]

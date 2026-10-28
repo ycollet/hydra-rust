@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Desktop script `screencap()` support using the existing UI-free PNG capture path
+- Real rasterized outlines for `strokeText`, `fillStrokeText`, and `strokeFillText`
 - Hydra named pattern easing curves, preserving curve selection through `.fit()`
 - MIDI channel/device selectors and wildcard values, including filtered CC smoothing and ADSR
 - Shader-compatible inline MIDI `.value(v => expression)` transforms, with explicit rejection of unsupported callbacks

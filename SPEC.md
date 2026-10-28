@@ -591,16 +591,20 @@ errors from `eval()`, surfaced to the caller as `Err(String)`.
   matching real hydra.js's own auto-promotion of a plain number into a
   texture. An `i64` there keeps its buffer/source-index meaning rather
   than also being colorized, since that's by far the dominant real usage.
-- **`text("...")`** (and, aliased to the exact same rendering,
-  `strokeText`/`fillStrokeText`/`strokeFillText` — the `hydra-text.js`
-  community extension's stroke/outline variants; "accepted but not
-  faithful" since `src/text.rs`'s rasterizer has no stroke/outline mode):
+- **`text("...")`**, **`strokeText("...")`**, **`fillStrokeText("...")`**,
+  **`strokeFillText("...")`** (the `hydra-text.js` community extension):
   rasterizes a string (via the bundled Hack font) into a single shared
   text texture (`iText0`) and returns a chain reading it. Only one call's
   content is visible at a time (last one wins within an evaluation). All
   four accept an optional second `config` argument (a font/style override
   in real hydra.js); accepted and ignored, since there's no per-call font
   configuration here at all.
+  `text` fills glyphs, `strokeText` draws hollow contours, and the other
+  two combine fill and stroke. Strokes approximate centered outlines from
+  the raster mask, including letter holes, at roughly 2% of the auto-sized
+  font (minimum two texture pixels). White fill/stroke means both combined
+  drawing orders produce the same result; this is not browser-exact
+  vector stroking or configurable canvas styling.
 - **`initCam(slot)` / `initCam(slot, cameraIndex)`** (`webcam` feature only):
   requests slot `slot` (must be `s0`-`s3`, i.e. `>= 100`) be filled from
   camera `cameraIndex` (default `0`). This only queues a request in the
@@ -678,7 +682,7 @@ reactive expression (§3), or a pattern (§7). GLSL semantics are in
 | `rings(freq=8, speed=0.1)` | | Concentric animated rings |
 | `checker(cols=4, rows=4)` | | Checkerboard |
 | `src(idx)` | | Read buffer/source `idx` (see §5) |
-| `text("...")` / `strokeText(...)` / `fillStrokeText(...)` / `strokeFillText(...)` | | Rasterized text (see §5) — the latter three alias `text`'s exact rendering |
+| `text("...")` / `strokeText(...)` / `fillStrokeText(...)` / `strokeFillText(...)` | | Filled, outlined, or filled-and-outlined rasterized text (see §5) |
 
 The following are ported from popular community extensions real hydra.js
 sketches load via `loadScript()` (a permanent no-op here, see the
@@ -784,6 +788,7 @@ itself is a permanent no-op, see README.md):
 | `out()` / `out(bufIdx)` | Write chain to buffer `o0`, or `bufIdx` (see §2) |
 | `render()` / `render(bufIdx)` | Display mode (see §2) |
 | `hush()` | Clear all buffers (see §2) |
+| `screencap()` | Requests one desktop PNG capture after the next rendered frame, without UI; repeated calls in one evaluation coalesce. Exposed as `EvalResult.screencap`; evaluation itself does no file I/O. Failed evaluation/shader compilation does not queue a desktop capture. Plugin logs an unsupported-operation warning |
 | `random()` / `random(...)` | One-shot pseudo-random `f64` in `[0, 1)`, called once at script-eval time (target of `Math.random()`, see §4). Accepts and ignores 0-2 extra arguments, matching real JS's own excess-argument tolerance (real `Math.random()` takes none either) rather than implementing an actual ranged random some sketches seem to expect |
 | `setResolution(w, h)` | Overrides the render buffers' own resolution, independent of the actual window size - the final display is still stretched to fill the window regardless (the classic hydra.js low-res/pixelation trick). Only applies when `w`/`h` are *statically* known numbers (clamped to `1..=4096`); reactive arguments (e.g. `setResolution(window.innerWidth, window.innerHeight)`) are treated as "no override" because render-target allocation is not a shader expression. Sticky: an evaluation that doesn't call `setResolution` at all leaves a previous override in place, rather than reverting to the window size |
 | `o0-o3.setNearest()` / `.setLinear()` / `.setMode("nearest"\|"linear")` | Sets that buffer's texture sampling mode (both its ping-pong textures). Sticky like `setResolution`, unlike `render_mode` (§2) - matches real hydra.js, where the WebGL texture object isn't recreated on a re-eval either, so not calling these again on a later evaluation leaves whatever was last set alone. An unrecognized `setMode(...)` string is logged and ignored, not a hard error |
@@ -928,7 +933,7 @@ there's one place to update). As of this writing it covers `initScreen`
 (return a chainable no-op source, see §5; `initImage`/`initGif`/
 `initVideo`/`initStream` are real implementations behind `image_url`/
 `video`/`stream` respectively, see §8; `setResolution`/`o0-o3.setNearest()`/
-`.setLinear()`/`.setMode()` are real too, see §6), `screencap`,
+`.setLinear()`/`.setMode()` and desktop `screencap()` are real too, see §6),
 and `loadScript` (see §6 for the community-extension
 functions ported natively instead).
 

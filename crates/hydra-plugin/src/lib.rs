@@ -598,6 +598,9 @@ impl HydraGlWindow {
     ) -> (RenderMode, Option<String>) {
         match hydra_rust::eval_with_audio_settings(code, audio_analyzer.settings()) {
             Ok(result) => {
+                if result.screencap {
+                    log::warn!("hydra-plugin: screencap() is only supported by the desktop app");
+                }
                 if let Some(ref td) = result.text_data {
                     renderer.upload_text(td);
                 }
