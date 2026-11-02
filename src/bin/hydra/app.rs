@@ -654,16 +654,16 @@ impl HydraApp {
                 {
                     // Only open the microphone once a script is actually
                     // known to use it - either by calling one of the
-                    // setters below, or by reading `a.fft[i]` (which
-                    // compiles straight to an `iFft[...]` GLSL reference,
+                    // setters below, or by reading audio signals (which
+                    // compile straight to GLSL uniform references,
                     // with no AudioRequest of its own to detect it by).
                     // Merely having the `audio` feature compiled in must
                     // not, by itself, start capturing audio.
                     let uses_audio = !result.audio_requests.is_empty()
-                        || result
-                            .shaders
-                            .iter()
-                            .any(|s| s.as_deref().is_some_and(|s| s.contains("iFft[")));
+                        || result.shaders.iter().any(|s| {
+                            s.as_deref()
+                                .is_some_and(|s| s.contains("iFft[") || s.contains("iAudioRhythm."))
+                        });
                     if uses_audio {
                         self.audio_manager.ensure_started();
                     }
@@ -870,6 +870,10 @@ impl HydraApp {
         #[cfg(not(feature = "audio"))]
         let fft = [0.0; hydra_rust::audio::NUM_FFT_BINS];
         #[cfg(feature = "audio")]
+        let audio = self.audio_manager.features();
+        #[cfg(not(feature = "audio"))]
+        let audio = hydra_rust::audio::AudioFeatures::default();
+        #[cfg(feature = "audio")]
         {
             self.last_fft = fft;
             if let Some(error) = self.audio_manager.take_error() {
@@ -945,6 +949,7 @@ impl HydraApp {
             tempo: self.tempo,
             phase: 0.0,
             fft,
+            audio,
             midi_note: midi_frame.note,
             midi_velocity: midi_frame.velocity,
             midi_cc: midi_frame.cc,

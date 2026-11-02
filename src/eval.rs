@@ -2570,6 +2570,9 @@ fn eval_impl(
     #[cfg(feature = "fft")]
     {
         engine.register_get("fft", |_a: &mut Audio| -> AudioFft { AudioFft });
+        engine.register_get("onset", |_a: &mut Audio| GlslExpr("iAudioRhythm.x".into()));
+        engine.register_get("beat", |_a: &mut Audio| GlslExpr("iAudioRhythm.y".into()));
+        engine.register_get("bpm", |_a: &mut Audio| GlslExpr("iAudioRhythm.z".into()));
         engine.register_get("settings", |_a: &mut Audio| AudioBins);
         {
             let s = state.clone();

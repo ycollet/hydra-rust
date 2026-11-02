@@ -148,6 +148,25 @@ connections to be restored. Multiple managed instances get distinct,
 stable names from their NSM IDs. This naming support applies only to
 `hydra`; the plugin standalone's upstream JACK naming limitation remains.
 
+## Audio onset and beat reactivity
+
+Build the desktop app with `cargo run --features audio` to use audio input
+(or `--features jack` for the Linux JACK backend described above):
+
+```javascript
+osc(10 + a.onset * 40)
+  .rotate(() => a.beat * 6.28318)
+  .brightness(a.onset * 0.3)
+  .out()
+```
+
+`a.onset` is a decaying transient pulse, `a.beat` is the estimated beat phase
+from 0 to 1, and `a.bpm` is the estimated tempo. Beat/tempo remain zero until
+regular onsets establish a tempo; this is a basic 60-200 BPM estimate, not
+downbeat detection. These signals do not change the patch's global tempo.
+The plugin analyzes its host audio through the same pipeline.
+See [detection details and embedding API](SPEC.md#audio-onset-and-beat-detection).
+
 ## Keyboard shortcuts
 
 The `Enter`-based shortcuts mirror [upstream Hydra](https://github.com/hydra-synth/hydra)'s own CodeMirror keymap (`Ctrl/Cmd+Enter`/`Alt+Enter`/`Ctrl/Cmd+Shift+Enter` for eval line/block/all); `Ctrl/Cmd+Alt+Enter` (eval selection) is specific to this native port, since upstream's `Ctrl/Cmd+Shift+Enter` slot was needed for "eval all" instead.

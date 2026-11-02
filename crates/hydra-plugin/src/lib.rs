@@ -935,6 +935,7 @@ impl baseview::WindowHandler for HydraGlWindow {
             // `self.audio_buffer`; polling/FFT only ever happens here, on
             // the render thread.
             fft: self.audio_analyzer.poll(&self.audio_buffer),
+            audio: self.audio_analyzer.features(),
             // Fed from the host's own MIDI events, pushed in
             // `HydraPlugin::process()` into `self.midi_bridge`; polling
             // (CC smoothing, envelope timing) only ever happens here.
@@ -1279,6 +1280,13 @@ impl Plugin for HydraPlugin {
         buffer_config: &BufferConfig,
         _context: &mut impl InitContext<Self>,
     ) -> bool {
+        if let Err(error) = self
+            .audio_buffer
+            .set_sample_rate(buffer_config.sample_rate.round() as u32)
+        {
+            nih_error!("{error}");
+            return false;
+        }
         self.mono_scratch = Vec::with_capacity(buffer_config.max_buffer_size as usize);
         true
     }

@@ -19,6 +19,17 @@ fn ok_shader0(src: &str) -> String {
     }
 }
 
+#[cfg(feature = "fft")]
+#[test]
+fn audio_rhythm_signals_work_in_direct_and_arrow_parameters() {
+    let shader = ok_shader0(
+        "osc(10 + a.onset * 40).rotate(() => a.beat * 6.28).brightness(a.bpm / 200).out()",
+    );
+    for uniform in ["iAudioRhythm.x", "iAudioRhythm.y", "iAudioRhythm.z"] {
+        assert!(shader.contains(uniform), "{shader}");
+    }
+}
+
 #[test]
 fn named_arg_call_does_not_corrupt_a_sibling_function_declaration() {
     // kwargs (named-arg stripping) and jsfunctions (default-parameter

@@ -1,5 +1,17 @@
 pub const NUM_FFT_BINS: usize = 8;
 
+/// Audio-clocked onset envelope, estimated beat phase and tempo.
+/// Beat and BPM remain zero until repeated, regular onsets establish a tempo.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct AudioFeatures {
+    pub onset: f32,
+    pub beat: f32,
+    pub bpm: f32,
+}
+
+#[cfg(feature = "fft")]
+mod rhythm;
+
 #[cfg(feature = "fft")]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BinSettings {
@@ -97,7 +109,8 @@ mod analysis {
 
     use rustfft::{Fft, FftPlanner, num_complex::Complex};
 
-    use super::{AudioSettings, BinProperty, NUM_FFT_BINS};
+    use super::rhythm::{CAPACITY, PendingAudio, RhythmDetector};
+    use super::{AudioFeatures, AudioSettings, BinProperty, NUM_FFT_BINS};
 
     pub(super) const FFT_SIZE: usize = 1024;
 
@@ -115,6 +128,7 @@ mod analysis {
     #[derive(Clone)]
     pub struct AudioBuffer {
         pub(super) samples: Arc<Mutex<VecDeque<f32>>>,
+        pending: Arc<Mutex<PendingAudio>>,
     }
 
     impl Default for AudioBuffer {
@@ -127,18 +141,40 @@ mod analysis {
         pub fn new() -> Self {
             let buffer = Self {
                 samples: Arc::new(Mutex::new(VecDeque::with_capacity(FFT_SIZE))),
+                pending: Arc::new(Mutex::new(PendingAudio::new())),
             };
             // macOS allocates the native mutex on first lock, not in Mutex::new().
             drop(buffer.samples.lock().unwrap());
+            drop(buffer.pending.lock().unwrap());
             buffer
         }
 
         /// Pushes samples, downmixing to mono first if `channels > 1`
         /// (assuming `data` is interleaved, matching `cpal`'s own stream
-        /// callback layout). No allocation after construction; the deque
-        /// never exceeds its preallocated `FFT_SIZE` capacity.
+        /// callback layout). No allocation after construction. Latest FFT
+        /// samples and a bounded queue for fixed-hop rhythm analysis are retained.
         pub fn push(&self, data: &[f32], channels: usize) {
             push_samples(&self.samples, data, channels);
+            let mut pending = self.pending.lock().unwrap();
+            let channels = channels.max(1);
+            for frame in data.chunks(channels) {
+                pending.push(frame.iter().sum::<f32>() / channels as f32);
+            }
+        }
+
+        /// Configure the producer's sample rate before pushing audio.
+        /// Defaults to 44100 Hz. Changing it clears pending rhythm history.
+        pub fn set_sample_rate(&self, sample_rate: u32) -> Result<(), String> {
+            if sample_rate == 0 {
+                return Err("Audio sample rate must be positive".into());
+            }
+            let mut pending = self.pending.lock().unwrap();
+            if pending.sample_rate != sample_rate {
+                pending.samples.clear();
+                pending.sample_rate = sample_rate;
+                pending.discontinuity = true;
+            }
+            Ok(())
         }
     }
 
@@ -155,6 +191,8 @@ mod analysis {
         window: [f32; FFT_SIZE],
         smoothed: [f32; NUM_FFT_BINS],
         settings: AudioSettings,
+        rhythm: RhythmDetector,
+        pending_samples: Vec<f32>,
     }
 
     impl Default for AudioAnalyzer {
@@ -173,6 +211,8 @@ mod analysis {
                 window: std::array::from_fn(|i| hann(i, FFT_SIZE)),
                 smoothed: [0.0; NUM_FFT_BINS],
                 settings: AudioSettings::default(),
+                rhythm: RhythmDetector::new(44_100),
+                pending_samples: Vec::with_capacity(CAPACITY),
             }
         }
 
@@ -213,6 +253,24 @@ mod analysis {
         }
 
         pub fn poll(&mut self, buffer: &AudioBuffer) -> [f32; NUM_FFT_BINS] {
+            self.pending_samples.clear();
+            {
+                let mut pending = buffer.pending.lock().unwrap();
+                if pending.discontinuity || pending.sample_rate != self.rhythm.sample_rate() {
+                    if pending.discontinuity && pending.samples.len() == CAPACITY {
+                        log::warn!("Audio rhythm analysis overrun; resetting beat history");
+                    }
+                    self.rhythm = RhythmDetector::new(pending.sample_rate);
+                    pending.discontinuity = false;
+                }
+                self.pending_samples.extend(pending.samples.drain(..));
+            }
+            self.rhythm.process(
+                &self.pending_samples,
+                self.fft.as_ref(),
+                &mut self.scratch,
+                &self.window,
+            );
             {
                 let buf = buffer.samples.lock().unwrap();
                 let len = buf.len();
@@ -254,6 +312,11 @@ mod analysis {
                 out[i] = self.smoothed[i];
             }
             out
+        }
+
+        /// Features updated by the most recent poll, independent of FFT-bin settings.
+        pub fn features(&self) -> AudioFeatures {
+            self.rhythm.features
         }
     }
 
@@ -303,6 +366,123 @@ mod analysis {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        fn click_track(sample_rate: u32, seconds: f32) -> Vec<f32> {
+            let mut samples = vec![0.0; (sample_rate as f32 * seconds) as usize];
+            for beat in 0..7 {
+                let index = (sample_rate as f64 * (0.1 + beat as f64 * 0.5)).round() as usize;
+                if index < samples.len() {
+                    samples[index] = 1.0;
+                }
+            }
+            samples
+        }
+
+        fn analyze_chunks(samples: &[f32], sample_rate: u32, chunk: usize) -> AudioFeatures {
+            let buffer = AudioBuffer::new();
+            buffer.set_sample_rate(sample_rate).unwrap();
+            let mut analyzer = AudioAnalyzer::new();
+            for samples in samples.chunks(chunk) {
+                buffer.push(samples, 1);
+                analyzer.poll(&buffer);
+            }
+            analyzer.features()
+        }
+
+        #[test]
+        fn rhythm_uses_audio_sample_rate_and_not_render_poll_frequency() {
+            for rate in [44_100, 48_000, 96_000] {
+                let samples = click_track(rate, 3.25);
+                let fast = analyze_chunks(&samples, rate, 128);
+                let slow = analyze_chunks(&samples, rate, 4096);
+                assert_eq!(fast, slow);
+                assert!((fast.bpm - 120.0).abs() < 2.0, "{rate}: {fast:?}");
+                assert!((0.2..0.4).contains(&fast.beat), "{rate}: {fast:?}");
+                assert!(fast.onset > 0.0 && fast.onset < 0.5, "{fast:?}");
+            }
+        }
+
+        #[test]
+        fn tempo_range_endpoints_allow_for_fft_hop_quantization() {
+            for bpm in [60.0, 200.0] {
+                let mut samples = vec![0.0; 48_000 * 8];
+                for beat in 0..8 {
+                    let index = ((0.1 + beat as f64 * 60.0 / bpm) * 48_000.0) as usize;
+                    samples[index] = 1.0;
+                }
+                let end = ((0.25 + 7.0 * 60.0 / bpm) * 48_000.0) as usize;
+                let features = analyze_chunks(&samples[..end], 48_000, 512);
+                assert!(
+                    (features.bpm as f64 - bpm).abs() < 2.0,
+                    "{bpm}: {features:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn silence_and_sustained_tone_do_not_create_a_beat() {
+            let silence = analyze_chunks(&vec![0.0; 96_000], 48_000, 512);
+            assert_eq!(silence, AudioFeatures::default());
+            let tone: Vec<_> = (0..96_000)
+                .map(|i| (i as f32 * 440.0 * std::f32::consts::TAU / 48_000.0).sin() * 0.5)
+                .collect();
+            let features = analyze_chunks(&tone, 48_000, 512);
+            assert_eq!(features.bpm, 0.0, "{features:?}");
+            assert!(features.onset < 0.01, "{features:?}");
+        }
+
+        #[test]
+        fn irregular_onsets_do_not_establish_a_tempo() {
+            let mut samples = vec![0.0; 48_000 * 4];
+            for time in [0.1, 0.45, 1.3, 1.8, 2.75, 3.1, 3.65] {
+                samples[(time * 48_000.0) as usize] = 1.0;
+            }
+            let features = analyze_chunks(&samples, 48_000, 512);
+            assert_eq!(features.bpm, 0.0, "{features:?}");
+            assert_eq!(features.beat, 0.0, "{features:?}");
+            assert!(features.onset > 0.0, "{features:?}");
+        }
+
+        #[test]
+        fn onset_decays_and_tempo_expires_without_new_transients() {
+            let buffer = AudioBuffer::new();
+            let mut analyzer = AudioAnalyzer::new();
+            for chunk in click_track(44_100, 3.15).chunks(512) {
+                buffer.push(chunk, 1);
+                analyzer.poll(&buffer);
+            }
+            let features = analyzer.features();
+            assert!(features.onset > 0.4, "{features:?}");
+            assert!(features.bpm > 0.0);
+            analyzer.poll(&buffer);
+            assert_eq!(analyzer.features(), features);
+            for _ in 0..200 {
+                buffer.push(&[0.0; 512], 1);
+                analyzer.poll(&buffer);
+            }
+            assert_eq!(analyzer.features().bpm, 0.0);
+            assert_eq!(analyzer.features().beat, 0.0);
+            assert!(analyzer.features().onset < 0.001);
+        }
+
+        #[test]
+        fn rhythm_history_resets_on_sample_rate_change_or_overrun() {
+            let buffer = AudioBuffer::new();
+            let mut analyzer = AudioAnalyzer::new();
+            for chunk in click_track(44_100, 3.15).chunks(512) {
+                buffer.push(chunk, 1);
+                analyzer.poll(&buffer);
+            }
+            assert!(analyzer.features().bpm > 0.0);
+            assert!(buffer.set_sample_rate(0).is_err());
+            buffer.set_sample_rate(48_000).unwrap();
+            analyzer.poll(&buffer);
+            assert_eq!(analyzer.features(), AudioFeatures::default());
+            buffer.push(&vec![0.0; CAPACITY + 1], 1);
+            analyzer.poll(&buffer);
+            assert_eq!(analyzer.features(), AudioFeatures::default());
+            assert_eq!(buffer.pending.lock().unwrap().samples.capacity(), CAPACITY);
+        }
 
         #[test]
         fn per_bin_settings_affect_only_the_selected_frequency_band() {
@@ -518,6 +698,10 @@ mod capture {
         pub fn poll(&mut self) -> [f32; NUM_FFT_BINS] {
             self.analyzer.poll(&self.buffer)
         }
+
+        pub fn features(&self) -> super::AudioFeatures {
+            self.analyzer.features()
+        }
     }
 
     impl Drop for AudioManager {
@@ -577,6 +761,7 @@ mod capture {
         let channels = config.channels() as usize;
         let sample_format = config.sample_format();
         let stream_config = config.config();
+        buffer.set_sample_rate(stream_config.sample_rate.0)?;
         let stream_error_tx = error_tx.clone();
         let err_fn = move |error| {
             report_error(

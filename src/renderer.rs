@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use glow::{HasContext, PixelUnpackData};
 
-use crate::audio::NUM_FFT_BINS;
+use crate::audio::{AudioFeatures, NUM_FFT_BINS};
 use crate::eval::{BufferFilter, RenderMode};
 use crate::midi::{NUM_MIDI_CC, NUM_MIDI_ENVELOPES, NUM_MIDI_NOTES, NUM_MIDI_VALUES};
 use crate::osc::NUM_OSC_SLOTS;
@@ -20,6 +20,7 @@ pub struct RenderUniforms {
     pub tempo: f32,
     pub phase: f32,
     pub fft: [f32; NUM_FFT_BINS],
+    pub audio: AudioFeatures,
     pub midi_note: [f32; NUM_MIDI_NOTES],
     pub midi_velocity: [f32; NUM_MIDI_NOTES],
     pub midi_cc: [f32; NUM_MIDI_CC],
@@ -43,6 +44,7 @@ struct ProgramState {
     loc_tempo: Option<glow::UniformLocation>,
     loc_phase: Option<glow::UniformLocation>,
     loc_fft: Option<glow::UniformLocation>,
+    loc_audio_rhythm: Option<glow::UniformLocation>,
     loc_midi_note: Option<glow::UniformLocation>,
     loc_midi_velocity: Option<glow::UniformLocation>,
     loc_midi_cc: Option<glow::UniformLocation>,
@@ -351,6 +353,7 @@ fn resolve_program_state(gl: &glow::Context, program: glow::Program) -> ProgramS
             loc_tempo: gl.get_uniform_location(program, "iTempo"),
             loc_phase: gl.get_uniform_location(program, "iPhase"),
             loc_fft: gl.get_uniform_location(program, "iFft"),
+            loc_audio_rhythm: gl.get_uniform_location(program, "iAudioRhythm"),
             loc_midi_note: gl.get_uniform_location(program, "iMidiNote"),
             loc_midi_velocity: gl.get_uniform_location(program, "iMidiVelocity"),
             loc_midi_cc: gl.get_uniform_location(program, "iMidiCC"),
@@ -463,6 +466,9 @@ pub fn render_multipass(
             }
             if let Some(ref loc) = p.loc_fft {
                 gl.uniform_1_f32_slice(Some(loc), &u.fft);
+            }
+            if let Some(ref loc) = p.loc_audio_rhythm {
+                gl.uniform_3_f32(Some(loc), u.audio.onset, u.audio.beat, u.audio.bpm);
             }
             if let Some(ref loc) = p.loc_midi_note {
                 gl.uniform_1_f32_slice(Some(loc), &u.midi_note);

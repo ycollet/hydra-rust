@@ -81,6 +81,9 @@ script does anyway).
 | `width`, `height` | `iResolution.x`, `iResolution.y` | Constants — canvas resolution in pixels. |
 | `window.innerWidth`, `window.innerHeight` / bare `innerWidth`, `innerHeight` | `iResolution.x`, `iResolution.y` | Same values, DOM-style form some sketches use instead (bare, since in a real browser `window` is the global object). |
 | `a.fft[i]` | `iFft[i]` | **`fft` feature** (included by `audio`). `i` may be an integer literal (clamped to `[0, NUM_FFT_BINS-1]`, currently 8 bins) or itself a reactive `GlslExpr`, in which case the index becomes `int(mod(expr, 8.0))` in GLSL. |
+| `a.onset` | `iAudioRhythm.x` | **`fft` feature**. Transient envelope: jumps to 1 on a detected onset and decays exponentially with a 120 ms time constant. |
+| `a.beat` | `iAudioRhythm.y` | **`fft` feature**. Estimated audio beat phase, `[0, 1)`, anchored to detected onsets; 0 while tempo is unknown. Independent of the host-controlled global `beat`. |
+| `a.bpm` | `iAudioRhythm.z` | **`fft` feature**. Estimated audio tempo, 60-200 BPM; 0 while unknown. Does not change the global tempo. |
 
 Arithmetic between these values and plain numbers works via operator
 overloads registered on the underlying `GlslExpr` wrapper type (`+ - * / %`,
@@ -932,6 +935,41 @@ in `eval.rs`) for the embedding app to act on later (`imageload.rs`'s
 `ImageManager`, wired up in `src/bin/hydra/app.rs`). This means calling
 `eval()` directly (as `examples/check_corpus.rs` does) is always
 network-free, regardless of which features are compiled in.
+
+### Audio onset and beat detection
+
+```javascript
+osc(10 + a.onset * 40)
+  .rotate(() => a.beat * 6.28318)
+  .brightness(a.onset * 0.3)
+  .out()
+```
+
+The desktop app starts audio capture lazily for these properties, just as for
+`a.fft[]`; the plugin uses its host's audio input. Onsets use positive spectral
+flux from 1024-sample Hann-windowed FFTs, at a fixed 256-sample hop, with an
+adaptive threshold and a 200 ms refractory period. Detection is independent of
+FFT-bin cutoff, scale and smoothing settings.
+
+Tempo is a basic inter-onset estimate, not a downbeat classifier or a full
+music beat tracker. It needs at least four onsets (three intervals) within the
+60-200 BPM range. Up to eight recent intervals must agree within 20% of their
+median. Irregular rhythms can leave the tempo unknown, and subdivisions can
+produce half/double-tempo estimates. Beat phase reanchors on detected onsets
+and advances between them; tempo and phase return to 0 after two seconds
+without an onset. A sustained tone or silence does not establish a tempo.
+
+Analysis and envelope decay follow samples, not render calls or wall time.
+Polling without new audio does not retrigger onsets or advance the beat clock.
+Processing occurs off the audio callback, and onset latency includes the FFT
+window and render polling. A bounded 65536-sample pending queue preserves
+transients between frames; overruns log a warning and reset rhythm history.
+
+Embedding hosts must call `AudioBuffer::set_sample_rate(rate_hz)` before
+pushing samples (default 44100 Hz), then call `AudioAnalyzer::poll()` and pass
+`AudioAnalyzer::features()` into `RenderUniforms::audio`, alongside the existing
+FFT bins. Desktop capture and the plugin set the actual sample rate
+automatically. Changing it resets rhythm history.
 
 ## 9. Known gaps and stub functions
 

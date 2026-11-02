@@ -19,6 +19,7 @@ uniform float iBeat;
 uniform float iTempo;
 uniform float iPhase;
 uniform float iFft[8]; // must match audio::NUM_FFT_BINS
+uniform vec3 iAudioRhythm;
 uniform float iMidiNote[128]; // must match midi::NUM_MIDI_NOTES
 uniform float iMidiVelocity[128]; // must match midi::NUM_MIDI_NOTES
 uniform float iMidiCC[128]; // must match midi::NUM_MIDI_CC
