@@ -82,15 +82,25 @@ library-embedding path the main crate's README documents for Sova.
   on macOS) also toggles it, if the host forwards the shortcut.
 - **Window is resizable**: drag the bottom-right corner (a small
   translucent square marks the hotspot) to resize the window directly;
-  nih-plug doesn't support host-initiated (OS-border) resize of an
-  embedded plugin editor yet, so this is the plugin's own
-  content-driven resize, the same pattern `nih_plug_vizia`'s
+  this is the plugin's own content-driven resize, the same pattern `nih_plug_vizia`'s
   `ResizeHandle` widget uses. The new size is reported to the host via
   `GuiContext::request_resize()`; if the host rejects it (some DAWs
   don't support runtime editor resizing) the resize is rolled back. In
-  the standalone binary, dragging the real OS window border also works
-  and keeps the handle in sync. The size is clamped to a minimum of
-  256x144 and persisted across host project save/reload.
+  Linux/X11 plugin and standalone windows, host-window resizes (including
+  title-bar maximize/restore) are tracked directly, keeping the drawing area
+  and handle in sync even when the host does not resize the embedded view.
+  Other platforms still depend on the host forwarding native view resizes;
+  nih-plug does not expose host-initiated resizing through its editor API.
+  Handle-driven sizes are clamped to a minimum of 256x144; window size is
+  persisted across host project save/reload.
+- **Fullscreen (Linux/X11)**: with the plugin window focused, press **F11**
+  to request borderless fullscreen for its host window. The "Load menu"
+  button, any open loader panel, and the resize square are hidden, and the
+  resize hotspot and Ctrl/Cmd+E toggle are disabled. Press **F11** again
+  to leave fullscreen and restore the controls and previous loader-panel
+  visibility. Closing the editor also requests that the host leave fullscreen.
+  Requires a window manager supporting EWMH fullscreen and a host that
+  forwards F11 to the plugin. Other platforms do not support this shortcut yet.
 - **Webcam, OSC**: not exposed to the plugin build at all yet (the
   underlying `hydra-rust` features exist but aren't wired into this crate's
   `Cargo.toml`/editor - straightforward to add the same way `webcam` is

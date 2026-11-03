@@ -54,5 +54,9 @@ keyboard-types = "0.6"
 # save dialogs.
 rfd = "0.15"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb = "0.13"
+
 [dev-dependencies]
 assert_no_alloc = { git = "https://github.com/robbert-vdh/rust-assert-no-alloc.git", branch = "feature/nested-permit-forbid" }
+x11rb = "0.13"

@@ -51,19 +51,20 @@
 //!
 //! ## Resizing (v1)
 //!
-//! The window starts at a default size but can be resized two ways: (1)
+//! The window starts at a default size but can be resized three ways: (1)
 //! dragging the small translucent square handle drawn in the
 //! bottom-right corner of the content itself (the same "plugin draws its
 //! own resize handle" pattern `nih_plug_vizia::widgets::ResizeHandle`
 //! uses, since nih-plug doesn't yet support host-initiated/OS-border
 //! plugin-window resizing - see its own `Editor` trait doc comment), or
 //! (2), for the standalone binary only, dragging the real OS window
-//! border (baseview resizes its own window directly, no in-content
-//! handle needed there).
-//! Either way, the new size is stored in a shared, host-state-persisted
+//! border, or (3) resizing/maximizing the host's embedding window on Linux/X11.
+//! The latter is tracked directly because nih-plug does not forward these
+//! host-initiated resizes to the editor.
+//! The new size is stored in a shared, host-state-persisted
 //! `Arc<AtomicCell<(u32, u32)>>` (`HydraPluginParams::editor_size`) and
-//! the host is asked to match via `GuiContext::request_resize()`; if the
-//! host rejects the new size, the resize is rolled back.
+//! content-driven resizes ask the host to match via `GuiContext::request_resize()`;
+//! if the host rejects the new size, the resize is rolled back.
 //!
 //! ## In-window editor (v1)
 //!
@@ -100,6 +101,9 @@
 //! theirs. Instead, `egui::Context::run` is driven by hand, with
 //! `baseview`'s mouse events translated into `egui::RawInput` in
 //! `on_event`.
+
+#[cfg(any(target_os = "linux", test))]
+mod x11_parent;
 
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock, RwLock};
@@ -186,7 +190,11 @@ fn script_loader_ui(
     overlay_open: &mut bool,
     script_label: &str,
     last_error: Option<&str>,
+    fullscreen: bool,
 ) -> bool {
+    if fullscreen {
+        return false;
+    }
     let mut do_pick_file = false;
     if *overlay_open {
         egui::Window::new("Hydra")
@@ -319,6 +327,15 @@ mod tests {
         open: &mut bool,
         events: Vec<egui::Event>,
     ) -> (egui::FullOutput, bool) {
+        frame_with_fullscreen(ctx, open, events, false)
+    }
+
+    fn frame_with_fullscreen(
+        ctx: &egui::Context,
+        open: &mut bool,
+        events: Vec<egui::Event>,
+        fullscreen: bool,
+    ) -> (egui::FullOutput, bool) {
         let mut pick_file = false;
         let output = ctx.run(
             egui::RawInput {
@@ -335,6 +352,7 @@ mod tests {
                     open,
                     "Script: example.hydra",
                     Some("Example script error"),
+                    fullscreen,
                 );
             },
         );
@@ -421,6 +439,75 @@ mod tests {
             assert!(text_rect(&output, "Load script...").is_none());
         }
     }
+
+    #[test]
+    fn fullscreen_hides_loader_and_restores_its_previous_state() {
+        for initially_open in [false, true] {
+            let ctx = egui::Context::default();
+            let mut open = initially_open;
+            frame(&ctx, &mut open, vec![]);
+            frame(&ctx, &mut open, vec![]);
+
+            let (output, pick_file) = frame_with_fullscreen(&ctx, &mut open, vec![], true);
+            assert!(!pick_file);
+            assert!(text_rect(&output, "Load menu").is_none());
+            assert!(text_rect(&output, "Load script...").is_none());
+            assert!(text_rect(&output, "Script: example.hydra").is_none());
+            assert_eq!(open, initially_open);
+
+            frame(&ctx, &mut open, vec![]);
+            let (output, _) = frame(&ctx, &mut open, vec![]);
+            let label = if initially_open {
+                "Load script..."
+            } else {
+                "Load menu"
+            };
+            assert!(text_rect(&output, label).is_some());
+        }
+    }
+
+    #[test]
+    fn fullscreen_shortcut_toggles_once_per_press_including_x11_repeat_pairs() {
+        let mut shortcut = FullscreenShortcut::default();
+        assert!(shortcut.on_key(KeyState::Down, false));
+        shortcut.end_frame();
+        assert!(!shortcut.on_key(KeyState::Down, true));
+        assert!(!shortcut.on_key(KeyState::Down, false));
+        assert!(!shortcut.on_key(KeyState::Up, false));
+        assert!(!shortcut.on_key(KeyState::Down, false));
+        shortcut.end_frame();
+        assert!(!shortcut.on_key(KeyState::Up, false));
+        shortcut.end_frame();
+        assert!(shortcut.on_key(KeyState::Down, false));
+    }
+}
+
+#[derive(Default)]
+struct FullscreenShortcut {
+    held: bool,
+    released: bool,
+}
+
+impl FullscreenShortcut {
+    fn on_key(&mut self, state: KeyState, repeat: bool) -> bool {
+        if state == KeyState::Up {
+            self.released = true;
+            return false;
+        }
+        self.released = false;
+        let toggle = !self.held && !repeat;
+        self.held = true;
+        toggle
+    }
+
+    fn end_frame(&mut self) {
+        // X11 auto-repeat may deliver release/press pairs without setting
+        // KeyboardEvent::repeat. Only unlatch after a real release.
+        if self.released {
+            self.held = false;
+            self.released = false;
+        }
+    }
 }
 
 fn script_path_from_env() -> Option<PathBuf> {
@@ -462,6 +549,8 @@ struct HydraGlWindow {
     midi_poller: MidiPoller,
     gui_context: Arc<dyn GuiContext>,
     editor_size: Arc<AtomicCell<(u32, u32)>>,
+    #[cfg(any(target_os = "linux", test))]
+    parent_window: Option<x11_parent::X11ParentWindow>,
     /// The logical-pixel cursor position last reported by baseview -
     /// needed to hit-test the resize handle on a button press (baseview
     /// doesn't include the position in `ButtonPressed` itself).
@@ -475,6 +564,8 @@ struct HydraGlWindow {
     /// "Load menu" button or Ctrl/Cmd+E - see "Script loader"
     /// section).
     overlay_open: bool,
+    fullscreen: bool,
+    fullscreen_shortcut: FullscreenShortcut,
     /// The window's logical-to-physical pixel scale factor (1.0 on a
     /// standard-DPI display, e.g. 2.0 on a macOS Retina display),
     /// updated from `WindowEvent::Resized`'s `WindowInfo` whenever it
@@ -507,6 +598,7 @@ impl HydraGlWindow {
         gui_context: Arc<dyn GuiContext>,
         editor_size: Arc<AtomicCell<(u32, u32)>>,
         script_state: Arc<RwLock<ScriptState>>,
+        #[cfg(any(target_os = "linux", test))] parent_window: Option<x11_parent::X11ParentWindow>,
     ) -> Self {
         let gl_context = window
             .gl_context()
@@ -567,9 +659,13 @@ impl HydraGlWindow {
             midi_poller,
             gui_context,
             editor_size,
+            #[cfg(any(target_os = "linux", test))]
+            parent_window,
             cursor_pos: (0.0, 0.0),
             resize_drag: None,
             overlay_open: false,
+            fullscreen: false,
+            fullscreen_shortcut: FullscreenShortcut::default(),
             // `baseview` opens the window at scale 1.0 as a placeholder
             // (even under `SystemScaleFactor`) and corrects it via a
             // `Resized` event almost immediately once the real display
@@ -776,7 +872,33 @@ impl HydraGlWindow {
     /// `draw_resize_handle`).
     fn in_resize_handle(&self, pos: (f32, f32)) -> bool {
         let (w, h) = self.editor_size.load();
-        pos.0 >= w as f32 - RESIZE_HANDLE_SIZE && pos.1 >= h as f32 - RESIZE_HANDLE_SIZE
+        !self.fullscreen
+            && pos.0 >= w as f32 - RESIZE_HANDLE_SIZE
+            && pos.1 >= h as f32 - RESIZE_HANDLE_SIZE
+    }
+
+    fn toggle_fullscreen(&mut self) {
+        #[cfg(any(target_os = "linux", test))]
+        let result = match &mut self.parent_window {
+            Some(parent) => parent.set_fullscreen(!self.fullscreen),
+            None => Err(std::io::Error::other("No X11 host window is available").into()),
+        };
+        #[cfg(not(any(target_os = "linux", test)))]
+        let result: Result<(), Box<dyn std::error::Error>> =
+            Err(std::io::Error::other("Plugin fullscreen is only supported on Linux/X11").into());
+
+        match result {
+            Ok(()) => {
+                self.fullscreen = !self.fullscreen;
+                self.resize_drag = None;
+            }
+            Err(err) => {
+                let message = format!("Cannot toggle fullscreen: {err}");
+                log::warn!("hydra-plugin: {message}");
+                self.last_error = Some(message);
+                self.overlay_open = true;
+            }
+        }
     }
 
     /// Resizes the baseview window itself, updates the shared
@@ -847,6 +969,7 @@ impl HydraGlWindow {
                 &mut self.overlay_open,
                 &script_label,
                 self.last_error.as_deref(),
+                self.fullscreen,
             );
         });
 
@@ -871,6 +994,26 @@ impl HydraGlWindow {
 
 impl baseview::WindowHandler for HydraGlWindow {
     fn on_frame(&mut self, window: &mut baseview::Window) {
+        self.fullscreen_shortcut.end_frame();
+        #[cfg(any(target_os = "linux", test))]
+        if let Some(parent) = &mut self.parent_window {
+            match parent.poll_resize(self.editor_scale) {
+                Ok(Some(size)) => {
+                    // This size already comes from the host. Do not request it
+                    // back through GuiContext, which can undo maximization.
+                    self.editor_size
+                        .store((size.width.round() as u32, size.height.round() as u32));
+                    window.resize(size);
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    log::warn!("hydra-plugin: cannot track host window resizing: {err}");
+                    self.parent_window = None;
+                    self.fullscreen = false;
+                }
+            }
+        }
+
         let gl_context = window
             .gl_context()
             .expect("failed to get baseview gl context");
@@ -955,7 +1098,9 @@ impl baseview::WindowHandler for HydraGlWindow {
         renderer::render_multipass(&self.gl, &snap, &ping, uniforms);
         let _ = self.render_mode;
 
-        self.draw_resize_handle(w, h);
+        if !self.fullscreen {
+            self.draw_resize_handle(w, h);
+        }
         self.draw_editor_overlay(w, h);
 
         unsafe {
@@ -1023,6 +1168,13 @@ impl baseview::WindowHandler for HydraGlWindow {
             // The script-loader overlay has no scrollable content, so
             // scroll events don't need translating.
             BvEvent::Keyboard(kb_event) => {
+                if kb_event.code == Code::F11
+                    && self
+                        .fullscreen_shortcut
+                        .on_key(kb_event.state, kb_event.repeat)
+                {
+                    self.toggle_fullscreen();
+                }
                 // Physical-key-position based (`Code`, not the layout-
                 // mapped `Key`), so this works the same regardless of
                 // keyboard layout - no text input is translated here at
@@ -1032,19 +1184,19 @@ impl baseview::WindowHandler for HydraGlWindow {
                     && kb_event.state == KeyState::Down
                     && (kb_event.modifiers.contains(KtModifiers::CONTROL)
                         || kb_event.modifiers.contains(KtModifiers::META));
-                if is_toggle {
+                if is_toggle && !self.fullscreen {
                     self.overlay_open = !self.overlay_open;
                 }
             }
-            // Fires when the OS window itself is resized directly (only
-            // reachable in the standalone binary - a parented/embedded
-            // plugin view's size is instead driven by `apply_resize`
-            // above, in response to our own in-content handle).
+            // Includes child-window resizes propagated from the X11 host.
             BvEvent::Window(BvWindowEvent::Resized(info)) => {
                 let logical = info.logical_size();
                 self.editor_size
                     .store((logical.width.round() as u32, logical.height.round() as u32));
                 self.editor_scale = info.scale();
+            }
+            BvEvent::Window(BvWindowEvent::Unfocused) => {
+                self.fullscreen_shortcut = FullscreenShortcut::default();
             }
             _ => {}
         }
@@ -1082,6 +1234,19 @@ impl Editor for HydraEditor {
         let editor_size = self.editor_size.clone();
         let script_state = self.script_state.clone();
         let (initial_w, initial_h) = editor_size.load();
+        #[cfg(any(target_os = "linux", test))]
+        let parent_window = match parent {
+            ParentWindowHandle::X11Window(parent) => {
+                match x11_parent::X11ParentWindow::new(parent) {
+                    Ok(parent) => Some(parent),
+                    Err(err) => {
+                        log::warn!("hydra-plugin: cannot track host window resizing: {err}");
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
         let window = baseview::Window::open_parented(
             &ParentWindowHandleAdapter(parent),
             WindowOpenOptions {
@@ -1111,6 +1276,8 @@ impl Editor for HydraEditor {
                     context.clone(),
                     editor_size.clone(),
                     script_state.clone(),
+                    #[cfg(any(target_os = "linux", test))]
+                    parent_window,
                 )
             },
         );
