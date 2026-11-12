@@ -19,6 +19,57 @@ fn ok_shader0(src: &str) -> String {
     }
 }
 
+#[test]
+fn tileable_wraps_the_complete_graph_and_composes_with_later_operations() {
+    let shader = ok_shader0(
+        "noise(5).color(1,0.5,0.2).blend(osc(12).rotate(0.3),0.4)\
+         .modulate(noise(3),0.1).tileable().repeat(3,3).out()",
+    );
+    let sampler_start = shader.find("vec4 _n0_sample(vec2 st)").unwrap();
+    let tile_start = shader.find("vec4 _n0_tile(vec2 st, float width)").unwrap();
+    let sampler = &shader[sampler_start..tile_start];
+    for operation in ["noise(", "color(", "blend(", "osc(", "rotate(", "modulate("] {
+        assert!(sampler.contains(operation), "{shader}");
+    }
+    let main = &shader[shader.find("void mainImage").unwrap()..];
+    assert!(main.contains("repeat(st, 3.0, 3.0"), "{shader}");
+    assert!(main.contains("_n0_tile(_st"), "{shader}");
+    assert!(main.contains(", 0.15)"), "{shader}");
+}
+
+#[test]
+fn tileable_supports_textures_patterns_reactive_width_and_nested_graphs() {
+    for code in [
+        "src(o1).tileable(0.1).out()",
+        "src(s0).tileable(0.1).out()",
+        "text('tile').tileable(0.1).out()",
+        "noise(5).tileable(() => 0.1 + 0.05 * Math.sin(time)).out()",
+        "noise(5).tileable([0.1,0.2].smooth()).out()",
+        "noise(5).tileable(0.1).blend(osc().tileable(0.2)).tileable().out()",
+        "setFunction({name:'uvtest',type:'src',inputs:[],glsl:'return vec4(st,0.,1.);'});uvtest().tileable().out()",
+    ] {
+        let shader = ok_shader0(code);
+        assert!(shader.contains("_sample(vec2 st)"), "{shader}");
+        assert!(shader.contains("clamp(width, 0.001, 0.5)"), "{shader}");
+    }
+}
+
+#[test]
+fn tileable_rejects_invalid_widths_and_limits_nesting() {
+    for width in ["'wide'", "true", "{}"] {
+        let err = eval(&format!("noise().tileable({width}).out()"))
+            .err()
+            .unwrap_or_else(|| panic!("invalid width {width} should fail"));
+        assert!(err.contains("tileable width"), "{err}");
+    }
+    for width in ["0", "-1", "2"] {
+        assert!(eval(&format!("noise().tileable({width}).out()")).is_ok());
+    }
+    let code = format!("noise(){}.out()", ".tileable()".repeat(16));
+    let err = eval(&code).err().expect("excessive nesting should fail");
+    assert!(err.contains("nesting too deep"), "{err}");
+}
+
 #[cfg(feature = "fft")]
 #[test]
 fn audio_rhythm_signals_work_in_direct_and_arrow_parameters() {

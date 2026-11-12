@@ -24,6 +24,7 @@ directly. Most omit `.out()` where a bare terminating source/chain would implici
 - [Blend](#blend)
 - [Modulate](#modulate)
 - [Other core functions](#other-core-functions)
+- [Non compatible Hydra functions](#non-compatible-hydra-functions)
 - [Reactive values](#reactive-values)
 - [Math functions](#math-functions)
 - [Patterns](#patterns)
@@ -207,6 +208,48 @@ Use another chain's color output to distort a chain's coordinates. Same `other` 
 | `o0`-`o3`.`setNearest()` | *(none)* | Sets that buffer's texture sampling to nearest-neighbor (blocky) instead of linear. Sticky, like `setResolution` | `o0.setNearest()` |
 | `o0`-`o3`.`setLinear()` | *(none)* | Sets that buffer's texture sampling back to linear (the default) | `o0.setLinear()` |
 | `o0`-`o3`.`setMode(name)` | `name: "nearest"` or `"linear"` | Same as `setNearest`/`setLinear`, chosen by string. An unrecognized name is logged and ignored | `o0.setMode("nearest")` |
+
+## Non compatible Hydra functions
+
+These are hydra-rust extensions, not standard browser Hydra functions. Scripts
+using them need modification or an equivalent extension to run in hydra.js.
+This section documents the seamless-tiling extension; it is not an exhaustive
+list of differences. For unsupported browser functions, see
+[Known gaps and stub functions](#known-gaps-and-stub-functions).
+
+### `.tileable(width=0.15)`
+
+Makes the **complete preceding chain** repeat seamlessly in X and Y by blending
+opposite edges, including corners. Works with procedural sources, feedback,
+external textures, and chains containing blends or modulation. Available in
+the library, standalone application, and plugin without additional features.
+
+```rust
+noise(5)
+  .color(1, 0.5, 0.2)
+  .tileable(0.15)
+  .out()
+```
+
+`width` controls the overlap in normalized source coordinates and is clamped
+to `[0.001, 0.5]`, including for reactive values and patterns. Larger values
+produce wider transitions and more noticeable blending. The source coordinates
+are slightly rescaled and inset to overlap opposite edges; this changes the
+framing, and recognizable features may ghost in the transition regions.
+RGB and alpha are blended together.
+
+Use `.tileable()` with no argument for the default width. Place it after all
+distortions and compositing: operations applied afterward can break tiling.
+To preview a grid of the resulting tile:
+
+```rust
+noise(5).color(1, 0.5, 0.2).tileable(0.15).repeat(3, 3).out()
+```
+
+The operation evaluates the preceding graph four times per pixel, so complex
+graphs cost more and nested `.tileable()` calls multiply that cost. It makes
+each animation frame spatially tileable, not temporally looping. It is not a
+periodic-noise generator and does not preserve the original image unchanged.
 
 ## Reactive values
 

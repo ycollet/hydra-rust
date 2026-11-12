@@ -463,6 +463,10 @@ pub struct Node {
 
 #[derive(Debug, Clone)]
 enum Op {
+    Tileable {
+        other: Node,
+        width: Arg,
+    },
     Source {
         func: &'static str,
         args: Vec<Arg>,
@@ -1697,6 +1701,7 @@ fn fmt_args(args: &[Arg]) -> String {
 
 struct Emitter {
     lines: Vec<String>,
+    functions: Vec<String>,
     st_counter: usize,
     var_counter: usize,
     depth: usize,
@@ -1708,6 +1713,7 @@ impl Emitter {
     fn new() -> Self {
         Self {
             lines: Vec::new(),
+            functions: Vec::new(),
             st_counter: 0,
             var_counter: 0,
             depth: 0,
@@ -1738,7 +1744,7 @@ impl Emitter {
 
         for op in &node.ops {
             match op {
-                Op::Source { .. } => {
+                Op::Source { .. } | Op::Tileable { .. } => {
                     if source.is_some() {
                         return Err("chain must have exactly one source".into());
                     }
@@ -1776,39 +1782,66 @@ impl Emitter {
             }
         }
 
-        let Op::Source { func, args } = source else {
-            unreachable!()
-        };
         let current_var = self.next_var();
 
-        if *func == "src" {
-            let buf_idx = match args.first() {
-                Some(Arg::Lit(v)) => (*v as usize).min(3),
-                _ => 0,
-            };
-            self.lines.push(format!(
-                "  vec4 {current_var} = texture(iBuffer{buf_idx}, {current_st});"
+        if let Op::Tileable { other, width } = source {
+            // Compile the complete preceding graph into a callable sampler,
+            // rather than applying a coordinate transform to only its source.
+            let outer_lines = std::mem::take(&mut self.lines);
+            let sampled = self.compile_node(other)?;
+            let body = std::mem::replace(&mut self.lines, outer_lines).join("\n");
+            let sampler = format!("{current_var}_sample");
+            let tile = format!("{current_var}_tile");
+            // Inset the domain so opposite borders sample the same pair of
+            // locations with equal weights. Translated (not mirrored) samples
+            // and smooth weights also preserve seam slopes for smooth inputs.
+            self.functions.push(format!(
+                "vec4 {sampler}(vec2 st) {{\n{body}\n  return {sampled};\n}}\n\
+                 vec4 {tile}(vec2 st, float width) {{\n\
+                   float w = clamp(width, 0.001, 0.5);\n\
+                   vec2 p = fract(st) * (1.0 - w) + 0.5 * w;\n\
+                   vec2 q = clamp(p + (1.0 - 2.0 * step(vec2(0.5), p)) * (1.0 - w), 0.0, 1.0);\n\
+                   vec2 blend = 0.5 * (1.0 - smoothstep(vec2(0.5 * w), vec2(w), min(p, 1.0 - p)));\n\
+                   return mix(mix({sampler}(p), {sampler}(vec2(q.x, p.y)), blend.x),\n\
+                              mix({sampler}(vec2(p.x, q.y)), {sampler}(q), blend.x), blend.y);\n\
+                 }}"
             ));
-        } else if *func == "text_src" {
             self.lines.push(format!(
+                "  vec4 {current_var} = {tile}({current_st}, {});",
+                fmt_arg(width)
+            ));
+        } else if let Op::Source { func, args } = source {
+            if *func == "src" {
+                let buf_idx = match args.first() {
+                    Some(Arg::Lit(v)) => (*v as usize).min(3),
+                    _ => 0,
+                };
+                self.lines.push(format!(
+                    "  vec4 {current_var} = texture(iBuffer{buf_idx}, {current_st});"
+                ));
+            } else if *func == "text_src" {
+                self.lines.push(format!(
                 "  vec4 {current_var} = texture(iText0, vec2({current_st}.x, 1.0 - {current_st}.y));"
             ));
-        } else if *func == "ext_src" {
-            let src_idx = match args.first() {
-                Some(Arg::Lit(v)) => (*v as usize).min(3),
-                _ => 0,
-            };
-            // Force alpha=1.0: cameras produce RGB data, GL fills alpha=1.0 for RGB textures
-            // but we force it here too for clarity and to guard against format changes
-            self.lines.push(format!(
+            } else if *func == "ext_src" {
+                let src_idx = match args.first() {
+                    Some(Arg::Lit(v)) => (*v as usize).min(3),
+                    _ => 0,
+                };
+                // Force alpha=1.0: cameras produce RGB data, GL fills alpha=1.0 for RGB textures
+                // but we force it here too for clarity and to guard against format changes
+                self.lines.push(format!(
                 "  vec4 {current_var} = vec4(texture(iSource{src_idx}, vec2({current_st}.x, 1.0 - {current_st}.y)).rgb, 1.0);"
             ));
+            } else {
+                let a = fmt_args(args);
+                let sep = if a.is_empty() { "" } else { ", " };
+                self.lines.push(format!(
+                    "  vec4 {current_var} = {func}({current_st}{sep}{a});"
+                ));
+            }
         } else {
-            let a = fmt_args(args);
-            let sep = if a.is_empty() { "" } else { ", " };
-            self.lines.push(format!(
-                "  vec4 {current_var} = {func}({current_st}{sep}{a});"
-            ));
+            unreachable!()
         }
 
         let mut prev_var = current_var;
@@ -1845,8 +1878,13 @@ fn compile_node(node: &Node) -> Result<String, String> {
     let mut emitter = Emitter::new();
     let final_var = emitter.compile_node(node)?;
     let body = emitter.lines.join("\n");
+    let functions = if emitter.functions.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", emitter.functions.join("\n"))
+    };
     Ok(format!(
-        "void mainImage(out vec4 c, in vec2 st) {{\n{body}\n  c = {final_var};\n}}"
+        "{functions}void mainImage(out vec4 c, in vec2 st) {{\n{body}\n  c = {final_var};\n}}"
     ))
 }
 
@@ -2401,6 +2439,36 @@ fn eval_impl(
     register_functions(&mut engine);
     register_glsl_ops(&mut engine);
     register_patterns(&mut engine);
+    engine.register_fn("tileable", |node: Node| Node {
+        ops: vec![Op::Tileable {
+            other: node,
+            width: Arg::Lit(0.15),
+        }],
+    });
+    engine.register_fn(
+        "tileable",
+        |node: Node, width: Dynamic| -> Result<Node, Box<rhai::EvalAltResult>> {
+            let supported = width.is_int()
+                || width.is_float()
+                || width.is::<GlslExpr>()
+                || width.is::<Pattern>()
+                || width.is_array();
+            #[cfg(feature = "midi")]
+            let supported = supported || width.is::<MidiSignal>();
+            if !supported {
+                return Err("tileable width must be a number, reactive value, or pattern".into());
+            }
+            let width = as_arg(width);
+            if let Arg::Lit(value) = &width
+                && !value.is_finite()
+            {
+                return Err("tileable width must be finite".into());
+            }
+            Ok(Node {
+                ops: vec![Op::Tileable { other: node, width }],
+            })
+        },
+    );
 
     // Register each `setFunction`-defined custom function as a real
     // overload, exactly like a built-in `FUNCTIONS` entry, and collect its
