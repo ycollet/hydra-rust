@@ -1,22 +1,37 @@
-# hydra-rust function documentation
+# hydra-rust documentation
 
-A complete, example-driven reference for every function `hydra_rust::eval()` registers —
-core functions (always available) and feature-gated ones (`webcam`, `audio`, `image_url`,
-`midi`, `osc`, `video`), plus the standalone `hydra` binary's scene-bank system. Each entry lists
-its parameters (with defaults) and a small runnable example.
+Installation, standalone workflows, embedding guidance, compatibility notes,
+and an example-driven function reference for hydra-rust. For a short project
+overview and quick start, see [README.md](README.md).
 
-This complements [SPEC.md](SPEC.md), which documents the *language* (the JS-compatibility
-preprocessing pipeline, reactive-value semantics, chain/buffer model, patterns) rather than
-enumerating every function with examples. See SPEC.md if you want the "why" behind a
-behavior; see this document if you want "what does function X take and how do I call it."
+[SPEC.md](SPEC.md) describes the language, JavaScript-compatibility
+preprocessing, reactive semantics, and shader-chain model. The
+[plugin guide](crates/hydra-plugin/README.md) covers VST3/CLAP builds and
+the plugin's loader-only interface.
 
-Every example is a complete, valid hydra-rust script (verified against `eval()`) that can be
-pasted into the standalone binary's editor or passed to the library's `eval()` function
-directly. Most omit `.out()` where a bare terminating source/chain would implicitly write to
-`o0` (see SPEC.md §2) — but calling `.out()` explicitly is always fine too.
+The scripting reference covers core functions and optional Cargo features.
+Examples can be evaluated in the standalone editor or through
+`hydra_rust::eval()` when the necessary features are enabled. Bare terminating
+chains implicitly write to `o0`; an explicit `.out()` is also valid.
 
 ## Contents
 
+- [Features](#features)
+- [Build](#build)
+- [NSM sessions](#nsm-sessions)
+- [Audio onset and beat reactivity](#audio-onset-and-beat-reactivity)
+- [Keyboard shortcuts](#keyboard-shortcuts)
+- [Scene banks](#scene-banks)
+- [Feature-gated functions](#feature-gated-functions)
+- [Example](#example)
+- [Used in Sova](#used-in-sova)
+- [Differences from browser Hydra](#differences-from-browser-hydra)
+- [Custom GLSL functions (`setFunction`)](#custom-glsl-functions-setfunction)
+- [Screenshots](#screenshots)
+- [Text rendering](#text-rendering)
+- [Pattern easing](#pattern-easing)
+- [Current limitations](#current-limitations)
+- [Testing against a real-world sketch corpus](#testing-against-a-real-world-sketch-corpus)
 - [How chains work](#how-chains-work)
 - [Sources](#sources)
 - [Geometry](#geometry)
@@ -35,8 +50,461 @@ directly. Most omit `.out()` where a bare terminating source/chain would implici
 - [Feature: `osc`](#feature-osc)
 - [Feature: `video`](#feature-video)
 - [Feature: `stream`](#feature-stream)
-- [Scene banks (standalone binary)](#scene-banks-standalone-binary)
 - [Known gaps and stub functions](#known-gaps-and-stub-functions)
+
+## Features
+
+### Function overview
+
+| Category | Functions |
+|----------|-----------|
+| **Sources** | `osc`, `noise`, `voronoi`, `shape`, `gradient`, `solid`, `rings`, `checker` |
+| **Geometry** | `rotate`, `scale`, `scroll`, `kaleid`, `pixelate`, `repeat`, `scrollX`, `scrollY`, `repeatX`, `repeatY`, `polar`, `cart`, `fold` |
+| **Color** | `color`, `invert`, `contrast`, `brightness`, `saturate`, `hue`, `posterize`, `luma`, `colorama`, `shift`, `thresh`, `r`, `g`, `b` |
+| **Blend** | `add`, `mult`, `blend`, `diff`, `layer`, `mask`, `sub` |
+| **Modulate** | `modulate`, `modulateScale`, `modulateRotate`, `modulateRepeat`, `modulateRepeatX`, `modulateRepeatY`, `modulateKaleid`, `modulateScrollX`, `modulateScrollY`, `modulatePixelate`, `modulateHue` |
+| **Other** | `text`, `src`, `initCam`, `fast`, `smooth`, `out`, `render`, `hush` |
+
+### Rendering
+
+- 4-buffer ping-pong architecture (`o0`–`o3`)
+- 4 external source slots (`s0`–`s3`) for webcam feeds
+- Text rendering via bundled Hack font
+- GLSL 330 (OpenGL 3.3 core profile)
+
+### Standalone binary
+
+- Transparent editor overlay over GL visuals
+- Syntax highlighting (OneDark theme)
+- File save/load (`.hydra` files)
+- Session persistence
+- Options sidebar (tempo, font size, text opacity)
+- Scene banks — 4 banks x 16 slots for instant scene recall, see [Scene banks](#scene-banks)
+- Keyboard-driven — see [Keyboard shortcuts](#keyboard-shortcuts)
+
+### Library
+
+- No GUI dependencies when built with `default-features = false`
+- Public API: `eval(code) → Result<EvalResult, String>`
+- `ShaderRenderer` for OpenGL multipass rendering
+- `SourceManager` for webcam capture (4 slots)
+
+## Build
+
+### Installers
+
+Every pushed tag triggers [Release installers](.github/workflows/release.yml).
+Once all builds succeed, installers and `SHA256SUMS` are attached to the tag's
+[GitHub Release](https://github.com/sova-org/hydra-rust/releases):
+
+| Platform | Installer |
+|----------|-----------|
+| Debian 12+ (x86-64) | `.deb` |
+| Fedora 43+ (x86-64) | `.rpm` |
+| macOS 12+ (Intel and Apple Silicon) | Separate `.dmg` files; drag Hydra to Applications |
+| Windows (x86-64) | Per-user setup `.exe`, with Start menu entry and uninstaller |
+
+These package the `hydra` desktop app with the default Cargo features (`gui`,
+`nsm`), not the VST3/CLAP plugin or optional device/network features. Linux
+packages declare their runtime dependencies; install them with `apt install
+./file.deb` or `dnf install ./file.rpm`. All platforms require OpenGL 3.3.
+
+Installer versions come from `[package].version` in `Cargo.toml`; update it
+before tagging (for example, `git tag v0.1.0 && git push origin v0.1.0`).
+Cargo prerelease versions produce prerelease GitHub Releases. The workflow
+can be rerun to replace assets on an existing release.
+
+Windows installers are unsigned; macOS apps are ad-hoc signed, not notarized.
+Windows SmartScreen or macOS Gatekeeper may require explicit approval.
+
+### From source
+
+```bash
+cargo build          # library + standalone binary (gui feature is on by default)
+cargo run            # standalone binary
+cargo test           # tests
+cargo clippy         # lint
+```
+
+To embed `hydra-rust` as a library in another project (e.g. a host app driving its own `glow::Context`/window), depend on it with the default `gui` feature turned off — this skips `eframe`/`rfd` and the whole windowing stack (egui, egui_glow, winit, arboard, ...) they pull in, which the library's own `eval`/`renderer`/manager modules never need:
+
+```toml
+[dependencies]
+hydra-rust = { path = "...", default-features = false, features = ["audio", "webcam"] } # pick whichever device features you need
+```
+
+`ShaderRenderer::new` only requires an `Arc<glow::Context>`, so a host can render into its own window/surface without pulling in the `hydra` binary's UI at all.
+
+## NSM sessions
+
+Both `hydra` and `hydra-plugin` automatically join New/Non Session Manager
+when the manager launches them with `NSM_URL`. Add the executable to the
+manager with its directory on `PATH`. NSM support is enabled by default;
+custom minimal desktop builds need `--features gui,nsm`.
+
+The desktop app saves its code, tempo, editor settings, and scene banks to
+`session.json` in the manager-assigned client directory, independently of
+`~/.hydra-rust.json`. A new managed session starts empty, not from the last
+unmanaged session. Ctrl/Cmd+S saves to the assigned session without a file
+dialog; Ctrl/Cmd+O imports script contents without making the original
+file the save destination. NSM save requests use the same session snapshot.
+Normal unmanaged startup and persistence are unchanged.
+
+The plugin standalone saves its embedded script source, selected path,
+and window size to `plugin-state.json`; see
+[plugin NSM support and JACK limitations](crates/hydra-plugin/README.md#nsm-sessions).
+Neither app advertises live session switching, dirty notifications, or an
+optional GUI. Invalid/unreachable managers fall back to unmanaged mode;
+corrupt session files and failed saves are reported instead of silently
+discarding state.
+
+### JACK / PipeWire audio input (Linux desktop app)
+
+Build JACK support explicitly, then select it at runtime:
+
+```sh
+# Debian/Ubuntu build dependencies (in addition to the GUI dependencies):
+sudo apt install libasound2-dev libjack-jackd2-dev pkg-config
+cargo build --release --features jack
+./target/release/hydra --jack sketch.hydra
+# With PipeWire's JACK compatibility libraries, where a launcher is needed:
+pw-jack ./target/release/hydra --jack sketch.hydra
+```
+
+`jack` includes the `audio` feature. Without `--jack`, the default audio
+backend is unchanged. The flag is rejected on non-Linux platforms or in
+builds without `jack`; JACK failures are logged and shown in the editor,
+without falling back to another audio backend. A running JACK server (or
+PipeWire's JACK compatibility layer) and its `libjack` library are required;
+Hydra does not start a server automatically.
+
+Audio capture stays lazy: load and explicitly evaluate an audio-reactive
+sketch, for example `osc(10 + a.fft[0] * 100).out()`, before connecting audio.
+The JACK client then appears as `hydra_in`, with input ports
+`in_0` and `in_1`. Connect a DAW or media player's outputs to these ports
+using your JACK/PipeWire patchbay. Hydra downmixes them to mono for FFT
+analysis; this desktop input creates no audio outputs and does not
+automatically connect to the microphone/system capture ports.
+
+For RaySession/NSM, configure the desktop executable's arguments to include
+`--jack` (and launch through `pw-jack` if your setup requires it).
+The JACK client uses `<NSM client ID>_in`, preserving the assigned ID's case
+and punctuation, with the same input port names. Save the connections using
+the session manager's JACK connection-saving facility. On reopening a
+session, evaluate the sketch to recreate the ports before expecting
+connections to be restored. Multiple managed instances get distinct,
+stable names from their NSM IDs. This naming support applies only to
+`hydra`; the plugin standalone's upstream JACK naming limitation remains.
+
+## Audio onset and beat reactivity
+
+Build the desktop app with `cargo run --features audio` to use audio input
+(or `--features jack` for the Linux JACK backend described above):
+
+```javascript
+osc(10 + a.onset * 40)
+  .rotate(() => a.beat * 6.28318)
+  .brightness(a.onset * 0.3)
+  .out()
+```
+
+`a.onset` is a decaying transient pulse, `a.beat` is the estimated beat phase
+from 0 to 1, and `a.bpm` is the estimated tempo. Beat/tempo remain zero until
+regular onsets establish a tempo; this is a basic 60-200 BPM estimate, not
+downbeat detection. These signals do not change the patch's global tempo.
+The plugin analyzes its host audio through the same pipeline.
+See [detection details and embedding API](SPEC.md#audio-onset-and-beat-detection).
+
+## Keyboard shortcuts
+
+The `Enter`-based shortcuts mirror [upstream Hydra](https://github.com/hydra-synth/hydra)'s own CodeMirror keymap (`Ctrl/Cmd+Enter`/`Alt+Enter`/`Ctrl/Cmd+Shift+Enter` for eval line/block/all); `Ctrl/Cmd+Alt+Enter` (eval selection) is specific to this native port, since upstream's `Ctrl/Cmd+Shift+Enter` slot was needed for "eval all" instead.
+
+| Shortcut | Action |
+|----------|--------|
+| `Ctrl/Cmd + Enter` | Evaluate only the line the cursor is on |
+| `Alt + Enter` | Evaluate the current "block": the contiguous run of non-blank lines around the cursor, stopping at the first blank line (or file boundary) above/below |
+| `Ctrl/Cmd + Shift + Enter` | Evaluate the whole sketch |
+| `Ctrl/Cmd + Alt + Enter` | Evaluate only the selected text in the editor (falls back to the whole sketch if there's no selection) |
+| `Ctrl/Cmd + S` | Save the current sketch to a `.hydra` file |
+| `Ctrl/Cmd + O` | Open a `.hydra` file |
+| `Ctrl/Cmd + P` or `Ctrl/Cmd + Shift + S` | Save a screenshot of the current render (no sidebar/editor) as `hydra_screenshot_DD_MM_YYYY.png` in the current directory |
+| `Ctrl/Cmd + /` | Toggle `//` line comments on the selected lines (or the cursor's current line, with no selection) |
+| `Ctrl/Cmd + Shift + F` | Format code: breaks a single-line method chain (e.g. `osc(60).rotate(0.1).out()`) onto one call per line. Always reformats the whole script, matching upstream (an already multi-line chain is left untouched) |
+| `Ctrl/Cmd + Shift + H` | Toggle editor visibility (hide the code overlay, keep the visuals running) |
+| `Tab` | Toggle the options sidebar — tempo/font/text-opacity, camera status, and the scene-bank grid (see below) |
+| `Alt/⌥ + 0`-`9` / `A`-`F` | Recall slot `0`-`F` (hex) in the active bank — loads and immediately evaluates its saved code |
+| `Alt/⌥ + Shift + 0`-`9` / `A`-`F` | Save the editor's current code into *that* slot (the recalled slot's own content is auto-saved continuously as you type — this is for copying the current code into a *different*/new slot) |
+| `Alt/⌥ + ←` / `→` | Cycle to the previous/next scene bank |
+| `Alt/⌥ + X` | Export the active bank (16 slots) as a `.bhr` file |
+| `Alt/⌥ + I` | Import a `.bhr` file into the active bank, replacing its 16 slots |
+
+## Scene banks
+
+A native port of [HYDRACTRL](https://github.com/dxviie/HYDRACTRL)'s own scene-bank system: **4 banks x 16 slots** (64 scenes total) for instant recall during a live-coding performance. Each slot holds a saved sketch's source code (no thumbnail preview, unlike HYDRACTRL's browser-canvas one — there's no cheap equivalent in a native GL app). Banks persist across restarts as part of the usual session file (`~/.hydra-rust.json`); a single bank (16 slots) can also be exported/imported as its own portable `.bhr` ("bank hydra rust") JSON file. See [Keyboard shortcuts](#keyboard-shortcuts) above for the `Alt`-based recall/save/cycle/export/import shortcuts (there's no MIDI-controller bank-switch mapping to defer to here, unlike HYDRACTRL, so cycling banks is always available).
+
+Once you've recalled or saved-to a slot, that slot keeps itself in sync with whatever you type from then on — switching to another slot, cycling banks, opening a different file, or quitting the app never silently discards an in-progress edit.
+
+Slots can also be clicked directly in the sidebar (`Tab` to show it) — the current bank number and a `0`-`F` slot grid are displayed there (white = the last slot you touched, magenta = filled, gray = empty).
+
+Five CLI flags round out the workflow (in addition to the existing bare positional argument, e.g. `hydra some.hydra`, which still works):
+
+```bash
+hydra -i mysketch.hydra           # --input: load a sketch at startup (same as the bare positional arg)
+hydra -bl mybank.bhr              # --bank-load: preload a .bhr file into the active bank at startup
+hydra -bs mybank.bhr              # --bank-save: Alt+X writes straight to this path instead of prompting
+hydra -bl mybank.bhr -bs mybank.bhr  # load and keep exporting to the same file
+hydra -sl mysketch.shr             # --slot-load: load a .shr file's code at startup (like -i, JSON-wrapped)
+hydra -ss mysketch.shr             # --slot-save: snapshot the starting code out to this path once, at launch
+```
+
+`.shr` ("slot hydra rust") is the single-sketch counterpart to `.bhr`: just `{"version": 1, "code": "..."}`, versus `.bhr`'s 16-element `slots` array. It's mostly a convenience/consistency format — a plain `.hydra` file already does the "one saved sketch" job just fine — but it shares `.bhr`'s versioned-JSON envelope (useful if either format ever needs extra metadata later) and gives `-ss`/`-sl` a natural single-sketch analogue to `-bs`/`-bl`. Unlike `-bs` (which pre-fills `Alt+X`'s target for later), `-ss` has no keybinding to defer to, so it writes immediately at launch instead.
+
+## Feature-gated functions
+
+Optional device and network functions require their matching Cargo features:
+
+```bash
+cargo run --features webcam,audio,image_url,midi,osc,video,stream --bin hydra
+```
+
+See the [webcam](#feature-webcam), [audio](#feature-audio),
+[image/GIF](#feature-image_url), [MIDI](#feature-midi), [OSC](#feature-osc),
+[video](#feature-video), and [streaming](#feature-stream) references below
+for commands, parameters, examples, and dependencies. `fft` provides the
+audio scripting API for host-fed samples without microphone capture;
+`jack` adds the Linux backend described under
+[JACK / PipeWire audio input](#jack--pipewire-audio-input-linux-desktop-app).
+Without the matching feature, functions are unavailable or explicitly
+stubbed as described in [the stub-function table](#stub-functions-accepted-but-not-yet-implemented).
+
+## Example
+
+```
+osc(60.0, 0.1, time * 0.5)
+  .kaleid(4.0)
+  .color(1.0, 0.5, 0.3)
+  .modulate(noise(3.0, 0.1), 0.02)
+  .rotate(0.0, 0.1)
+  .out()
+```
+
+Built-in globals available as GLSL expressions: `time`, `beat`, `tempo`, `phase`, `mouseX`, `mouseY`.
+
+## Used in Sova
+
+hydra-rust is the visual engine of [Sova](https://github.com/Bubobubobubobubo/Sova), a polyglot live coding sequencer for music and visuals. In Sova, hydra shaders sync to the musical clock via `beat`, `tempo`, and `phase`, and can be shared across peers in multiplayer sessions. A host like Sova can depend on `hydra-rust` with `default-features = false` (see [Build](#build)) to use `eval`/`ShaderRenderer` directly inside its own window, without the standalone app's `eframe`-based UI.
+
+## Differences from browser Hydra
+
+- **Rhai, not JavaScript.** A preprocessing layer accepts supported JavaScript-style syntax, including selected arrow-function forms, but there is no JavaScript runtime. Reactive expressions such as `osc(60.0, sin(time))` compile to GLSL; see [SPEC.md](SPEC.md) for supported syntax.
+- **Expression variables.** `time`, `beat`, `tempo`, `phase` are GLSL uniform references, not callback functions.
+- **Mouse input.** `mouseX` and `mouseY` are normalized to `[0, 1]`.
+- **No `speed` global.** Animation speed is per-source, controlled through function arguments.
+- **GLSL 330.** Targets OpenGL 3.3 core profile.
+
+## Custom GLSL functions (`setFunction`)
+
+`setFunction({name, type, inputs, glsl})` defines a new source/coord/color/
+combine/combineCoord function at runtime, the same way real hydra.js does —
+useful for pasting in a shader from a community extension or tutorial
+without editing hydra-rust itself. Must be its own statement (not chained
+off of, e.g. `setFunction({...}).out()`); define it, then call the new
+function by name afterwards:
+
+```js
+setFunction({
+  name: 'gradient2',
+  type: 'src',
+  inputs: [{type: 'float', name: 'speed', default: 0}],
+  glsl: `return vec4(sin(speed*time), st, 1.0);`
+});
+gradient2(0.5).out();
+```
+
+Every input is treated as a plain `float` regardless of its declared
+`type`; `time`/`resolution` in the `glsl` body are rewritten to this
+project's own `iTime`/`iResolution` uniform names. See `SPEC.md` §12 for
+the full details and limitations.
+
+## Screenshots
+
+Call `screencap()` in a script to save the next rendered frame, without the
+editor/sidebar, using the same PNG path as the screenshot keyboard shortcuts:
+`hydra_screenshot_DD_MM_YYYY.png` in the current directory, with a numeric
+suffix when needed. Multiple calls in one evaluation produce one capture;
+evaluating the script again requests another. Failed evaluations or shader
+compilation do not queue a capture.
+
+This is desktop-only for now. The plugin logs a warning, and library hosts
+can handle `EvalResult.screencap` themselves; `eval()` never writes a file.
+
+## Text rendering
+
+`text("hello")` draws filled text; `strokeText("hello")` draws hollow
+outlines; `fillStrokeText("hello")` and `strokeFillText("hello")` draw
+both. All use the bundled Hack font and one shared text texture (the last
+text call in an evaluation wins).
+
+`hydraText.fontSize` and `.lineWidth` set defaults for subsequent text calls
+in the current evaluation. Each call can override either property without
+changing those defaults:
+
+```javascript
+hydraText.fontSize = "50%"
+hydraText.lineWidth = "4%"
+strokeText("hello", {fontSize: "100px", lineWidth: 3}).out()
+```
+
+`fontSize` accepts `"auto"` (default), a percentage of the auto-fit size,
+or a number/numeric string with optional `px`. `lineWidth` accepts pixels
+or a percentage of the resolved font size (default `"2%"`); zero disables
+the stroke, and fractional widths are supported. Pixels refer to the
+512x512 text texture, not the window. Oversized text is clipped; font sizes
+must resolve to more than zero and at most 4096 pixels.
+
+Invalid or non-static settings log a warning and use the built-in default
+for that property. Defaults reset between evaluations. Outlines use an
+approximate distance field, with bounded processing cost even for wide
+strokes. Fill and stroke remain white, so both drawing orders have the
+same result. Arbitrary font selection and other styling properties remain
+accepted but ignored.
+
+## Pattern easing
+
+`[0, 1].ease('easeInOutCubic')` uses Hydra's named interpolation curves:
+`linear`, `sin`, and `easeIn`/`easeOut`/`easeInOut` with `Quad`, `Cubic`,
+`Quart`, or `Quint`. Calling `.ease()` selects `linear`; a recognized
+curve resets the smoothing window to `1`. A later `.smooth(amount)`
+changes that window, and `.fit()` preserves the curve. Unknown names
+log a warning and leave the pattern unchanged.
+
+## Current limitations
+
+- Max nesting depth of 16
+- Audio reactivity, webcam input, image-URL loading, MIDI input, video playback, and WebRTC streaming each require building with their own Cargo feature (off by default) — see [Feature-gated functions](#feature-gated-functions) above
+- `initVideo` (the `video` feature) additionally requires a standalone `ffmpeg` binary on `PATH` at runtime — it's spawned as a subprocess, not linked into this binary, so building hydra-rust itself never needs FFmpeg's dev libraries. Missing it just logs a warning rather than failing. `initStream`/`broadcastStream` (the `stream` feature) share this same `ffmpeg` requirement.
+- `initStream`/`broadcastStream` are hydra-rust-to-hydra-rust only — not interoperable with real hydra.js's own (currently broken) `initStream`/`pb.setName()` — and connect directly by IP:port with no NAT traversal, so both instances need to be reachable from each other directly (typically the same LAN). `broadcastStream` supports any number of simultaneous viewers, sharing one `ffmpeg` encode between them.
+- `broadcastStream` downscales anything wider than 1280px before encoding, regardless of the actual window/display resolution — realtime software VP8 encoding at a Retina display's true (2x+) framebuffer resolution can't keep up otherwise (found via real testing, not just a theoretical cap).
+
+### Stub functions (accepted, but not yet implemented)
+
+These are registered so scripts calling them don't hard-error, but they don't do anything real yet:
+
+| Function | Status |
+|----------|--------|
+| `initImage(idx, url)` | Real implementation behind the `image_url` feature: fetches the URL and decodes it (PNG/JPEG/GIF/WebP) in the background, then uploads it to the source slot once it's ready, through the same texture path webcam frames use. Without that feature, it's a no-op (returns the source as a chainable value, like real hydra.js) |
+| `initVideo(idx, url)` | Real implementation behind the `video` feature: streams frames from a local file or URL via a standalone `ffmpeg` subprocess (not linked into this binary — `ffmpeg` must be on `PATH` at runtime; missing it logs one clear warning rather than failing), looping indefinitely. Without that feature, it's a no-op (returns the source as a chainable value) |
+| `initGif(idx, url)` | Real implementation behind the `image_url` feature: fetches the URL, decodes every frame up front, and cycles through them by elapsed time once loaded, looping indefinitely — same texture path webcam frames use. Without that feature, it's a no-op (returns the source as a chainable value) |
+| `initStream(idx, url)` | Real implementation behind the `stream` feature: connects to another hydra-rust instance over WebRTC (see [Feature: `stream`](#feature-stream)) — not real hydra.js's own (currently broken) `initStream`. Without that feature, it's a no-op (returns the source as a chainable value) |
+| `initScreen(idx[, screen])` | No-op (returns the source as a chainable value) — no screen/display capture |
+| `sN.init({src: ...})` | No-op (returns the slot's source as a chainable value) — not a real hydra.js API at all, but a pattern some external platforms use to feed a p5.js canvas/DOM element into a source slot; no such capture pipeline exists here |
+| `P5(...)` / `new P5(...)` | Returns a plain settable map (like `hydraText`) rather than hard-erroring, so an assignment (`let p1 = P5(...)`) and later property reads/writes on it still work — p5.js is a whole separate creative-coding framework with no Rust equivalent here. A handful of its most commonly-called instance methods (`hide`, `show`, `textSize`, `fill`, `stroke`, `strokeWeight`, `noStroke`, `noFill`, `textFont`, `color`, `text`) are additionally registered as no-ops on that map; the rest of its (large) API isn't, and unregistered numeric properties (`p1.frameCount`, `mouseX`, ...) read as `()`, which arithmetic (`+`/`-`/`*`/`/`) treats as `0` rather than hard-failing. p5.js's global-mode `color(r,g,b[,a])` constructor (no `p1.` prefix) is also registered separately from hydra's own `.color()` chain method |
+| `new THREE.PerspectiveCamera(...)` / `new THREE.WebGLRenderer(...)` / `renderer.setSize(...)` | No-ops (return a settable map) — three.js setup boilerplate. `THREE` itself is never a real module — `let THREE = await import(url)` degrades to a plain string once `await`/`import` are stripped as bare keywords — so these are registered against that string receiver too. No 3D rendering pipeline exists here |
+| `document.createElement(...)` / `.getElementById(...)` / `.querySelector(...)` / `.getElementsByTagName(...)` | Each returns a plain settable map (like `P5(...)`) rather than hard-erroring — real sketches commonly build an offscreen `<canvas>`/`<img>` element this way, usually to feed a p5.js overlay or draw text via a 2D canvas context; no DOM exists here to back it. `.getContext("2d")` on the resulting map returns another settable map with its own common methods (`fillText`, `fillRect`, `clearRect`, `strokeText`, `save`/`restore`, `translate`/`scale`, `measureText`, `createLinearGradient`) registered as no-ops; properties like `.fillStyle`/`.font` need no registration, same as `hydraText` |
+| `canvas.setRelativeSize(...)` / `.setAlign(...)` / `.setLinear()` / `.setNearest()` | No-op — a top-level `canvas` config object the `hyper-hydra` community extension exposes, not a real hydra.js API at all |
+| `Scene(name)` | No-op — not a hydra.js API at all; some external VJ/live-coding integrations use it to switch named cue banks |
+| `loadScript(url)` | No-op — no dynamic module loading. Some of the most commonly-loaded community extensions' functions are ported natively instead (`spiral`, `turb`, `uturb`, `unoise`, `whitenoise`, `colornoise`, `warp`, `cwarp`, `ncontour`, `pulse`, `pulsetrain`, `hextile`, `concentric`, `brick`, `wave`, `lissa`, `inversion`, `mirrorX`/`mirrorY`/`mirrorX2`/`mirrorY2`/`mirrorWrap`, `mandeloffs`, `colreflect` — see SPEC.md §6); anything else the loaded script would have defined still won't exist |
+| `pb.setName(name)` / `pb.list()` | No-op — not a hydra.js API at all; boilerplate an external platform injects when a sketch is exported/shared |
+| `hydraText.font = ...` / other styling properties | Font selection and other styling remain no-ops; `fontSize` and `lineWidth` are implemented globally and per call (see Text rendering above) |
+
+## Testing against a real-world sketch corpus
+
+`examples/check_corpus.rs` is a fast conformance-testing harness: it walks a
+directory of `.hydra` files and evaluates each one directly through
+`hydra_rust::eval()` — no window, no GL context — so tens of thousands of
+sketches check in seconds. It buckets failures by cause (missing function,
+syntax error, etc.) and writes the full per-file failure list to JSON.
+
+The sketches themselves are **not** part of this repository (they're
+third-party, user-submitted, CC BY-NC-SA-licensed content — see
+`sketches/` in `.gitignore`). Fetch a fresh copy of the public
+[hydra-synth](https://hydra.ojack.xyz/) sketch database instead:
+
+```bash
+python3 scripts/fetch_corpus.py          # downloads into ./sketches
+```
+
+Then run the harness against it (built with `--release` and every feature,
+so `a.fft[...]`/`initCam(...)`/`initImage(...)`/`note(...)`-style sketches
+don't fail just because those functions aren't registered):
+
+```bash
+cargo run --release --features webcam,audio,image_url,midi,osc,video,stream --example check_corpus -- sketches
+```
+
+This prints an ok/failed count and the top failure buckets, and writes
+`check_corpus_failures.json` (path, error message per failing file) for
+deeper digging.
+
+### Known-broken sketches: buffers beyond `o0`-`o3`
+
+hydra-rust only implements 4 output buffers (`o0`-`o3`), matching real
+hydra.js's own limit. Some sketches in the public corpus reference a higher
+buffer index (`o4` up through a clearly-typo'd `o10987654`) — these are
+errors in the original sketch itself, not a hydra-rust conformance gap;
+real hydra.js would reject them too. Regenerate this list from a fresh
+`check_corpus_failures.json` (see above) yourself:
+
+```bash
+python3 -c "
+import json, re
+data = json.load(open('check_corpus_failures.json'))
+for e in data:
+    if re.match(r'Variable not found: o\d+ \(', e['error']):
+        print(e['file'], '-', e['error'])
+"
+```
+
+<details>
+<summary>73 affected sketches (snapshot from this session)</summary>
+
+- `o4` (21): `43ehBRbYLii1rgGr`, `5Y6r4TLGs4XKYwhx`, `6zFiWCIoFUL7n9zu`, `ASb5VAew6t067Uio`, `AjFg5nRpovNBAj9D`, `E4G3DklYF1VpyfMT`, `FxkxjQsCeFFrWsdg`, `LNfi2yCRY09SxR64`, `QslDk59HczJhaGWU`, `V2fAjkgS8zhheRvV`, `VFUf3eU67CTCUfYU`, `Y7Sqy1P4KF3CLxUU`, `YugaBL74Pw7UAvlb`, `aodWvyME0xI3jB7m`, `fEIXp0g0ZwQEy9Rc`, `gtwk9SGqsA4GODJd`, `jQX9cpluGcoqpQQA`, `jRZpwk5wxZzLT1J5`, `lJ6hhdXr33ilhfBF`, `lQVEtvWCB3EqXWp3`, `utYYjFUXRO9Z5Aut`
+- `o5` (15): `1wZaiXko9Q8rZ1xq`, `Ad4xNLD6ulqEmE49`, `Kx101mGtz5DURR5S`, `MdFbiECQ8QehBQqM`, `NXkmjf7HlaBHRudY`, `OpJyLigtwsL4cvWf`, `QsWyj8GGPOTvQGhO`, `WJiPmKwkFxJzR9r7`, `cvV5LkExVeKRWE6U`, `eT1yrdX0o8AuZeUz`, `grROnRapw2HQmIZG`, `lb8bQm84w1odpl0O`, `mV8VYA3ocxtMZhPA`, `meKGY0Moy4fEVWSG`, `woXLgY6LNG1guPuk`
+- `o6` (1): `bQYkAZjS9nqonZZG`
+- `o7` (4): `UhzTt8jwuXe5SoIm`, `mZTRwQ6OMVqNedC8`, `n2XHJwUdnVbJWlHQ`, `sKtOcGCST9KO4xRG`
+- `o8` (1): `ZbUc4DqjLaNZqbO9`
+- `o9` (13): `6G6CLqvkidogMUdd`, `8itoqbZZAUjcAeIW`, `E12OtehM9mjervDh`, `GfMCIDzf3w4hoh1o`, `GkITmLwMSDjeTwN6`, `MJYf0b50mx4wXtdl`, `Nn8PFsdthS2IKAUi`, `X4F3usrzrUug9dw6`, `cT3MMWRcVaXIkMhu`, `dZXW1u8WtF9rCcGX`, `gHgaqS49pXTGPKUA`, `gklcdmy2g6XHihCT`, `hg9GlnmsDsO1tPX9`
+- `o01` (1): `nRRv1dSvh9H2Smdd`
+- `o10` (6): `3QaV3GPfXuVTXVdl`, `Z00AluW5X9YIH7MO`, `Z4yRrk1zPnLmlYzD`, `gS2SkOwfTkWWcCYX`, `gUGuVXXtTKPXIOVH`, `zQstjilmm0sIguBf`
+- `o15` (2): `LSNsUz1ZztltknzU`, `xocvis4HiEP5IbtC`
+- `o23` (1): `PtNdKcbmywLb9dXQ`
+- `o33` (1): `KiLRvow6fWplbsV8`
+- `o50` (1): `ZOhOb9d4CM8GIkD0`
+- `o80` (1): `cwkEVTIJ8xudVoXM`
+- `o90` (1): `BGqMcfJ3zcEh77lH`
+- `o000` (2): `izVQdfNptnfPO2UD`, `octWoCHdMUIiHrHh`
+- `o100` (1): `rT0hWBYtmopYe4AL`
+- `o10987654` (1): `EGrgeAl4On3Rxv2D`
+
+</details>
+
+### Known-broken sketches: p5.js dependency
+
+hydra-rust has no JavaScript engine and doesn't load, execute, or manage
+any external JS libraries. Some sketches instantiate
+[p5.js](https://p5js.org/) directly (`p1 = new P5()` and similar) to draw
+extra overlay graphics alongside the hydra visuals — this is a whole
+separate creative-coding framework with no Rust equivalent here, so these
+sketches can't work regardless of any hydra-rust conformance fixes.
+Regenerate this list from a fresh `check_corpus_failures.json` (see above)
+yourself:
+
+```bash
+python3 -c "
+import json
+data = json.load(open('check_corpus_failures.json'))
+for e in data:
+    if 'P5' in e['error'] or \"'p5'\" in e['error']:
+        print(e['file'], '-', e['error'])
+"
+```
+
+<details>
+<summary>11 affected sketches (snapshot from this session)</summary>
+
+`C5VZw1nFAp9CHIJp`, `Tgcly25jfyE8j63N`, `W7uusYNDDH2eHGzB`, `WGu8wEalERTIjqyz`, `YmrdxMAsWx7rNw8O`, `lDGDJnvXdpq57VBZ`, `q5Lye9Lf1oJHnXIy`, `qYAgIWCEtjZ47ZuR`, `uqWfXFRF9cBAfZCY`, `wnJi3Zs4i6Ym7Y3e`, `5GT1XJqVnxbPhaJj`
+
+</details>
 
 ## How chains work
 
@@ -352,6 +820,10 @@ The desktop and plugin evaluate against their current settings so reads
 remain correct between evaluations. Embedding hosts can do the same via
 `eval_with_audio_settings(code, analyzer.settings())`.
 
+Cutoff, gain, and FFT normalization retain hydra-rust's behavior rather than
+Hydra's Meyda loudness units. For transient and beat signals, see
+[Audio onset and beat reactivity](#audio-onset-and-beat-reactivity).
+
 ## Feature: `image_url`
 
 ```bash
@@ -411,6 +883,18 @@ input, index `0`, named `"host"`, not the original external devices.
 single-parameter expression callbacks, not blocks, assignments, runtime
 branching, arbitrary function calls, or side effects. Put CC smoothing
 before `.value()`; smoothing an arbitrary transformed result is unsupported.
+
+Filtered value and envelope slots are assigned per evaluation. Reevaluate
+all affected output buffers together, rather than leaving older shaders
+running with slot IDs that a partial evaluation could reuse.
+Run with `RUST_LOG=info` to see connected device names; port indices follow
+the system's enumeration order.
+
+`.value()` accepts captured constants, `time`, and numeric math functions
+(`sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `abs`, `fract`, `floor`,
+`ceil`, `sqrt`, `sign`, `exp`, `log`, `pow`, `min`, `max`, and supported
+`Math.*` aliases). It also works after `.smooth()`, `.adsr()`, `.range()`,
+or `.scale()`.
 
 ## Feature: `osc`
 
@@ -513,50 +997,24 @@ Without this feature, `initStream` is a no-op (logged once) that still returns t
 node for chaining; `broadcastStream`/`stopBroadcast` aren't real hydra.js functions, so without
 `stream` they're simply not registered at all (a plain "Function not found").
 
-## Scene banks (standalone binary)
-
-Not a scripting-language feature — a `hydra` binary UI/workflow feature for live performance,
-a native port of [HYDRACTRL](https://github.com/dxviie/HYDRACTRL)'s bank system: **4 banks x
-16 slots** (64 scenes total), each slot holding a saved sketch's source code. Banks persist
-across restarts in the session file (`~/.hydra-rust.json`); a single bank can also be
-exported/imported as a `.bhr` file, and a single slot's code as a `.shr` file.
-
-| Shortcut | Action |
-|---|---|
-| `Alt/⌥ + 0`-`9` / `A`-`F` | Recall slot `0`-`F` (hex) in the active bank — loads and immediately evaluates its saved code |
-| `Alt/⌥ + Shift + 0`-`9` / `A`-`F` | Save the editor's current code into that slot |
-| `Alt/⌥ + ←` / `→` | Cycle to the previous/next scene bank |
-| `Alt/⌥ + X` | Export the active bank (16 slots) as a `.bhr` file |
-| `Alt/⌥ + I` | Import a `.bhr` file into the active bank, replacing its 16 slots |
-
-The recalled/saved-to slot then auto-persists from the live editor every frame, so switching
-slots, cycling banks, opening a different file, or quitting never silently discards an
-in-progress edit. Slots can also be clicked directly in the sidebar (`Tab` to show it).
-
-CLI flags:
+To broadcast a webcam, file, or test pattern with the companion CLI:
 
 ```bash
-hydra -i mysketch.hydra              # --input: load a sketch at startup
-hydra -bl mybank.bhr                 # --bank-load: preload a .bhr file into the active bank
-hydra -bs mybank.bhr                 # --bank-save: Alt+X writes straight to this path
-hydra -sl mysketch.shr               # --slot-load: load a .shr file's code at startup
-hydra -ss mysketch.shr               # --slot-save: snapshot the starting code to this path once, at launch
+cargo run --features stream --example webrtc_broadcast -- 9000
+# macOS webcam: append --format avfoundation --input 0
+# Linux webcam: append --format v4l2 --input /dev/video0
+# Video file: append --input clip.mp4
 ```
-
-See [README.md](README.md#keyboard-shortcuts) for the full keyboard-shortcut table (including
-non-bank shortcuts like evaluate/save/open) and [README.md](README.md#scene-banks) for more
-detail on the `.bhr`/`.shr` formats.
 
 ## Known gaps and stub functions
 
-A handful of functions are registered (so a script calling them doesn't hard-error) but don't
-do anything real, or only partially implement real hydra.js/community-extension behavior —
-`initScreen`, `P5(...)`, `Scene(...)`,
-`loadScript`, and a few others. See
-[README.md's stub-function table](README.md#stub-functions-accepted-but-not-yet-implemented)
-for the complete, currently-accurate list with rationale for each, and SPEC.md §9 for the
-same list in the language-spec context.
+Some accepted functions do nothing or only partially implement browser
+Hydra/community-extension behavior. See the
+[stub-function table](#stub-functions-accepted-but-not-yet-implemented)
+for the status and rationale of `initScreen`, `P5(...)`, `Scene(...)`,
+`loadScript`, browser DOM helpers, and feature-disabled source initializers.
+SPEC.md §9 describes these gaps in the language-spec context.
 
-`setFunction(...)` is **not** a stub — it's a real, dynamic custom-GLSL-function registration
-mechanism; see [README.md's "Custom GLSL functions"](README.md#custom-glsl-functions-setfunction)
-section and SPEC.md §12.
+`setFunction(...)` is **not** a stub: it registers dynamic custom GLSL
+functions. See [Custom GLSL functions](#custom-glsl-functions-setfunction)
+and SPEC.md §12.
