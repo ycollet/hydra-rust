@@ -11,7 +11,7 @@
 
 ## README and documentation
 
-- Write the README and documentation in French.
+- Write the README and documentation in English.
 - Keep `README.md` concise (maximum 40 lines): project overview, basic installation, quick start, and links to further information.
 - Place detailed instructions, examples, and technical references in `DOCUMENTATION.md`. Create this file if it does not already exist, and include a link to it in the README.
 - Use short sentences (maximum 20 words), with one idea per sentence.
