@@ -49,6 +49,10 @@ use crate::highlight::HydraHighlighter;
 #[derive(Serialize, Deserialize)]
 struct Session {
     code: String,
+    #[serde(default)]
+    javascript: bool,
+    #[serde(default)]
+    library_root: Option<PathBuf>,
     tempo: f32,
     font_size: f32,
     text_opacity: f32,
@@ -66,6 +70,8 @@ impl Default for Session {
     fn default() -> Self {
         Self {
             code: String::new(),
+            javascript: false,
+            library_root: None,
             tempo: 120.0,
             font_size: 20.0,
             text_opacity: 0.55,
@@ -191,6 +197,16 @@ pub struct HydraApp {
     #[cfg(feature = "nsm")]
     nsm: Option<hydra_rust::nsm::NsmClient>,
     code: String,
+    javascript: bool,
+    library_root: PathBuf,
+    #[cfg(feature = "javascript")]
+    javascript_runtime: Option<hydra_rust::javascript::JavascriptRuntime>,
+    #[cfg(feature = "javascript")]
+    javascript_active: bool,
+    #[cfg(feature = "javascript")]
+    javascript_suspended: bool,
+    #[cfg(feature = "javascript")]
+    javascript_values: [f32; 128],
     renderer: Option<ShaderRenderer>,
     error: Option<(String, Instant)>,
     start_time: Instant,
@@ -279,6 +295,8 @@ impl HydraApp {
     ) -> Self {
         let super::CliArgs {
             input: file_arg,
+            javascript,
+            library_root,
             bank_save,
             bank_load,
             slot_save,
@@ -304,6 +322,18 @@ impl HydraApp {
             #[cfg(feature = "nsm")]
             nsm,
             code: session.code,
+            javascript: javascript || library_root.is_some() || session.javascript,
+            library_root: library_root
+                .or(session.library_root)
+                .unwrap_or_else(|| PathBuf::from(".")),
+            #[cfg(feature = "javascript")]
+            javascript_runtime: None,
+            #[cfg(feature = "javascript")]
+            javascript_active: false,
+            #[cfg(feature = "javascript")]
+            javascript_suspended: false,
+            #[cfg(feature = "javascript")]
+            javascript_values: [0.0; 128],
             renderer: cc.gl.clone().map(ShaderRenderer::new),
             error: None,
             start_time: Instant::now(),
@@ -425,6 +455,8 @@ impl HydraApp {
     fn session(&self) -> Session {
         Session {
             code: self.code.clone(),
+            javascript: self.javascript,
+            library_root: Some(self.library_root.clone()),
             tempo: self.tempo,
             font_size: self.font_size,
             text_opacity: self.text_opacity,
@@ -535,7 +567,12 @@ impl HydraApp {
                 if lo == hi {
                     None
                 } else {
-                    self.code.chars().take(hi).skip(lo).collect::<String>().into()
+                    self.code
+                        .chars()
+                        .take(hi)
+                        .skip(lo)
+                        .collect::<String>()
+                        .into()
                 }
             })
             .filter(|s: &String| !s.trim().is_empty());
@@ -573,10 +610,12 @@ impl HydraApp {
         self.code = new_code;
 
         let mut state = egui::TextEdit::load_state(ctx, id).unwrap_or_default();
-        state.cursor.set_char_range(Some(egui::text::CCursorRange::two(
-            egui::text::CCursor::new(new_lo),
-            egui::text::CCursor::new(new_hi),
-        )));
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::two(
+                egui::text::CCursor::new(new_lo),
+                egui::text::CCursor::new(new_hi),
+            )));
         state.store(ctx, id);
     }
 
@@ -585,7 +624,7 @@ impl HydraApp {
         let Some(renderer) = &mut self.renderer else {
             return;
         };
-        if code.is_empty() {
+        if code.is_empty() && !self.javascript {
             let _ = renderer.compile_buffers(
                 &[
                     Some(hydra_rust::shader::DEFAULT_SHADER.to_owned()),
@@ -596,18 +635,78 @@ impl HydraApp {
                 Default::default(),
             );
             self.error = None;
+            #[cfg(feature = "javascript")]
+            {
+                self.javascript_active = false;
+            }
             return;
         }
-        #[cfg(feature = "audio")]
-        let result = hydra_rust::eval_with_audio_settings(code, self.audio_manager.settings());
-        #[cfg(not(feature = "audio"))]
-        let result = hydra_rust::eval(code);
+        let result = if self.javascript {
+            #[cfg(feature = "javascript")]
+            {
+                let initialized = if self.javascript_runtime.is_none() {
+                    self.library_root
+                        .canonicalize()
+                        .map_err(|error| format!("library root: {error}"))
+                        .and_then(|root| {
+                            hydra_rust::javascript::JavascriptRuntime::new(root.clone()).map(
+                                |runtime| {
+                                    self.library_root = root;
+                                    self.javascript_runtime = Some(runtime);
+                                },
+                            )
+                        })
+                } else {
+                    Ok(())
+                };
+                initialized.and_then(|()| {
+                    self.javascript_runtime
+                        .as_mut()
+                        .expect("JavaScript runtime initialized")
+                        .eval(if code.is_empty() { "hush()" } else { code })
+                })
+            }
+            #[cfg(not(feature = "javascript"))]
+            {
+                Err("JavaScript mode requires a build with --features javascript".to_owned())
+            }
+        } else {
+            #[cfg(feature = "audio")]
+            let result = hydra_rust::eval_with_audio_settings(code, self.audio_manager.settings());
+            #[cfg(not(feature = "audio"))]
+            let result = hydra_rust::eval(code);
+            result
+        };
         match result {
             Ok(result) => {
+                #[cfg(feature = "javascript")]
+                if self.javascript {
+                    let errors =
+                        renderer.compile_buffers_atomic(&result.shaders, result.render_mode);
+                    if !errors.is_empty() {
+                        let mut message = format!("shader compile error: {}", errors.join("; "));
+                        if let Err(error) = self
+                            .javascript_runtime
+                            .as_mut()
+                            .expect("JavaScript runtime initialized")
+                            .rollback_last_eval()
+                        {
+                            self.javascript_suspended = true;
+                            message.push_str(&format!("; JavaScript rollback failed: {error}"));
+                        }
+                        log::error!("{message}");
+                        self.error = Some((message, Instant::now()));
+                        return;
+                    }
+                }
                 if let Some(ref td) = result.text_data {
                     renderer.upload_text(td);
                 }
-                let compile_errors = renderer.compile_buffers(&result.shaders, result.render_mode);
+                let compile_errors = if self.javascript {
+                    Vec::new()
+                } else {
+                    renderer.compile_buffers(&result.shaders, result.render_mode)
+                };
                 self.render_resolution_override = result.render_resolution;
                 for (i, filter) in result.buffer_filter.iter().enumerate() {
                     if let Some(mode) = filter {
@@ -664,6 +763,13 @@ impl HydraApp {
                             s.as_deref()
                                 .is_some_and(|s| s.contains("iFft[") || s.contains("iAudioRhythm."))
                         });
+                    #[cfg(feature = "javascript")]
+                    let uses_audio = uses_audio
+                        || (self.javascript
+                            && self
+                                .javascript_runtime
+                                .as_ref()
+                                .is_some_and(|runtime| runtime.uses_audio()));
                     if uses_audio {
                         self.audio_manager.ensure_started();
                     }
@@ -754,6 +860,11 @@ impl HydraApp {
                     }
                 }
                 if compile_errors.is_empty() {
+                    #[cfg(feature = "javascript")]
+                    {
+                        self.javascript_active = self.javascript;
+                        self.javascript_suspended = false;
+                    }
                     self.pending_screenshot |= result.screencap;
                     self.error = None;
                 } else {
@@ -784,8 +895,12 @@ impl HydraApp {
             Some(p.clone())
         } else {
             rfd::FileDialog::new()
-                .add_filter("Hydra", &["hydra"])
-                .set_file_name("patch.hydra")
+                .add_filter("Hydra scripts", &["hydra", "js"])
+                .set_file_name(if self.javascript {
+                    "patch.js"
+                } else {
+                    "patch.hydra"
+                })
                 .save_file()
         };
         if let Some(p) = path {
@@ -796,7 +911,7 @@ impl HydraApp {
 
     fn load_file(&mut self) {
         let path = rfd::FileDialog::new()
-            .add_filter("Hydra", &["hydra"])
+            .add_filter("Hydra scripts", &["hydra", "js"])
             .pick_file();
         if let Some(p) = path
             && let Ok(contents) = std::fs::read_to_string(&p)
@@ -917,6 +1032,37 @@ impl HydraApp {
         #[cfg(not(feature = "osc"))]
         let osc_frame_values = [0.0; hydra_rust::osc::NUM_OSC_SLOTS];
 
+        #[cfg(feature = "javascript")]
+        if self.javascript_active
+            && !self.javascript_suspended
+            && let Some(runtime) = &mut self.javascript_runtime
+        {
+            let input = hydra_rust::javascript::JavascriptFrame {
+                time,
+                resolution: [buf_w as f32, buf_h as f32],
+                mouse,
+                beat: time * (self.tempo / 60.0),
+                tempo: self.tempo,
+                phase: 0.0,
+                fft,
+                audio_onset: audio.onset,
+                audio_beat: audio.beat,
+                audio_bpm: audio.bpm,
+            };
+            match runtime.frame(input) {
+                Ok(values) => self.javascript_values = values,
+                Err(error) => {
+                    self.javascript_suspended = true;
+                    log::error!("JavaScript frame error: {error}");
+                    self.error = Some((error, Instant::now()));
+                }
+            }
+            #[cfg(feature = "audio")]
+            if runtime.uses_audio() {
+                self.audio_manager.ensure_started();
+            }
+        }
+
         // A script's broadcastStream(port) reads the just-rendered frame
         // back off the GPU, at the real window resolution (not buf_w/buf_h -
         // matches real hydra.js's own canvas.captureStream(), which
@@ -959,6 +1105,10 @@ impl HydraApp {
             midi_channel_aftertouch: midi_frame.channel_aftertouch,
             midi_values: midi_frame.values,
             osc: osc_frame_values,
+            #[cfg(feature = "javascript")]
+            javascript_values: self.javascript_values,
+            #[cfg(not(feature = "javascript"))]
+            javascript_values: [0.0; 128],
         };
 
         let cb = eframe::egui_glow::CallbackFn::new(move |_info, painter| {
@@ -1024,6 +1174,26 @@ impl HydraApp {
             .show(ctx, |ui| {
                 ui.heading("Options");
                 ui.add_space(8.0);
+                #[cfg(feature = "javascript")]
+                {
+                    ui.checkbox(&mut self.javascript, "JavaScript scripting");
+                    ui.small("Evaluate to apply a language change.");
+                    ui.small(format!("Libraries: {}", self.library_root.display()));
+                    if self.javascript_suspended {
+                        ui.colored_label(
+                            Color32::RED,
+                            "Callbacks paused. Fix the script and evaluate.",
+                        );
+                    }
+                    ui.add_space(8.0);
+                }
+                #[cfg(not(feature = "javascript"))]
+                if self.javascript {
+                    ui.colored_label(Color32::RED, "JavaScript support is not compiled in.");
+                    if ui.button("Use Rhai instead").clicked() {
+                        self.javascript = false;
+                    }
+                }
 
                 ui.label("Tempo (BPM)");
                 ui.add(egui::Slider::new(&mut self.tempo, 20.0..=300.0));
@@ -1572,7 +1742,13 @@ impl eframe::App for HydraApp {
         // code`, which always reformats the whole script, never a
         // selection.
         if ctx.input(|i| cmd(i, egui::Key::F) && i.modifiers.shift) {
-            self.code = format_code(&self.code);
+            if self.javascript {
+                let message = "The built-in formatter supports Rhai sketches, not JavaScript.";
+                log::warn!("{message}");
+                self.error = Some((message.into(), Instant::now()));
+            } else {
+                self.code = format_code(&self.code);
+            }
         }
         if ctx.input(|i| {
             i.key_pressed(egui::Key::H)
@@ -1796,7 +1972,10 @@ fn toggle_line_comments(code: &str, lo: usize, hi: usize) -> (String, usize, usi
     let is_blank = |(s, e): (usize, usize)| chars[s..e].iter().all(|c| c.is_whitespace());
     let is_commented = |(s, e): (usize, usize)| {
         let indent = chars[s..e].iter().take_while(|c| c.is_whitespace()).count();
-        chars[s + indent..e].iter().collect::<String>().starts_with("//")
+        chars[s + indent..e]
+            .iter()
+            .collect::<String>()
+            .starts_with("//")
     };
     let all_commented = (first_line..=last_line)
         .map(|i| lines[i])
@@ -2006,6 +2185,8 @@ mod tests {
             "current_file": null
         }"#;
         let session: Session = serde_json::from_str(old_json).unwrap();
+        assert!(!session.javascript);
+        assert!(session.library_root.is_none());
         assert!(session.banks.is_empty());
         assert_eq!(session.current_bank, 0);
     }
@@ -2014,6 +2195,8 @@ mod tests {
     fn managed_session_snapshot_restores_code_settings_and_scene_banks() {
         let mut session = Session {
             code: "osc(10).out()".into(),
+            javascript: true,
+            library_root: Some(PathBuf::from("examples/javascript")),
             tempo: 137.0,
             font_size: 24.0,
             text_opacity: 0.7,
@@ -2025,6 +2208,8 @@ mod tests {
         let restored: Session =
             serde_json::from_slice(&serde_json::to_vec(&session).unwrap()).unwrap();
         assert_eq!(restored.code, session.code);
+        assert!(restored.javascript);
+        assert_eq!(restored.library_root, session.library_root);
         assert_eq!(restored.tempo, session.tempo);
         assert_eq!(restored.font_size, session.font_size);
         assert_eq!(restored.text_opacity, session.text_opacity);

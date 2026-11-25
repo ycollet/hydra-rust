@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::sync::{Arc, Mutex};
 
 use rhai::{Array, CustomType, Dynamic, Engine, ImmutableString, Map, Scope, TypeBuilder};
@@ -269,7 +270,7 @@ struct Window;
 struct Pb;
 
 #[derive(Debug, Clone)]
-enum Arg {
+pub(crate) enum Arg {
     Lit(f64),
     Expr(String),
 }
@@ -458,41 +459,41 @@ impl Pattern {
 
 #[derive(Debug, Clone, CustomType)]
 pub struct Node {
-    ops: Vec<Op>,
+    pub(crate) ops: Vec<Op>,
 }
 
 #[derive(Debug, Clone)]
-enum Op {
+pub(crate) enum Op {
     Tileable {
         other: Node,
         width: Arg,
     },
     Source {
-        func: &'static str,
+        func: Cow<'static, str>,
         args: Vec<Arg>,
     },
     Geo {
-        func: &'static str,
+        func: Cow<'static, str>,
         args: Vec<Arg>,
     },
     Color {
-        func: &'static str,
+        func: Cow<'static, str>,
         args: Vec<Arg>,
     },
     Blend {
-        func: &'static str,
+        func: Cow<'static, str>,
         other: Node,
         args: Vec<Arg>,
     },
     Modulate {
-        func: &'static str,
+        func: Cow<'static, str>,
         other: Node,
         args: Vec<Arg>,
     },
 }
 
 #[derive(Clone, Copy)]
-enum OpKind {
+pub(crate) enum OpKind {
     Source,
     Geo,
     Color,
@@ -500,13 +501,13 @@ enum OpKind {
     Modulate,
 }
 
-struct FnMeta {
-    name: &'static str,
-    kind: OpKind,
-    defaults: &'static [f64],
+pub(crate) struct FnMeta {
+    pub(crate) name: &'static str,
+    pub(crate) kind: OpKind,
+    pub(crate) defaults: &'static [f64],
 }
 
-const FUNCTIONS: &[FnMeta] = &[
+pub(crate) const FUNCTIONS: &[FnMeta] = &[
     FnMeta {
         name: "osc",
         kind: OpKind::Source,
@@ -908,27 +909,44 @@ const FUNCTIONS: &[FnMeta] = &[
 impl Node {
     fn source(func: &'static str, args: Vec<Arg>) -> Self {
         Self {
-            ops: vec![Op::Source { func, args }],
+            ops: vec![Op::Source {
+                func: func.into(),
+                args,
+            }],
         }
     }
 
     fn push_geo(mut self, func: &'static str, args: Vec<Arg>) -> Self {
-        self.ops.push(Op::Geo { func, args });
+        self.ops.push(Op::Geo {
+            func: func.into(),
+            args,
+        });
         self
     }
 
     fn push_color(mut self, func: &'static str, args: Vec<Arg>) -> Self {
-        self.ops.push(Op::Color { func, args });
+        self.ops.push(Op::Color {
+            func: func.into(),
+            args,
+        });
         self
     }
 
     fn push_blend(mut self, func: &'static str, other: Node, args: Vec<Arg>) -> Self {
-        self.ops.push(Op::Blend { func, other, args });
+        self.ops.push(Op::Blend {
+            func: func.into(),
+            other,
+            args,
+        });
         self
     }
 
     fn push_modulate(mut self, func: &'static str, other: Node, args: Vec<Arg>) -> Self {
-        self.ops.push(Op::Modulate { func, other, args });
+        self.ops.push(Op::Modulate {
+            func: func.into(),
+            other,
+            args,
+        });
         self
     }
 }
@@ -1874,7 +1892,7 @@ impl Emitter {
     }
 }
 
-fn compile_node(node: &Node) -> Result<String, String> {
+pub(crate) fn compile_node(node: &Node) -> Result<String, String> {
     let mut emitter = Emitter::new();
     let final_var = emitter.compile_node(node)?;
     let body = emitter.lines.join("\n");
@@ -4140,11 +4158,11 @@ mod tests {
         let node = Node {
             ops: vec![
                 Op::Source {
-                    func: "osc",
+                    func: "osc".into(),
                     args: vec![],
                 },
                 Op::Source {
-                    func: "noise",
+                    func: "noise".into(),
                     args: vec![],
                 },
             ],
@@ -4157,7 +4175,7 @@ mod tests {
     fn compile_node_rejects_a_chain_with_no_source() {
         let node = Node {
             ops: vec![Op::Color {
-                func: "invert",
+                func: "invert".into(),
                 args: vec![],
             }],
         };

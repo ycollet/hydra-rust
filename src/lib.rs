@@ -18,6 +18,8 @@ mod ifstmt;
 mod iife;
 pub mod imageload;
 mod increment;
+#[cfg(feature = "javascript")]
+pub mod javascript;
 mod jsfunctions;
 mod jskeywords;
 mod kwargs;

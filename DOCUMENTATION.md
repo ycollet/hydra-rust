@@ -9,7 +9,8 @@ preprocessing, reactive semantics, and shader-chain model. The
 [plugin guide](crates/hydra-plugin/README.md) covers VST3/CLAP builds and
 the plugin's loader-only interface.
 
-The scripting reference covers core functions and optional Cargo features.
+The scripting reference describes the default Rhai backend and optional Cargo features.
+See [JavaScript scripting](#javascript-scripting) for the separate interpreter backend.
 Examples can be evaluated in the standalone editor or through
 `hydra_rust::eval()` when the necessary features are enabled. Bare terminating
 chains implicitly write to `o0`; an explicit `.out()` is also valid.
@@ -23,6 +24,7 @@ chains implicitly write to `o0`; an explicit `.out()` is also valid.
 - [Keyboard shortcuts](#keyboard-shortcuts)
 - [Scene banks](#scene-banks)
 - [Feature-gated functions](#feature-gated-functions)
+- [JavaScript scripting](#javascript-scripting)
 - [Example](#example)
 - [Used in Sova](#used-in-sova)
 - [Differences from browser Hydra](#differences-from-browser-hydra)
@@ -277,6 +279,178 @@ audio scripting API for host-fed samples without microphone capture;
 Without the matching feature, functions are unavailable or explicitly
 stubbed as described in [the stub-function table](#stub-functions-accepted-but-not-yet-implemented).
 
+## JavaScript scripting
+
+The optional `javascript` feature embeds QuickJS alongside the existing Rhai backend.
+The application still uses its native window and OpenGL renderer.
+Browser APIs, external JavaScript runtimes, and embedded browser engines are not included.
+The plugin continues using Rhai.
+
+### Starting JavaScript mode
+
+- Build with `javascript` and select the backend with `--javascript`.
+- Use `--library-root` to choose the directory containing trusted local libraries.
+- Explicitly evaluate the opened sketch with **Ctrl/Cmd + Shift + Enter**.
+
+```bash
+cargo run --features javascript -- --javascript \
+  --library-root examples/javascript examples/javascript/live.js
+```
+
+New sessions use the application's working directory unless `--library-root` specifies another directory.
+Restored sessions reuse their saved library root.
+The options sidebar also offers a JavaScript checkbox.
+Evaluate a sketch after changing the checkbox to apply the selected language.
+The session stores the selected language and library root.
+JavaScript variables do not persist across application restarts.
+Scene banks store source text and use the currently selected language when recalled.
+The built-in code formatter remains Rhai-only.
+
+### Local libraries
+
+`loadScript(path)` executes a local JavaScript file in the current interpreter.
+Libraries can define functions, extend prototypes, and register shaders.
+Loading is synchronous; network URLs and browser script loading are unsupported.
+Use ordinary scripts with `loadScript()`; module imports and CommonJS `require()` are not supported.
+Only files inside the configured library root are allowed.
+
+```javascript
+loadScript("libraries/helpers.js");
+osc(20).tintCycle(0.5).out();
+```
+
+The example library extends Hydra chains and JavaScript arrays.
+For example, `[0, 1, 2].scaled(0.5)` returns `[0, 0.5, 1]`.
+See [helpers.js](examples/javascript/libraries/helpers.js) and [live.js](examples/javascript/live.js).
+
+[Hyper-Hydra](https://github.com/geikha/hyper-hydra)'s arrays and fractals modules can load unchanged from local files.
+This does not imply compatibility with every Hyper-Hydra extension.
+
+```javascript
+loadScript("hydra-arrays.js");
+loadScript("hydra-fractals.js");
+osc([10, 20].add(5)).mirrorX().out();
+```
+
+### Hyper-Hydra compatibility
+
+This table describes local loading in the standalone application's JavaScript backend.
+The plugin's Rhai backend does not execute these JavaScript files.
+The source review uses upstream revision [e48aacb](https://github.com/geikha/hyper-hydra/tree/e48aacbe775cd6731c50cc327ed86cd7e7beab6c).
+Future upstream changes can affect compatibility.
+
+**Verified examples** means representative scripts executed and produced valid shaders, not every exported function.
+**Candidate** means the source appears suitable, but execution remains unverified.
+**Partial candidate** means only helpers without missing browser dependencies appear suitable.
+Other statuses describe known blockers from the source review.
+Loading a file successfully does not prove that its functions work.
+
+| Extension | Status | Evidence or blocker |
+|-----------|--------|---------------------|
+| `hydra-abbreviations.js` | Candidate | Adds aliases for chain methods. Only aliases targeting available methods can work. |
+| `hydra-arithmetics.js` | Needs bridge changes | Generated function names and inputs start with `_`, which the current validator rejects. |
+| `hydra-arrays.js` | Verified examples | Array extensions work, including arithmetic and arrays used as animated shader arguments. |
+| `hydra-blend.js` | Needs shader changes | The generated `phoenix` shader assigns a vector expression to scalar color channels. |
+| `hydra-canvas.js` | Unsupported browser APIs | Changes browser canvas styles and parent-element layout. |
+| `hydra-colorspaces.js` | Needs bridge changes | Uses underscore-prefixed inputs and browser Hydra's `transforms` representation. |
+| `hydra-convolutions.js` | Needs bridge changes | Requires `sampler2D` inputs. Custom functions currently accept only float inputs. |
+| `hydra-debug.js` | Unsupported browser APIs | Creates browser interface elements and loads remote dependencies. |
+| `hydra-fractals.js` | Verified examples | Mirror and inversion shaders work through dynamic registration. |
+| `hydra-gif.js` | Unsupported browser APIs | Requires browser image decoding, canvases, timers, and source internals. |
+| `hydra-glsl.js` | Needs bridge changes | Generated names start with `_`. Shader snippets redeclare native parameters `st`, `c0`, or `c1`. |
+| `hydra-gradientmap.js` | Unsupported browser APIs | Requires `sampler2D` inputs, browser canvases, and browser Hydra source objects. |
+| `hydra-mouse.js` | Unsupported browser APIs | Attaches browser pointer listeners and reads canvas dimensions. Native `mouse` remains available. |
+| `hydra-outputs.js` | Unsupported graphics internals | Directly manipulates `regl` textures, framebuffers, and browser Hydra output objects. |
+| `hydra-pip.js` | Unsupported browser APIs | Requires canvas video capture and browser picture-in-picture support. |
+| `hydra-pixels.js` | Unsupported graphics internals | Reads pixels through `regl` and browser Hydra framebuffer objects. |
+| `hydra-src.js` | Partial candidate | Buffer masking helpers appear suitable. Dimension-aware helpers require browser canvas and source metadata. |
+| `hydra-swizzle.js` | Needs bridge changes | Generated names start with `_`. Registration also exceeds the 256-definition limit. |
+| `hydra-tap.js` | Unsupported browser APIs | Requires browser keyboard listeners and timers. |
+| `hydra-text.js` | Unsupported browser APIs | Draws through browser canvases and creates browser Hydra source objects. |
+| `hydra-vec4.js` | Candidate | Builds vectors and calls `solid()`. No browser drawing dependencies appear in these helpers. |
+| `hydra-wrap.js` | Unsupported graphics internals | Recreates `regl` framebuffers and modifies browser Hydra output objects. |
+
+`regl` is Hydra's browser graphics library.
+The standalone provides a detection marker, not its graphics methods.
+Native equivalents do not make the corresponding JavaScript extension compatible.
+For example, native `o0.setNearest()` does not provide the framebuffer internals required by `hydra-outputs.js`.
+
+Keep local copies inside the configured library root.
+For example, `loadScript("hydra-fractals.js")` loads the local file without `await`.
+Remote URLs remain unsupported.
+
+### Live JavaScript callbacks
+
+JavaScript state remains available between evaluations within the same runtime.
+Numeric function arguments execute each frame and feed shader uniforms.
+They do not run once per pixel.
+An optional `update` function executes each frame before parameter callbacks.
+Define shader graphs during sketch evaluation, not inside frame callbacks or their promise jobs.
+
+```javascript
+var pulse = 0;
+update = () => { pulse = 0.5 + 0.5 * Math.sin(time); };
+osc(20).brightness(() => pulse * 0.2).out();
+```
+
+Use callbacks when parameters should follow changing JavaScript values.
+For example, `.rotate(() => time * 0.1)` animates instead of capturing the evaluation-time value.
+JavaScript supports genuine functions and closures; it does not use Rhai's syntax-rewriting pipeline.
+Callbacks can read `time`, `beat`, `tempo`, `phase`, `mouse`, `width`, and `height`.
+For example, `.brightness(() => mouse.x * 0.2)` follows the horizontal pointer position.
+Mouse coordinates range from zero to one.
+With the `audio` feature, callbacks can also read `a.fft`, `a.onset`, `a.beat`, and `a.bpm`.
+For example, `.scale(() => 1 + a.fft[0])` follows the first audio frequency band.
+
+### Dynamic shader functions
+
+Libraries can call `setFunction()` at runtime to add chain operations and sources.
+Hydra's `_st`, `_c0`, and `_c1` shader argument names are supported.
+The native `st`, `c0`, and `c1` names also remain available.
+Custom definitions can replace built-in shader functions.
+
+```javascript
+setFunction({
+  name: "diagonal",
+  type: "src",
+  inputs: [{ name: "frequency", type: "float", default: 12 }],
+  glsl: "return vec4(vec3(sin((_st.x + _st.y) * frequency)), 1.0);"
+});
+diagonal(20).out();
+```
+
+### Scope and limitations
+
+The initial goal is local JavaScript libraries, not unrestricted browser Hydra compatibility.
+Some Hyper-Hydra extensions modify JavaScript prototypes or register shaders.
+Others directly access browser canvases, `regl`, or WebGL framebuffer internals.
+Those browser integrations remain unsupported and report errors.
+For example, loading a canvas-dependent extension cannot provide browser text rendering.
+
+Script execution uses time, memory, and stack limits.
+Each evaluation or frame has a 200-millisecond execution limit.
+The interpreter allows 32 mebibytes of heap memory and 512 kibibytes of stack memory.
+One mebibyte equals 1,048,576 bytes; one kibibyte equals 1,024 bytes.
+Each call processes at most 256 pending JavaScript promise jobs.
+Scripts and individual library files cannot exceed one mebibyte.
+The interpreter limits total loaded library text to 16 mebibytes per runtime.
+At most 128 callback slots can protect previous graphs and build the next graph together.
+Unused slots become available on later evaluations.
+For example, repeatedly evaluating `osc(() => time).out()` reuses inactive slots.
+
+Evaluation and shader compilation errors preserve the previous graph and its callbacks.
+JavaScript global mutations cannot be undone.
+For example, assigning `counter = 2` before throwing an error still changes `counter`.
+Callback errors pause JavaScript updates and appear in the editor.
+Evaluate a corrected sketch to resume.
+Restart the application if resource exhaustion prevents interpreter recovery.
+JavaScript runs on the interface thread, never on the plugin's real-time audio thread.
+
+The initial JavaScript bridge focuses on shader graphs and audio signal reads.
+Native source initialization, text generation, and `.tileable()` remain Rhai-only.
+Musical Instrument Digital Interface (MIDI) controls and Open Sound Control (OSC) controls also remain Rhai-only.
+For example, use Rhai for `s0.initCam()` rather than expecting browser camera APIs in JavaScript.
+
 ## Example
 
 ```
@@ -296,8 +470,8 @@ hydra-rust is the visual engine of [Sova](https://github.com/Bubobubobubobubo/So
 
 ## Differences from browser Hydra
 
-- **Rhai, not JavaScript.** A preprocessing layer accepts supported JavaScript-style syntax, including selected arrow-function forms, but there is no JavaScript runtime. Reactive expressions such as `osc(60.0, sin(time))` compile to GLSL; see [SPEC.md](SPEC.md) for supported syntax.
-- **Expression variables.** `time`, `beat`, `tempo`, `phase` are GLSL uniform references, not callback functions.
+- **Two scripting backends.** Rhai remains the default. The optional [JavaScript backend](#javascript-scripting) supports local libraries, not browser APIs.
+- **Expression variables.** Rhai's `time`, `beat`, `tempo`, and `phase` reference GLSL uniforms. JavaScript reads numeric frame values.
 - **Mouse input.** `mouseX` and `mouseY` are normalized to `[0, 1]`.
 - **No `speed` global.** Animation speed is per-source, controlled through function arguments.
 - **GLSL 330.** Targets OpenGL 3.3 core profile.
@@ -480,8 +654,9 @@ for e in data:
 
 ### Known-broken sketches: p5.js dependency
 
-hydra-rust has no JavaScript engine and doesn't load, execute, or manage
-any external JS libraries. Some sketches instantiate
+The Rhai backend does not execute external JavaScript libraries.
+The optional JavaScript backend still does not provide browser drawing APIs.
+Some sketches instantiate
 [p5.js](https://p5js.org/) directly (`p1 = new P5()` and similar) to draw
 extra overlay graphics alongside the hydra visuals — this is a whole
 separate creative-coding framework with no Rust equivalent here, so these
@@ -552,7 +727,7 @@ warning and use that property's built-in default. An invalid config object
 warns and uses global settings. Arbitrary font selection remains deferred.
 
 The following are ported natively from popular real-world `loadScript()`-loaded community
-extensions (`loadScript` itself is a permanent no-op — see [Known gaps](#known-gaps-and-stub-functions)).
+extensions (`loadScript` is a no-op in Rhai; JavaScript can load local files).
 Unless noted otherwise, from `metagrowing/extra-shaders-for-hydra` (AGPL-3.0, Thomas Jourdan):
 
 | Function | Parameters (defaults) | Description | Example |
@@ -1008,12 +1183,13 @@ cargo run --features stream --example webrtc_broadcast -- 9000
 
 ## Known gaps and stub functions
 
-Some accepted functions do nothing or only partially implement browser
+In Rhai, some accepted functions do nothing or only partially implement browser
 Hydra/community-extension behavior. See the
 [stub-function table](#stub-functions-accepted-but-not-yet-implemented)
 for the status and rationale of `initScreen`, `P5(...)`, `Scene(...)`,
 `loadScript`, browser DOM helpers, and feature-disabled source initializers.
 SPEC.md §9 describes these gaps in the language-spec context.
+JavaScript rejects unsupported browser APIs instead of providing these Rhai stubs.
 
 `setFunction(...)` is **not** a stub: it registers dynamic custom GLSL
 functions. See [Custom GLSL functions](#custom-glsl-functions-setfunction)

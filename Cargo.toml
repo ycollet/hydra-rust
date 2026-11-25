@@ -30,6 +30,7 @@ description = "Hydra visual synthesizer — Rhai scripting to GLSL, rendered via
 license = "AGPL-3.0-or-later"
 
 [dependencies]
+rquickjs = { version = "0.14", optional = true }
 rhai = { version = "1", features = ["no_module", "no_time"] }
 glow = "0.16"
 ab_glyph = "0.2"
@@ -80,6 +81,7 @@ bytes = { version = "1", optional = true }
 async-trait = { version = "0.1", optional = true }
 
 [features]
+javascript = ["dep:rquickjs"]
 # Enabled by default so plain `cargo build`/`cargo run` keeps building the
 # `hydra` desktop app unchanged. Library-only consumers should depend with
 # `default-features = false` to skip the windowing stack entirely.

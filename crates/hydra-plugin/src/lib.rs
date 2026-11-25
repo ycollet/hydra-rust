@@ -1091,6 +1091,7 @@ impl baseview::WindowHandler for HydraGlWindow {
             midi_channel_aftertouch: midi_frame.channel_aftertouch,
             midi_values: midi_frame.values,
             osc: [0.0; hydra_rust::osc::NUM_OSC_SLOTS],
+            javascript_values: [0.0; 128],
         };
 
         let snap = self.renderer.snapshot();

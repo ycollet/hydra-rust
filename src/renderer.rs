@@ -20,6 +20,7 @@ pub struct RenderUniforms {
     pub tempo: f32,
     pub phase: f32,
     pub fft: [f32; NUM_FFT_BINS],
+    pub javascript_values: [f32; shader::NUM_JS_VALUES],
     pub audio: AudioFeatures,
     pub midi_note: [f32; NUM_MIDI_NOTES],
     pub midi_velocity: [f32; NUM_MIDI_NOTES],
@@ -44,6 +45,7 @@ struct ProgramState {
     loc_tempo: Option<glow::UniformLocation>,
     loc_phase: Option<glow::UniformLocation>,
     loc_fft: Option<glow::UniformLocation>,
+    loc_javascript_values: Option<glow::UniformLocation>,
     loc_audio_rhythm: Option<glow::UniformLocation>,
     loc_midi_note: Option<glow::UniformLocation>,
     loc_midi_velocity: Option<glow::UniformLocation>,
@@ -315,6 +317,38 @@ impl ShaderRenderer {
         self.snapshot.render_mode = render_mode;
         errors
     }
+
+    /// Keeps the current programs when any replacement fails to compile.
+    pub fn compile_buffers_atomic(
+        &mut self,
+        shaders: &[Option<String>; NUM_BUFFERS],
+        render_mode: RenderMode,
+    ) -> Vec<String> {
+        let mut programs = std::array::from_fn::<_, NUM_BUFFERS, _>(|_| None);
+        let mut errors = Vec::new();
+        for (i, source) in shaders.iter().enumerate() {
+            if let Some(source) = source {
+                match compile_program(&self.gl, &shader::fragment_source(source)) {
+                    Ok(program) => {
+                        programs[i] = Some(resolve_program_state(&self.gl, program));
+                    }
+                    Err(error) => errors.push(format!("buffer {i}: {error}")),
+                }
+            }
+        }
+        if !errors.is_empty() {
+            for state in programs.into_iter().flatten() {
+                unsafe { self.gl.delete_program(state.program) };
+            }
+            return errors;
+        }
+        for state in self.snapshot.programs.iter().flatten() {
+            unsafe { self.gl.delete_program(state.program) };
+        }
+        self.snapshot.programs = programs;
+        self.snapshot.render_mode = render_mode;
+        errors
+    }
 }
 
 fn set_texture_defaults(gl: &glow::Context) {
@@ -353,6 +387,7 @@ fn resolve_program_state(gl: &glow::Context, program: glow::Program) -> ProgramS
             loc_tempo: gl.get_uniform_location(program, "iTempo"),
             loc_phase: gl.get_uniform_location(program, "iPhase"),
             loc_fft: gl.get_uniform_location(program, "iFft"),
+            loc_javascript_values: gl.get_uniform_location(program, "iJsValues"),
             loc_audio_rhythm: gl.get_uniform_location(program, "iAudioRhythm"),
             loc_midi_note: gl.get_uniform_location(program, "iMidiNote"),
             loc_midi_velocity: gl.get_uniform_location(program, "iMidiVelocity"),
@@ -466,6 +501,9 @@ pub fn render_multipass(
             }
             if let Some(ref loc) = p.loc_fft {
                 gl.uniform_1_f32_slice(Some(loc), &u.fft);
+            }
+            if let Some(ref loc) = p.loc_javascript_values {
+                gl.uniform_1_f32_slice(Some(loc), &u.javascript_values);
             }
             if let Some(ref loc) = p.loc_audio_rhythm {
                 gl.uniform_3_f32(Some(loc), u.audio.onset, u.audio.beat, u.audio.bpm);

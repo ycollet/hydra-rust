@@ -1,4 +1,4 @@
-# HydraPy feature ideas
+# Hydra development ideas and tasks
 
 Potential additions inspired by [HydraPy](https://github.com/JosiahAlanLee/hydrapy),
 compared with standard browser-based [Hydra](https://github.com/hydra-synth/hydra-synth).
@@ -83,3 +83,53 @@ or a committed implementation roadmap.
 - [Rendering and export](https://github.com/JosiahAlanLee/hydrapy/blob/main/docs/rendering-and-export.md)
 - [Studio](https://github.com/JosiahAlanLee/hydrapy/blob/main/docs/studio.md)
 - [Gorgon overview](https://github.com/JosiahAlanLee/hydrapy#gorgon-a-cv-and-av-tracker)
+
+## JavaScript support
+
+These tasks improve the optional JavaScript backend while keeping native rendering and local library loading.
+See the [Hyper-Hydra compatibility table](DOCUMENTATION.md#hyper-hydra-compatibility) for current blockers.
+Remote loading and full browser emulation remain outside this task list.
+JavaScript execution in the plugin also remains outside this scope.
+
+### Hyper-Hydra compatibility priorities
+
+- [ ] **Shader identifiers:** accept underscore-prefixed names while generating safe shader identifiers.
+  Example: register `_glsl_ext_NODE_0` from `hydra-glsl.js`.
+- [ ] **Shader parameter aliases:** avoid redeclarations of `st`, `c0`, and `c1` in extension snippets.
+  Example: compile `.glslCoord("uv * 2.0")` after loading `hydra-glsl.js`.
+- [ ] **Large shader registries:** support more registered functions while preserving memory and compilation limits.
+  Example: load `hydra-swizzle.js` without exceeding the current 256-definition limit.
+- [ ] **Unused shader definitions:** compile only custom functions needed by the current graphs.
+  Example: an unused, incompatible `phoenix` shader should not block other `hydra-blend.js` modes.
+- [ ] **Texture sampler inputs:** bind `sampler2D` parameters to native output and source textures.
+  Example: register a convolution from `hydra-convolutions.js` with `o0` as its texture input.
+- [ ] **Graph metadata adapters:** support extension helpers that inspect or copy browser Hydra graph metadata.
+  Example: adapt `hydra-colorspaces.js` helpers that copy `transforms`.
+- [ ] **Compatibility checks:** exercise representative helpers and compile their generated shaders.
+  Example: check `hydra-abbreviations.js` with `osc(10).bright(0.2).out()` and check vector helpers from `hydra-vec4.js`.
+- [ ] **Compatibility tracking:** record checked upstream revisions and update the documentation after each supported extension.
+  Example: move `hydra-glsl.js` from blocked to verified examples only after its helpers execute and compile.
+
+### Native feature parity
+
+- [ ] **Native shader helpers:** expose existing native helpers through JavaScript rather than duplicating their implementations.
+  Example: support `osc(10).tileable(0.15).out()` and native `text("Hydra")`.
+- [ ] **Source initialization:** bridge existing source managers without introducing browser camera or canvas objects.
+  Example: support `s0.initCam()` when the application includes the `webcam` feature.
+- [ ] **Device controls:** expose native audio setters, Musical Instrument Digital Interface controls, and Open Sound Control controls.
+  Example: support `a.setBins(4)` when the application includes the `audio` feature.
+- [ ] **Native buffer operations:** adapt selected framebuffer helpers without exposing browser graphics internals.
+  Example: provide native `o0.clear()` for an adapted subset of `hydra-outputs.js`.
+
+### Runtime and editing improvements
+
+- [ ] **Interpreter recovery:** add an explicit reset action with clear consequences for JavaScript variables and libraries.
+  Example: recover from heap exhaustion without restarting the application.
+- [ ] **Library diagnostics:** provide native console logging and errors containing library paths and line numbers.
+  Example: report `libraries/helpers.js:12` when a library throws an error.
+- [ ] **Scene languages:** store the scripting language alongside each saved scene.
+  Example: recall a Rhai scene while JavaScript mode is selected without interpreting it as JavaScript.
+- [ ] **Local modules:** support local module imports under the existing library-root restrictions.
+  Example: load `import { pulse } from "./helpers.js";` without allowing network access.
+- [ ] **Runtime settings:** expose bounded execution, memory, and library-size settings without removing protective limits.
+  Example: adjust the script timeout while retaining memory and pending-job limits.

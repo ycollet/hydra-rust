@@ -1,5 +1,7 @@
 use crate::glsl;
 
+pub const NUM_JS_VALUES: usize = 128;
+
 const VERTEX_SHADER: &str = "\
 #version 330 core
 layout(location = 0) in vec2 a_position;
@@ -19,6 +21,7 @@ uniform float iBeat;
 uniform float iTempo;
 uniform float iPhase;
 uniform float iFft[8]; // must match audio::NUM_FFT_BINS
+uniform float iJsValues[128];
 uniform vec3 iAudioRhythm;
 uniform float iMidiNote[128]; // must match midi::NUM_MIDI_NOTES
 uniform float iMidiVelocity[128]; // must match midi::NUM_MIDI_NOTES

@@ -12,6 +12,8 @@ use eframe::egui;
 #[derive(Debug, Default, PartialEq, Eq)]
 struct CliArgs {
     jack: bool,
+    javascript: bool,
+    library_root: Option<PathBuf>,
     input: Option<PathBuf>,
     bank_save: Option<PathBuf>,
     bank_load: Option<PathBuf>,
@@ -25,6 +27,10 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> CliArgs {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--jack" => out.jack = true,
+            "--javascript" => out.javascript = true,
+            "--library-root" => {
+                out.library_root = Some(args.next().map(PathBuf::from).unwrap_or_default());
+            }
             "-i" | "--input" => out.input = args.next().map(PathBuf::from),
             "-bs" | "--bank-save" => out.bank_save = args.next().map(PathBuf::from),
             "-bl" | "--bank-load" => out.bank_load = args.next().map(PathBuf::from),
@@ -41,6 +47,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
 
     let cli = parse_args(std::env::args().skip(1));
+    if cli
+        .library_root
+        .as_ref()
+        .is_some_and(|path| path.as_os_str().is_empty())
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "--library-root requires a directory argument",
+        )
+        .into());
+    }
+    if (cli.javascript || cli.library_root.is_some()) && !cfg!(feature = "javascript") {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "--javascript and --library-root require a build with --features javascript",
+        )
+        .into());
+    }
     if cli.jack && !cfg!(all(feature = "jack", target_os = "linux")) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
@@ -117,6 +141,25 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn javascript_options_do_not_consume_the_input_path() {
+        let args = parse_args(s(&[
+            "--javascript",
+            "--library-root",
+            "libraries",
+            "sketch.js",
+        ]));
+        assert!(args.javascript);
+        assert_eq!(args.library_root, Some("libraries".into()));
+        assert_eq!(args.input, Some("sketch.js".into()));
+    }
+
+    #[test]
+    fn missing_library_root_is_detectable() {
+        let args = parse_args(s(&["--library-root"]));
+        assert_eq!(args.library_root, Some(PathBuf::new()));
     }
 
     #[test]
