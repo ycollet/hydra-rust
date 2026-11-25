@@ -1,0 +1,6 @@
+// The frequency changes across the image, rather than once per frame.
+osc(noise(2,0.2) * 40,0.05,1)
+  .rotate(0.3)
+  .color(0.4,0.8,1)
+  .out(o0);
+render(o0);

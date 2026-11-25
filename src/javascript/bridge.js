@@ -26,6 +26,8 @@
   let commands = [], midiBindings = new Map(), envelopes = new Map(), oscBindings = new Map();
   let midiValues = Array(64).fill(0), midiEnvelopes = Array(16).fill(0), oscValues = Array(32).fill(0);
   let audioSettings = features.fft ? __audioSettings : null;
+  let regions=[],regionOutputs=[],regionValues=Array(16).fill(0),historyLimit=8;
+  const regionSlots=new WeakMap();
   delete globalThis.__audioSettings;
   const unsupported = name => () => { throw new Error(`${name} is unsupported in embedded JavaScript`); };
   const editing = () => {
@@ -65,6 +67,7 @@
     return arg;
   };
   const value = v => {
+    if (v instanceof Node) return {type:"parameter",value:v};
     if (typeof v === "function") return slot(v);
     if (Array.isArray(v)) {
       if (!v.length) throw new Error("empty pattern");
@@ -92,6 +95,7 @@
     }
   }
   const decode = arg => {
+    if (arg.type === "parameter") return arg.value;
     if (arg.type === "number") return arg.value;
     if (arg.type === "callback" && callbackFunctions.has(arg)) {
       const callback = callbackFunctions.get(arg);
@@ -125,6 +129,11 @@
           return {name:reference.kind === "output" ? "src" : "ext_src",args:[value(reference.index)],other:null};
         }
         if (name === "text_src") return {name,args:[],other:null};
+        if (name === "native_history") return {name,args:args.map(value),other:null};
+        if (["native_blur","native_sharpen","native_sobel","native_emboss","native_dilate","native_erode"].includes(name)) {
+          if (!(args[0] instanceof Node)) throw new Error("Missing native effect graph");
+          return {name,args:[value(args[1])],other:args[0]};
+        }
         if (name === "tileable") {
           if (!(args[0] instanceof Node)) throw new Error("Invalid tileable graph");
           return {name,args:[value(args[1])],other:args[0]};
@@ -138,6 +147,20 @@
       editing();
       return new Node([{name:"tileable",args:[value(width)],other:this}]);
     }
+    mul(factor) {
+      editing(); finite(factor);
+      return this.mult(solid(factor,factor,factor,1));
+    }
+  }
+  const nativeEffects=new Map();
+  for (const name of ["blur","sharpen","sobel","emboss","dilate","erode"]) {
+    Node.prototype[name] = function(radius = 1) {
+      editing(); finite(radius);
+      if (radius < 0 || radius > 32) throw new Error("Effect radius must be in 0..32 pixels");
+      return new Node([{name:`native_${name}`,args:[value(radius)],other:this}]);
+    };
+    Node.prototype[`native${name[0].toUpperCase()}${name.slice(1)}`] = Node.prototype[name];
+    nativeEffects.set(name,Node.prototype[name]);
   }
   const outputIndex = buffer => {
     const i = outputs.indexOf(buffer);
@@ -226,7 +249,7 @@
       finite(d);
       return {name:i.name,type:i.type,default:d};
     });
-    if (["src","ext_src","text_src","tileable","text","strokeText","fillStrokeText","strokeFillText","out","constructor","ops","transforms"].includes(def.name)) throw new Error("cannot replace graph infrastructure");
+    if (def.name.startsWith("native_") || ["src","ext_src","text_src","tileable","text","strokeText","fillStrokeText","strokeFillText","out","constructor","ops","transforms","history","setHistoryLimit","region","sendRegion","stopRegionOutput","mul","nativeBlur","nativeSharpen","nativeSobel","nativeEmboss","nativeDilate","nativeErode"].includes(def.name)) throw new Error("cannot replace graph infrastructure");
     if (!definitions.has(def.name) && definitions.size >= functionLimits.count) throw new Error("custom function limit");
     const bytes = definitionBytes - (definitions.get(def.name)?.glsl.length ?? 0) + def.glsl.length;
     if (bytes > functionLimits.bytes) throw new Error("Custom shader registry byte limit exceeded");
@@ -240,6 +263,11 @@
     throw new Error("src requires an output or source buffer");
   }
   Object.assign(globalThis, {Node,src,setFunction,window:globalThis,
+    setHistoryLimit(limit) {editing();integer(limit,1,8,"history limit");historyLimit=limit;},
+    history(output,delay=1) {
+      editing(); integer(delay,1,8,"history delay");
+      return new Node([{name:"native_history",args:[value(outputIndex(output)),value(delay)],other:null}]);
+    },
     time:0,beat:0,tempo:120,bpm:120,phase:0,width:1,height:1,innerWidth:1,innerHeight:1,
     mouse:{x:0,y:0},update:()=>{},
     render(buffer) { editing(); all = buffer === undefined; renderBuffer = all ? null : outputIndex(buffer); },
@@ -382,6 +410,34 @@
     };
     return unsupported(`_osc.${String(key)}`);
   }});
+  globalThis.region=(output,x=0,y=0,width=1,height=1,channel=4)=>{
+    editing();
+    [x,y,width,height].forEach(finite);
+    integer(channel,0,4,"region channel");
+    if(x<0||y<0||width<=0||height<=0||x+width>1||y+height>1)throw new Error("Invalid normalized region rectangle");
+    const descriptor={output:outputIndex(output),rect:[x,y,width,height],channel};
+    let slot=regions.findIndex(region=>JSON.stringify(region)===JSON.stringify(descriptor));
+    if(slot<0){
+      if(regions.length>=16)throw new Error("Image region limit exceeded; reset the interpreter");
+      slot=regions.length;regions.push(descriptor);
+    }
+    const callback=signal(()=>regionValues[slot]);
+    regionSlots.set(callback,{slot,region:regions[slot]});
+    return callback;
+  };
+  globalThis.sendRegion=(control,destination,address,rate=30)=>{
+    editing();requireFeature("osc");
+    const binding=regionSlots.get(control);
+    if(!binding||regions[binding.slot]!==binding.region||typeof destination!=="string"||destination.length>128||
+      typeof address!=="string"||!address.startsWith("/")||address.length>1024||
+      !Number.isFinite(rate)||rate<1||rate>60)throw new Error("Invalid region OSC output");
+    const descriptor={slot:binding.slot,destination,address,rate};
+    if(!regionOutputs.some(output=>JSON.stringify(output)===JSON.stringify(descriptor))){
+      if(regionOutputs.length>=16)throw new Error("Region OSC output limit exceeded");
+      regionOutputs.push(descriptor);
+    }
+  };
+  globalThis.stopRegionOutput=()=>{editing();regionOutputs=[];};
   const facade = {
     regl: Object.freeze({embedded:true}),
     synth:{setFunction},
@@ -408,6 +464,7 @@
     ops:node.ops.map(op=>({
       name:op.name,
       args:op.args.map(arg=>{
+        if (arg.type === "parameter") return {type:"parameter",value:serialize(arg.value)};
         const fn = callbackFunctions.get(arg);
         const encoded = fn ? {type:"callback",value:allocateSlot(fn)} : arg;
         if (encoded.type === "callback") {
@@ -426,6 +483,7 @@
         committedCallbacks:committedCallbacks.slice(),committedUpdate,activeSlots,savedUpdate:update,textRequest,clear:clear.slice(),
         commands:commands.slice(),midiBindings:new Map(midiBindings),envelopes:new Map(envelopes),oscBindings:new Map(oscBindings),
         audioSettings:audioSettings ? JSON.parse(JSON.stringify(audioSettings)) : null};
+      saved.regions=regions.slice();saved.regionOutputs=regionOutputs.slice();saved.historyLimit=historyLimit;
       callbacks=callbacks.map((fn,i)=>activeSlots.has(i) ? fn : null);
       capture=false; filters=[null,null,null,null];
       clear=[false,false,false,false];
@@ -433,7 +491,7 @@
     },
     rollback() {
       const oldDefinitions = definitions;
-      ({callbacks,buffers,definitions,definitionBytes,renderBuffer,all,resolution,filters,capture,audioRead,committedCallbacks,committedUpdate,activeSlots,textRequest,clear,commands,midiBindings,envelopes,oscBindings,audioSettings}=saved);
+      ({callbacks,buffers,definitions,definitionBytes,renderBuffer,all,resolution,filters,capture,audioRead,committedCallbacks,committedUpdate,activeSlots,textRequest,clear,commands,midiBindings,envelopes,oscBindings,audioSettings,regions,regionOutputs,historyLimit}=saved);
       globalThis.update=saved.savedUpdate;
       for (const [name,def] of oldDefinitions) {
         if (!definitions.has(name)) {
@@ -441,6 +499,9 @@
           else if (def.kind === "src") delete globalThis[name];
           else delete Node.prototype[name];
         }
+      }
+      for(const [name,effect] of nativeEffects) {
+        if(!definitions.has(name)) Node.prototype[name]=effect;
       }
       for (const def of definitions.values()) install(def);
     },
@@ -455,7 +516,7 @@
       const encodedBuffers=buffers.map(serialize);
       return JSON.stringify({buffers:encodedBuffers,definitions:[...definitions.values()],
         render:renderBuffer,all,resolution,filters,screencap:capture,slots:callbacks.length,audio:audioRead,text:textRequest,clear,
-        commands:[...commands,...midiBindings.values(),...envelopes.values(),...oscBindings.values()]});
+        commands:[...commands,...midiBindings.values(),...envelopes.values(),...oscBindings.values()],regions,region_outputs:regionOutputs,history_limit:historyLimit});
     },
     audio() { return audioRead; },
     setAudioSettings(settings) { editing(); requireFeature("fft"); audioSettings=settings; },
@@ -469,6 +530,7 @@
       midiValues=input.midi_values ?? midiValues;
       midiEnvelopes=input.midi_envelope ?? midiEnvelopes;
       oscValues=input.osc ?? oscValues;
+      regionValues=input.regions;
       running=true;
       if (committedUpdate) committedUpdate(input.time);
       const values=Array(128).fill(0);

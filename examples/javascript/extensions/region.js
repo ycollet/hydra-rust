@@ -1,0 +1,5 @@
+// The previous frame's red intensity controls the second output's frequency.
+solid(() => 0.5 + 0.5 * Math.sin(time * 0.8),0.2,0.6,1).out(o0);
+var level = region(o0,0.25,0.25,0.5,0.5,0);
+osc(level.range(5,40),0.05,1).color(0.4,0.8,1).out(o1);
+render(o1);

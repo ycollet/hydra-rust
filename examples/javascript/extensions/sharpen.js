@@ -1,0 +1,3 @@
+noise(12,0.2).color(0.5,0.8,1).out(o0);
+src(o0).nativeSharpen(3).out(o1);
+render(o1);

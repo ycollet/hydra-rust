@@ -11,6 +11,7 @@ mod commastmt;
 mod customfn;
 mod destructure;
 pub mod eval;
+pub mod extended;
 mod fmt;
 mod forloop;
 mod glsl;

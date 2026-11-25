@@ -1,0 +1,3 @@
+noise(8,0.2).out(o0);
+src(o0).emboss(3).out(o1);
+render(o1);

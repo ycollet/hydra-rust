@@ -29,6 +29,189 @@ fn persistent_context_and_native_emitter() {
 }
 
 #[test]
+fn opt_in_pixel_parameters_and_effect_passes_share_native_codegen() {
+    for (javascript, rhai) in [
+        ("osc(noise(2).mul(40)).out()", "osc(noise(2) * 40).out()"),
+        (
+            "osc(10).blur(1).sharpen(1).out()",
+            "osc(10).blur(1.0).sharpen(1.0).out()",
+        ),
+        ("osc(10).sobel().out()", "osc(10).sobel().out()"),
+        ("osc(10).emboss().out()", "osc(10).emboss().out()"),
+        (
+            "osc(10).dilate().erode().out()",
+            "osc(10).dilate().erode().out()",
+        ),
+        (
+            "history(o0,8).blend(osc(10),0.1).out()",
+            "history(o0,8).blend(osc(10),0.1).out()",
+        ),
+    ] {
+        let result = runtime().eval(javascript).unwrap();
+        let native = hydra_rust::eval(rhai).unwrap();
+        assert_eq!(result.shaders, native.shaders, "{javascript}");
+        assert_eq!(
+            result.render_plan.passes, native.render_plan.passes,
+            "{javascript}"
+        );
+        assert_eq!(result.render_plan.history, native.render_plan.history);
+    }
+    let mut js = runtime();
+    let graph = js.eval("osc(10).out()").unwrap();
+    for code in [
+        "osc(10).blur(33).out()",
+        "history(o0,9).out()",
+        "history(s0,2).out()",
+        "osc(10).blur(()=>1).out()",
+        "var effect=osc(10);for(var n=0;n<17;n++)effect=effect.blur();effect.out()",
+    ] {
+        assert!(js.eval(code).is_err(), "{code}");
+        assert_eq!(js.eval("").unwrap().shaders, graph.shaders);
+    }
+    assert!(
+        js.eval("osc(noise(2).blur()).out()")
+            .unwrap()
+            .render_plan
+            .passes
+            .len()
+            >= 2
+    );
+    assert!(js.eval("setFunction({name:'blur',type:'color',inputs:[],glsl:'return c0;'});throw new Error('rollback')").is_err());
+    assert_eq!(
+        js.eval("osc(10).blur().out()")
+            .unwrap()
+            .render_plan
+            .passes
+            .len(),
+        2
+    );
+    js.eval(
+        "setFunction({name:'blur',type:'color',inputs:[],glsl:'return c0;'});osc(10).blur().out()",
+    )
+    .unwrap();
+    assert!(js.eval("").unwrap().render_plan.passes.is_empty());
+    assert_eq!(
+        js.eval("osc(10).nativeBlur().out()")
+            .unwrap()
+            .render_plan
+            .passes
+            .len(),
+        2
+    );
+}
+
+#[test]
+fn regions_remain_explicit_bounded_frame_signals() {
+    let mut js = runtime();
+    let graph = js
+        .eval("var brightness=region(o1,0,0,1,1,0);osc(brightness).out()")
+        .unwrap();
+    assert_eq!(graph.regions.len(), 1);
+    let mut frame = JavascriptFrame::default();
+    frame.regions[0] = 0.4;
+    assert_eq!(js.frame(frame).unwrap()[0], 0.4);
+    assert_eq!(js.eval("").unwrap().regions.len(), 1);
+    for code in [
+        "region(o0,-1,0,1,1)",
+        "region(o0,0,0,2,1)",
+        "region(o0,0,0,1,1,5)",
+        "region(o0,0,0,0,1)",
+    ] {
+        assert!(js.eval(code).is_err(), "{code}");
+    }
+    assert_eq!(js.eval("").unwrap().regions.len(), 1);
+    js.eval("update=()=>region(o0)").unwrap();
+    assert!(js.frame(frame).unwrap_err().contains("during frame"));
+    let native =
+        hydra_rust::eval("let level=region(o0,0.0,0.0,1.0,1.0,4);osc(level).out()").unwrap();
+    assert!(
+        native.shaders[0]
+            .as_ref()
+            .unwrap()
+            .contains("iRegionValues[0]")
+    );
+}
+
+#[test]
+fn history_limit_is_configurable_and_rolls_back_with_the_graph() {
+    let mut js = runtime();
+    let result = js.eval("setHistoryLimit(4);history(o0,4).out()").unwrap();
+    assert_eq!(result.render_plan.history_limit, 4);
+    assert!(js.eval("setHistoryLimit(2)").is_err());
+    assert_eq!(js.eval("").unwrap().render_plan.history_limit, 4);
+    assert!(js.eval("setHistoryLimit(9)").is_err());
+    let native = hydra_rust::eval("setHistoryLimit(4);history(o0,4).out()").unwrap();
+    assert_eq!(result.shaders, native.shaders);
+    assert!(hydra_rust::eval("setHistoryLimit(2);history(o0,4).out()").is_err());
+    js.eval("history(o0,1).out();setHistoryLimit(1)").unwrap();
+    assert_eq!(js.eval("").unwrap().render_plan.history, [0; 4]);
+    assert_eq!(
+        js.eval("").unwrap().shaders,
+        hydra_rust::eval("src(o0).out()").unwrap().shaders
+    );
+}
+
+#[test]
+fn automatic_pass_limit_spans_all_outputs() {
+    let mut js = runtime();
+    let valid = js
+        .eval("for(var i=0;i<4;i++)osc(10).blur().blur().blur().blur().out([o0,o1,o2,o3][i])")
+        .unwrap();
+    assert_eq!(valid.render_plan.passes.len(), 32);
+    let error = js
+        .eval("osc(10).blur().blur().blur().blur().blur().out()")
+        .err()
+        .unwrap();
+    assert!(error.contains("pass limit"), "{error}");
+    assert_eq!(js.eval("").unwrap().shaders, valid.shaders);
+}
+
+#[cfg(feature = "osc")]
+#[test]
+fn region_osc_output_is_explicit_rate_limited_and_uses_native_packets() {
+    use hydra_rust::extended::RegionSender;
+    let listener = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    listener
+        .set_read_timeout(Some(std::time::Duration::from_millis(100)))
+        .unwrap();
+    let destination = listener.local_addr().unwrap().to_string();
+    let mut js = runtime();
+    let result = js
+        .eval(&format!(
+            "var level=region(o0);sendRegion(level,{},'/level',30);osc(10).out()",
+            serde_json::to_string(&destination).unwrap()
+        ))
+        .unwrap();
+    let mut sender = RegionSender::default();
+    sender
+        .configure(&result.region_outputs, result.regions.len())
+        .unwrap();
+    let mut values = [0.0; 16];
+    values[0] = 0.75;
+    sender.send(&values).unwrap();
+    sender.send(&values).unwrap();
+    let mut bytes = [0; 1024];
+    let (count, _) = listener.recv_from(&mut bytes).unwrap();
+    let (_, packet) = rosc::decoder::decode_udp(&bytes[..count]).unwrap();
+    if let rosc::OscPacket::Message(message) = packet {
+        assert_eq!(message.addr, "/level");
+        assert!(matches!(message.args.as_slice(),[rosc::OscType::Float(value)] if *value==0.75));
+    } else {
+        panic!("Expected OSC message");
+    }
+    assert!(listener.recv_from(&mut bytes).is_err());
+    assert!(
+        js.eval("sendRegion(level,'localhost:9000','/level')")
+            .is_err()
+    );
+    assert!(
+        js.eval("sendRegion(level,'127.0.0.1:9000','/level',1000)")
+            .is_err()
+    );
+    js.eval("stopRegionOutput()").unwrap();
+    assert!(js.eval("").unwrap().region_outputs.is_empty());
+}
+#[test]
 fn native_tileable_and_text_helpers_share_the_native_implementations() {
     for code in [
         "osc(10).tileable().repeat(3,3).out()",

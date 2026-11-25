@@ -549,6 +549,178 @@ hydraText.fontSize = "50%";
 strokeText("Hydra", { lineWidth: "3px" }).out();
 ```
 
+### Native rendering extensions
+
+These opt-in extensions also support the plugin's Rhai renderer, except region controls and OSC output.
+Ordinary Hydra parameters and previous-frame output sampling retain their existing behavior.
+Extended sketches do not necessarily run in browser Hydra.
+
+#### Example sketches
+
+Each example isolates one extension.
+The neighborhood examples keep the original image in `o0` and display the processed image from `o1`.
+Change `render(o1)` to `render(o0)` to compare them.
+
+| Extension | Rhai script | JavaScript script | Visible result |
+|-----------|-------------|-------------------|----------------|
+| Per-pixel parameters | [Rhai](examples/extensions/per_pixel_parameters.hydra) | [JavaScript](examples/javascript/extensions/per_pixel_parameters.js) | Stripe frequency varies across the image |
+| Blur | [Rhai](examples/extensions/blur.hydra) | [JavaScript](examples/javascript/extensions/blur.js) | Softer stripe boundaries |
+| Sharpen | [Rhai](examples/extensions/sharpen.hydra) | [JavaScript](examples/javascript/extensions/sharpen.js) | Stronger noise details |
+| Sobel | [Rhai](examples/extensions/sobel.hydra) | [JavaScript](examples/javascript/extensions/sobel.js) | Bright polygon outlines |
+| Emboss | [Rhai](examples/extensions/emboss.hydra) | [JavaScript](examples/javascript/extensions/emboss.js) | Noise resembles a shaded surface |
+| Dilation | [Rhai](examples/extensions/dilate.hydra) | [JavaScript](examples/javascript/extensions/dilate.js) | White dots grow |
+| Erosion | [Rhai](examples/extensions/erode.hydra) | [JavaScript](examples/javascript/extensions/erode.js) | White dots shrink |
+| History | [Rhai](examples/extensions/history.hydra) | [JavaScript](examples/javascript/extensions/history.js) | A rotating triangle leaves a delayed echo |
+| Region control | [Rhai](examples/extensions/region.hydra) | [JavaScript](examples/javascript/extensions/region.js) | Image intensity changes stripe frequency |
+| Region OSC output | [Rhai](examples/extensions/region_osc.hydra) | [JavaScript](examples/javascript/extensions/region_osc.js) | Changing intensity also reaches an OSC receiver |
+
+- Open a Rhai example in the standalone application or plugin.
+- Use the standalone application for region examples.
+- Select **JavaScript** when opening a `.js` example.
+- Evaluate the sketch with **Ctrl/Cmd + Shift + Enter** in the standalone application.
+
+```bash
+cargo run --bin hydra -- examples/extensions/blur.hydra
+cargo run --bin hydra --features javascript -- --javascript examples/javascript/extensions/blur.js
+```
+
+The OSC example requires the `osc` feature and a receiver listening on `127.0.0.1:9000`.
+It sends one float at `/hydra/brightness`, at most 30 times per second.
+Replace the destination and address to match your receiver.
+
+```bash
+cargo run --bin hydra --features osc -- examples/extensions/region_osc.hydra
+```
+
+Reset the JavaScript interpreter before switching examples to discard retained outputs and region bindings.
+Reevaluate the new sketch after reset.
+For example, reset before switching from `region_osc.js` to `blur.js`.
+
+#### Per-pixel float parameters
+
+A texture argument supplies its red channel at each pixel.
+Texture arithmetic preserves values above one until rendering stores them.
+JavaScript cannot overload multiplication, so use `.mul(number)` instead.
+
+```javascript
+osc(noise(2).mul(40)).out();
+```
+
+The equivalent Rhai expression uses multiplication.
+
+```javascript
+osc(noise(2) * 40).out();
+```
+
+#### Neighborhood effects
+
+| Method | Operation | Example |
+|--------|-----------|---------|
+| `.blur(radius)` | Average nine nearby samples | `osc(10).blur(1).out();` |
+| `.sharpen(radius)` | Subtract the local average from twice the center | `osc(10).sharpen(1).out();` |
+| `.sobel(radius)` | Detect intensity edges | `osc(10).sobel(1).out();` |
+| `.emboss(radius)` | Shade diagonal intensity changes | `osc(10).emboss(1).out();` |
+| `.dilate(radius)` | Keep each channel's local maximum | `osc(10).dilate(1).out();` |
+| `.erode(radius)` | Keep each channel's local minimum | `osc(10).erode(1).out();` |
+
+Radius controls sample spacing in pixels, from zero through 32.
+Its default is one pixel.
+JavaScript requires a fixed number; Rhai also accepts shader expressions and patterns.
+Each effect adds two intermediate passes.
+Intermediate textures use eight-bit red, green, blue, and alpha channels, matching native output storage.
+Values clamp to zero through one between passes.
+The renderer limits each graph replacement to 32 passes.
+Nested graphs also retain the existing 16-level limit.
+
+JavaScript libraries can replace ordinary effect names.
+Use native-prefixed aliases when a library supplies its own effect.
+
+```javascript
+osc(10).nativeSharpen(1).nativeBlur(2).out();
+```
+
+#### Output history
+
+`history(output,delay)` reads a completed output from an earlier frame.
+Choose a fixed delay from one through eight frames.
+JavaScript defaults to one frame; Rhai requires both arguments.
+`setHistoryLimit(limit)` lowers the per-output cap in either language.
+The default cap is eight; values outside one through eight produce errors.
+Delay one uses ordinary feedback textures.
+Longer delays allocate a ring of textures only for requested outputs.
+
+```javascript
+history(o0,4).blend(osc(10),0.1).out(o0);
+```
+
+For example, choose a four-frame cap before declaring delayed feedback.
+
+```javascript
+setHistoryLimit(4);
+history(o0,4).blend(osc(10),0.1).out();
+```
+
+New history starts transparent black.
+Clearing an output also clears its history.
+Resizing clears history and intermediate textures.
+Successful recompilation preserves history when its depth remains unchanged.
+Failed compilation preserves the previous graph and history.
+
+Extended plans have a 256 MiB texture budget, including the eight ordinary feedback textures.
+Device texture dimensions and available texture units impose additional limits.
+Unsupported plans and resizing report errors rather than silently reducing history.
+For example, eight 1920-by-1080 history textures require approximately 63 MiB for one output.
+The ordinary feedback textures require another 63 MiB at that resolution.
+Temporary shader replacement resources can increase peak memory usage.
+
+#### Image-region controls and OSC output
+
+Region controls run only in the standalone application.
+`region(output,x,y,width,height,channel)` selects a normalized output rectangle.
+The default rectangle covers the whole output.
+Channels zero through three select red, green, blue, and alpha.
+Channel four selects luminance and is the default.
+Up to sixteen regions can coexist.
+JavaScript returns a callback signal supporting the existing `.scale()` and `.range()` helpers.
+
+```javascript
+const brightness = region(o0,0,0,1,1,4);
+osc(brightness.range(5,40)).out();
+```
+
+Rhai returns a shader expression.
+Rhai requires all six arguments.
+
+```javascript
+let brightness = region(o0,0.0,0.0,1.0,1.0,4);
+osc(brightness * 40.0).out();
+```
+
+Each region averages an eight-by-eight downsample, not every original pixel.
+Values become available on the next frame.
+Reading pixels can stall rendering, so keep region counts and output rates modest.
+Regions must be declared during evaluation, not inside frame callbacks.
+
+`sendRegion` sends an unmodified region signal through OSC when the `osc` Cargo feature is enabled.
+Destinations require a numeric IP address and a nonzero port; hostnames are unsupported.
+Each binding accepts one through 60 messages per second.
+JavaScript defaults to 30; Rhai requires the rate argument.
+No packet is sent before the first completed region sample.
+
+```javascript
+const level = region(o0);
+sendRegion(level,"127.0.0.1:9000","/brightness",30);
+```
+
+JavaScript `stopRegionOutput()` removes all output bindings.
+Rhai reevaluation replaces its region declarations and bindings.
+For example, evaluate `osc(10).out()` in Rhai to stop region output.
+JavaScript interpreter reset discards declarations; the displayed graph remains until successful replacement.
+Reset also stops OSC region output.
+GPU pixel sorting, waveform audio output, and direct control-voltage hardware output remain deferred.
+
+### Native device controls
+
 #### Source initialization
 
 These methods return their source object and queue native source requests.

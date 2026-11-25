@@ -1,0 +1,3 @@
+shape(99,0.22,0.001).repeat(6,4).out(o0);
+src(o0).nativeDilate(3).out(o1);
+render(o1);

@@ -181,6 +181,9 @@ pub struct EvalResult {
     /// doc comment for why this doesn't reset like `render_mode` does.
     pub buffer_filter: [Option<BufferFilter>; 4],
     pub buffer_clear: [bool; 4],
+    pub render_plan: crate::extended::RenderPlan,
+    pub regions: Vec<crate::extended::Region>,
+    pub region_outputs: Vec<crate::extended::RegionOutput>,
     #[cfg(any(
         feature = "webcam",
         feature = "image_url",
@@ -272,6 +275,7 @@ struct Pb;
 
 #[derive(Debug, Clone)]
 pub(crate) enum Arg {
+    Texture { node: Box<Node>, channel: usize },
     Lit(f64),
     Expr(String),
 }
@@ -465,6 +469,11 @@ pub struct Node {
 
 #[derive(Debug, Clone)]
 pub(crate) enum Op {
+    Effect {
+        other: Node,
+        effect: crate::extended::Effect,
+        radius: Arg,
+    },
     Tileable {
         other: Node,
         width: Arg,
@@ -961,7 +970,12 @@ fn fill_args(provided: &[Arg], defaults: &'static [f64]) -> Vec<Arg> {
 }
 
 fn as_arg(d: Dynamic) -> Arg {
-    if let Ok(v) = d.as_float() {
+    if d.is::<Node>() {
+        Arg::Texture {
+            node: Box::new(d.cast::<Node>()),
+            channel: 0,
+        }
+    } else if let Ok(v) = d.as_float() {
         Arg::Lit(v)
     } else if let Ok(v) = d.as_int() {
         Arg::Lit(v as f64)
@@ -1275,6 +1289,7 @@ fn midi_value(
     Ok(GlslExpr(match as_arg(result) {
         Arg::Lit(number) => fmt_f(number),
         Arg::Expr(expr) => expr,
+        Arg::Texture { .. } => unreachable!("MIDI shader math uses scalar arguments"),
     }))
 }
 
@@ -1711,11 +1726,8 @@ fn fmt_arg(a: &Arg) -> String {
     match a {
         Arg::Lit(v) => fmt_f(*v),
         Arg::Expr(s) => s.clone(),
+        Arg::Texture { .. } => unreachable!("Texture arguments require the graph emitter"),
     }
-}
-
-fn fmt_args(args: &[Arg]) -> String {
-    args.iter().map(fmt_arg).collect::<Vec<_>>().join(", ")
 }
 
 struct Emitter {
@@ -1729,6 +1741,34 @@ struct Emitter {
 const MAX_DEPTH: usize = 16;
 
 impl Emitter {
+    fn arg(&mut self, arg: &Arg, coordinate: &str) -> Result<String, String> {
+        if let Arg::Texture { node, channel } = arg {
+            if *channel > 4 {
+                return Err("Invalid per-pixel parameter channel".into());
+            }
+            let outer = std::mem::take(&mut self.lines);
+            let value = self.compile_node(node)?;
+            let body = std::mem::replace(&mut self.lines, outer).join("\n");
+            let name = format!("{value}_parameter");
+            self.functions.push(format!(
+                "vec4 {name}(vec2 st) {{\n{body}\nreturn {value};\n}}"
+            ));
+            return Ok(if *channel == 4 {
+                format!("dot({name}({coordinate}).rgb, vec3(0.2126,0.7152,0.0722))")
+            } else {
+                format!("{name}({coordinate}).{}", ["r", "g", "b", "a"][*channel])
+            });
+        }
+        Ok(fmt_arg(arg))
+    }
+
+    fn args(&mut self, args: &[Arg], coordinate: &str) -> Result<String, String> {
+        args.iter()
+            .map(|arg| self.arg(arg, coordinate))
+            .collect::<Result<Vec<_>, _>>()
+            .map(|args| args.join(", "))
+    }
+
     fn new() -> Self {
         Self {
             lines: Vec::new(),
@@ -1771,6 +1811,9 @@ impl Emitter {
                 }
                 Op::Geo { .. } | Op::Modulate { .. } => geo_mods.push(op),
                 Op::Color { .. } | Op::Blend { .. } => colors.push(op),
+                Op::Effect { .. } => {
+                    return Err("Neighborhood effects require an extended render plan".into());
+                }
             }
         }
 
@@ -1781,7 +1824,7 @@ impl Emitter {
             match op {
                 Op::Geo { func, args } => {
                     let new_st = self.next_st();
-                    let a = fmt_args(args);
+                    let a = self.args(args, &current_st)?;
                     let sep = if a.is_empty() { "" } else { ", " };
                     self.lines
                         .push(format!("  vec2 {new_st} = {func}({current_st}{sep}{a});"));
@@ -1790,7 +1833,7 @@ impl Emitter {
                 Op::Modulate { func, other, args } => {
                     let sub_var = self.compile_node(other)?;
                     let new_st = self.next_st();
-                    let a = fmt_args(args);
+                    let a = self.args(args, &current_st)?;
                     let sep = if a.is_empty() { "" } else { ", " };
                     self.lines.push(format!(
                         "  vec2 {new_st} = {func}({current_st}, {sub_var}{sep}{a});"
@@ -1825,12 +1868,45 @@ impl Emitter {
                               mix({sampler}(vec2(p.x, q.y)), {sampler}(q), blend.x), blend.y);\n\
                  }}"
             ));
+            let width = self.arg(width, &current_st)?;
             self.lines.push(format!(
                 "  vec4 {current_var} = {tile}({current_st}, {});",
-                fmt_arg(width)
+                width
             ));
         } else if let Op::Source { func, args } = source {
-            if *func == "src" {
+            if *func == "pass_src" {
+                let Some(Arg::Lit(index)) = args.first() else {
+                    return Err("Invalid intermediate pass".into());
+                };
+                let declaration = format!("uniform sampler2D iPass{};", *index as usize);
+                if !self.functions.contains(&declaration) {
+                    self.functions.push(declaration);
+                }
+                self.lines.push(format!(
+                    "  vec4 {current_var} = texture(iPass{}, {current_st});",
+                    *index as usize
+                ));
+            } else if *func == "history_src" {
+                let [Arg::Lit(output), Arg::Lit(delay)] = args.as_slice() else {
+                    return Err("Invalid history source".into());
+                };
+                let sampler = if *delay == 1.0 {
+                    format!("iBuffer{}", *output as usize)
+                } else {
+                    format!("iHistory{}_{}", *output as usize, *delay as usize)
+                };
+                if *delay > 1.0
+                    && !self
+                        .functions
+                        .iter()
+                        .any(|declaration| declaration == &format!("uniform sampler2D {sampler};"))
+                {
+                    self.functions.push(format!("uniform sampler2D {sampler};"));
+                }
+                self.lines.push(format!(
+                    "  vec4 {current_var} = texture({sampler}, {current_st});"
+                ));
+            } else if *func == "src" {
                 let buf_idx = match args.first() {
                     Some(Arg::Lit(v)) => (*v as usize).min(3),
                     _ => 0,
@@ -1853,7 +1929,7 @@ impl Emitter {
                 "  vec4 {current_var} = vec4(texture(iSource{src_idx}, vec2({current_st}.x, 1.0 - {current_st}.y)).rgb, 1.0);"
             ));
             } else {
-                let a = fmt_args(args);
+                let a = self.args(args, &current_st)?;
                 let sep = if a.is_empty() { "" } else { ", " };
                 self.lines.push(format!(
                     "  vec4 {current_var} = {func}({current_st}{sep}{a});"
@@ -1868,7 +1944,7 @@ impl Emitter {
             match op {
                 Op::Color { func, args } => {
                     let new_var = self.next_var();
-                    let a = fmt_args(args);
+                    let a = self.args(args, &current_st)?;
                     let sep = if a.is_empty() { "" } else { ", " };
                     self.lines
                         .push(format!("  vec4 {new_var} = {func}({prev_var}{sep}{a});"));
@@ -1877,7 +1953,7 @@ impl Emitter {
                 Op::Blend { func, other, args } => {
                     let sub_var = self.compile_node(other)?;
                     let new_var = self.next_var();
-                    let a = fmt_args(args);
+                    let a = self.args(args, &current_st)?;
                     let sep = if a.is_empty() { "" } else { ", " };
                     self.lines.push(format!(
                         "  vec4 {new_var} = {func}({prev_var}, {sub_var}{sep}{a});"
@@ -1966,10 +2042,13 @@ fn rasterize_text(
 }
 
 struct PatchState {
+    history_limit: usize,
     buffers: [Option<Node>; 4],
     render_mode: RenderMode,
     text_data: Option<TextData>,
     screencap: bool,
+    regions: Vec<crate::extended::Region>,
+    region_outputs: Vec<crate::extended::RegionOutput>,
     render_resolution: Option<(u32, u32)>,
     buffer_filter: [Option<BufferFilter>; 4],
     #[cfg(any(
@@ -2391,10 +2470,13 @@ fn eval_impl(
     validate_midi_value_callbacks(&code)?;
     let code = &preprocess(&code);
     let state = Arc::new(Mutex::new(PatchState {
+        history_limit: crate::extended::MAX_HISTORY,
         buffers: [None, None, None, None],
         render_mode: RenderMode::default(),
         text_data: None,
         screencap: false,
+        regions: Vec::new(),
+        region_outputs: Vec::new(),
         render_resolution: None,
         buffer_filter: [None; 4],
         #[cfg(any(
@@ -2426,6 +2508,145 @@ fn eval_impl(
 
     let mut engine = Engine::new();
     engine.build_type::<Node>();
+    {
+        let state = state.clone();
+        engine.register_fn(
+            "setHistoryLimit",
+            move |limit: i64| -> Result<(), Box<rhai::EvalAltResult>> {
+                if !(1..=crate::extended::MAX_HISTORY as i64).contains(&limit) {
+                    return Err("History limit must be in 1..8 frames".into());
+                }
+                state.lock().unwrap().history_limit = limit as usize;
+                Ok(())
+            },
+        );
+    }
+    {
+        let state = state.clone();
+        engine.register_fn(
+            "region",
+            move |output: i64,
+                  x: f64,
+                  y: f64,
+                  width: f64,
+                  height: f64,
+                  channel: i64|
+                  -> Result<GlslExpr, Box<rhai::EvalAltResult>> {
+                let region = crate::extended::Region {
+                    output: output as usize,
+                    rect: [x as f32, y as f32, width as f32, height as f32],
+                    channel: channel as usize,
+                };
+                region.validate()?;
+                let mut state = state.lock().unwrap();
+                if state.regions.len() >= crate::extended::MAX_REGIONS {
+                    return Err("Image region limit exceeded".into());
+                }
+                let slot = state.regions.len();
+                state.regions.push(region);
+                Ok(GlslExpr(format!("iRegionValues[{slot}]")))
+            },
+        );
+    }
+    {
+        let state = state.clone();
+        engine.register_fn(
+            "sendRegion",
+            move |signal: GlslExpr,
+                  destination: ImmutableString,
+                  address: ImmutableString,
+                  rate: f64|
+                  -> Result<(), Box<rhai::EvalAltResult>> {
+                #[cfg(not(feature = "osc"))]
+                {
+                    let _ = (&state, signal, destination, address, rate);
+                    Err("sendRegion requires the osc feature".into())
+                }
+                #[cfg(feature = "osc")]
+                {
+                    let slot = signal
+                        .0
+                        .strip_prefix("iRegionValues[")
+                        .and_then(|value| value.strip_suffix(']'))
+                        .and_then(|value| value.parse::<usize>().ok())
+                        .ok_or("sendRegion requires a direct region signal")?;
+                    let output = crate::extended::RegionOutput {
+                        slot,
+                        destination: destination.into(),
+                        address: address.into(),
+                        rate: rate as f32,
+                    };
+                    let mut state = state.lock().unwrap();
+                    output.validate(state.regions.len())?;
+                    if state.region_outputs.len() >= crate::extended::MAX_REGIONS {
+                        return Err("Region OSC output limit exceeded".into());
+                    }
+                    state.region_outputs.push(output);
+                    Ok(())
+                }
+            },
+        );
+    }
+    for name in ["blur", "sharpen", "sobel", "emboss", "dilate", "erode"] {
+        let effect = crate::extended::Effect::parse(name).expect("native effect");
+        engine.register_fn(name, move |node: Node| Node {
+            ops: vec![Op::Effect {
+                other: node,
+                effect,
+                radius: Arg::Lit(1.0),
+            }],
+        });
+        engine.register_fn(name, move |node: Node, radius: Dynamic| -> Result<Node,Box<rhai::EvalAltResult>> {
+            if !radius.is_int() && !radius.is_float() && !radius.is::<GlslExpr>() && !radius.is::<Pattern>() {
+                return Err("Effect radius requires a number or frame signal".into());
+            }
+            let radius = as_arg(radius);
+            if matches!(&radius,Arg::Lit(value) if !value.is_finite() || !(0.0..=32.0).contains(value)) {
+                return Err("Effect radius must be in 0..32 pixels".into());
+            }
+            Ok(Node { ops:vec![Op::Effect { other:node, effect, radius }] })
+        });
+    }
+    engine.register_fn(
+        "history",
+        |output: i64, delay: i64| -> Result<Node, Box<rhai::EvalAltResult>> {
+            if !(0..4).contains(&output)
+                || !(1..=crate::extended::MAX_HISTORY as i64).contains(&delay)
+            {
+                return Err("history requires an output and 1..8 frames".into());
+            }
+            Ok(Node::source(
+                "history_src",
+                vec![Arg::Lit(output as f64), Arg::Lit(delay as f64)],
+            ))
+        },
+    );
+    for (name, operation) in [("*", "mult"), ("+", "add"), ("-", "sub")] {
+        engine.register_fn(
+            name,
+            move |node: Node, value: Dynamic| -> Result<Node, Box<rhai::EvalAltResult>> {
+                let number = value
+                    .as_float()
+                    .ok()
+                    .or_else(|| value.as_int().ok().map(|value| value as f64))
+                    .filter(|value| value.is_finite())
+                    .ok_or("Texture arithmetic requires a finite scalar")?;
+                Ok(node.push_blend(
+                    operation,
+                    Node::source(
+                        "solid",
+                        vec![
+                            Arg::Lit(number),
+                            Arg::Lit(number),
+                            Arg::Lit(number),
+                            Arg::Lit(1.0),
+                        ],
+                    ),
+                    vec![Arg::Lit(1.0)],
+                ))
+            },
+        );
+    }
     register_functions(&mut engine);
     register_glsl_ops(&mut engine);
     register_patterns(&mut engine);
@@ -3361,9 +3582,19 @@ fn eval_impl(
     }
 
     let mut shaders: [Option<String>; 4] = [None, None, None, None];
+    let mut render_plan = crate::extended::RenderPlan {
+        history_limit: patch.history_limit,
+        ..Default::default()
+    };
     for (i, buf) in patch.buffers.iter().enumerate() {
         if let Some(node) = buf {
-            let body = compile_node(node)?;
+            let start = render_plan.passes.len();
+            let body = crate::extended::compile(node, &mut render_plan)?;
+            for pass in &mut render_plan.passes[start..] {
+                if !custom_glsl.is_empty() {
+                    *pass = format!("{custom_glsl}{pass}");
+                }
+            }
             shaders[i] = Some(if custom_glsl.is_empty() {
                 body
             } else {
@@ -3380,6 +3611,9 @@ fn eval_impl(
         render_resolution: patch.render_resolution,
         buffer_filter: patch.buffer_filter,
         buffer_clear: [false; 4],
+        render_plan,
+        regions: std::mem::take(&mut patch.regions),
+        region_outputs: std::mem::take(&mut patch.region_outputs),
         #[cfg(any(
             feature = "webcam",
             feature = "image_url",

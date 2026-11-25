@@ -1,0 +1,5 @@
+// Send only to a local receiver that you explicitly choose.
+solid(() => 0.5 + 0.5 * Math.sin(time),0.2,0.6,1).out(o0);
+let level = region(o0,0.0,0.0,1.0,1.0,0);
+sendRegion(level,"127.0.0.1:9000","/hydra/brightness",30.0);
+render(o0);

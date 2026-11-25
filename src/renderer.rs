@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use glow::{HasContext, PixelUnpackData};
 
@@ -13,6 +13,7 @@ use crate::text::TextData;
 
 #[derive(Clone, Copy)]
 pub struct RenderUniforms {
+    pub region_values: [f32; crate::extended::MAX_REGIONS],
     pub time: f32,
     pub resolution: [f32; 2],
     pub mouse: [f32; 2],
@@ -59,6 +60,9 @@ struct ProgramState {
     loc_buffers: [Option<glow::UniformLocation>; NUM_BUFFERS],
     loc_text0: Option<glow::UniformLocation>,
     loc_sources: [Option<glow::UniformLocation>; NUM_SOURCES],
+    loc_passes: [Option<glow::UniformLocation>; crate::extended::MAX_PASSES],
+    loc_history: [[Option<glow::UniformLocation>; crate::extended::MAX_HISTORY]; NUM_BUFFERS],
+    loc_regions: Option<glow::UniformLocation>,
 }
 
 #[derive(Clone, Copy)]
@@ -67,7 +71,7 @@ struct BufferTarget {
     texture: [glow::Texture; 2],
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct RenderSnapshot {
     targets: [BufferTarget; NUM_BUFFERS],
     programs: [Option<ProgramState>; NUM_BUFFERS],
@@ -81,6 +85,41 @@ pub struct RenderSnapshot {
     /// `tex_sub_image_2d` instead of reallocating GPU storage on every
     /// single incoming camera frame (~30Hz per active source).
     source_dims: [Option<(u32, u32)>; NUM_SOURCES],
+    extended: Arc<ExtendedTargets>,
+}
+
+#[derive(Clone, Copy)]
+struct SingleTarget {
+    fbo: glow::Framebuffer,
+    texture: glow::Texture,
+}
+
+#[derive(Default)]
+struct ExtendedTargets {
+    passes: Vec<(ProgramState, SingleTarget)>,
+    history: [Vec<SingleTarget>; NUM_BUFFERS],
+    cursor: [AtomicUsize; NUM_BUFFERS],
+    region: Option<SingleTarget>,
+}
+
+impl ExtendedTargets {
+    fn destroy(&self, gl: &glow::Context) {
+        unsafe {
+            for (program, target) in &self.passes {
+                gl.delete_program(program.program);
+                gl.delete_framebuffer(target.fbo);
+                gl.delete_texture(target.texture);
+            }
+            for target in self.history.iter().flatten() {
+                gl.delete_framebuffer(target.fbo);
+                gl.delete_texture(target.texture);
+            }
+            if let Some(target) = self.region {
+                gl.delete_framebuffer(target.fbo);
+                gl.delete_texture(target.texture);
+            }
+        }
+    }
 }
 
 pub struct ShaderRenderer {
@@ -94,6 +133,7 @@ pub struct ShaderRenderer {
 impl Drop for ShaderRenderer {
     fn drop(&mut self) {
         unsafe {
+            self.snapshot.extended.destroy(&self.gl);
             for target in &self.snapshot.targets {
                 for fbo in &target.fbo {
                     self.gl.delete_framebuffer(*fbo);
@@ -142,6 +182,7 @@ impl ShaderRenderer {
                 text_texture: None,
                 source_textures: [None; NUM_SOURCES],
                 source_dims: [None; NUM_SOURCES],
+                extended: Arc::new(ExtendedTargets::default()),
             },
             vbo,
             gl,
@@ -155,7 +196,7 @@ impl ShaderRenderer {
     }
 
     pub fn snapshot(&self) -> RenderSnapshot {
-        self.snapshot
+        self.snapshot.clone()
     }
 
     pub fn clear_buffers(&mut self, buffers: [bool; NUM_BUFFERS]) {
@@ -172,7 +213,11 @@ impl ShaderRenderer {
             self.gl.color_mask(true, true, true, true);
             for (index, clear) in buffers.iter().enumerate() {
                 if *clear {
-                    for fbo in self.snapshot.targets[index].fbo {
+                    for fbo in self.snapshot.targets[index].fbo.into_iter().chain(
+                        self.snapshot.extended.history[index]
+                            .iter()
+                            .map(|target| target.fbo),
+                    ) {
                         self.gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(fbo));
                         self.gl.clear_buffer_f32_slice(glow::COLOR, 0, &[0.0; 4]);
                     }
@@ -215,6 +260,43 @@ impl ShaderRenderer {
             }
             self.gl.bind_texture(glow::TEXTURE_2D, None);
         }
+        for target in self.snapshot.extended.history.iter().flatten().chain(
+            self.snapshot
+                .extended
+                .passes
+                .iter()
+                .map(|(_, target)| target),
+        ) {
+            Self::resize_single(&self.gl, *target, self.resolution);
+        }
+        for cursor in &self.snapshot.extended.cursor {
+            cursor.store(0, Ordering::Relaxed);
+        }
+    }
+
+    pub fn ensure_resolution_checked(&mut self, width: u32, height: u32) -> Result<(), String> {
+        let plan = crate::extended::RenderPlan {
+            passes: vec![String::new(); self.snapshot.extended.passes.len()],
+            history: std::array::from_fn(|index| self.snapshot.extended.history[index].len()),
+            ..Default::default()
+        };
+        Self::validate_plan(&plan, [width, height])?;
+        let maximum = unsafe { self.gl.get_parameter_i32(glow::MAX_TEXTURE_SIZE) } as u32;
+        if width == 0 || height == 0 || width > maximum || height > maximum {
+            return Err("Render dimensions exceed the graphics device limit".into());
+        }
+        let previous = self.resolution;
+        self.ensure_resolution(width, height);
+        if previous != [width, height] {
+            let error = unsafe { self.gl.get_error() };
+            if error != glow::NO_ERROR {
+                self.resolution = previous;
+                return Err(format!(
+                    "Render texture resizing failed: OpenGL error {error:#x}"
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// `o0-o3.setNearest()`/`.setLinear()`/`.setMode(...)` - sets a
@@ -240,6 +322,110 @@ impl ShaderRenderer {
                     .tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, f);
             }
             self.gl.bind_texture(glow::TEXTURE_2D, None);
+        }
+    }
+
+    fn validate_plan(
+        plan: &crate::extended::RenderPlan,
+        resolution: [u32; 2],
+    ) -> Result<(), String> {
+        if plan.passes.len() > crate::extended::MAX_PASSES
+            || !(1..=crate::extended::MAX_HISTORY).contains(&plan.history_limit)
+            || plan.history.iter().any(|count| *count > plan.history_limit)
+        {
+            return Err("Render plan exceeds pass or history limits".into());
+        }
+        if !plan.passes.is_empty() || plan.history.iter().any(|count| *count > 0) {
+            let count = 8 + plan.passes.len() + plan.history.iter().sum::<usize>();
+            let bytes = (resolution[0] as usize)
+                .checked_mul(resolution[1] as usize)
+                .and_then(|pixels| pixels.checked_mul(4))
+                .and_then(|bytes| bytes.checked_mul(count))
+                .ok_or("Extended texture allocation overflow")?;
+            if bytes > crate::extended::MAX_TEXTURE_BYTES {
+                return Err("Extended render textures exceed the 256 MiB allocation limit".into());
+            }
+        }
+        Ok(())
+    }
+
+    fn create_single(gl: &glow::Context, resolution: [u32; 2]) -> Result<SingleTarget, String> {
+        unsafe {
+            let texture = gl.create_texture()?;
+            let fbo = match gl.create_framebuffer() {
+                Ok(fbo) => fbo,
+                Err(error) => {
+                    gl.delete_texture(texture);
+                    return Err(error);
+                }
+            };
+            let target = SingleTarget { texture, fbo };
+            let previous = gl.get_parameter_i32(glow::DRAW_FRAMEBUFFER_BINDING);
+            gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            set_texture_defaults(gl);
+            Self::resize_single(gl, target, resolution);
+            gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(fbo));
+            gl.framebuffer_texture_2d(
+                glow::DRAW_FRAMEBUFFER,
+                glow::COLOR_ATTACHMENT0,
+                glow::TEXTURE_2D,
+                Some(texture),
+                0,
+            );
+            let complete =
+                gl.check_framebuffer_status(glow::DRAW_FRAMEBUFFER) == glow::FRAMEBUFFER_COMPLETE;
+            let error = gl.get_error();
+            gl.bind_framebuffer(
+                glow::DRAW_FRAMEBUFFER,
+                std::num::NonZeroU32::new(previous as u32).map(glow::NativeFramebuffer),
+            );
+            gl.bind_texture(glow::TEXTURE_2D, None);
+            if !complete || error != glow::NO_ERROR {
+                gl.delete_framebuffer(fbo);
+                gl.delete_texture(texture);
+                return Err("Could not allocate an extended render texture".into());
+            }
+            Ok(target)
+        }
+    }
+
+    fn resize_single(gl: &glow::Context, target: SingleTarget, resolution: [u32; 2]) {
+        unsafe {
+            let previous = gl.get_parameter_i32(glow::DRAW_FRAMEBUFFER_BINDING);
+            let scissor = gl.is_enabled(glow::SCISSOR_TEST);
+            let mut mask = [0; 4];
+            gl.get_parameter_i32_slice(glow::COLOR_WRITEMASK, &mut mask);
+            gl.bind_texture(glow::TEXTURE_2D, Some(target.texture));
+            gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                glow::RGBA8 as i32,
+                resolution[0] as i32,
+                resolution[1] as i32,
+                0,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                PixelUnpackData::Slice(None),
+            );
+            gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(target.fbo));
+            gl.framebuffer_texture_2d(
+                glow::DRAW_FRAMEBUFFER,
+                glow::COLOR_ATTACHMENT0,
+                glow::TEXTURE_2D,
+                Some(target.texture),
+                0,
+            );
+            gl.disable(glow::SCISSOR_TEST);
+            gl.color_mask(true, true, true, true);
+            gl.clear_buffer_f32_slice(glow::COLOR, 0, &[0.0; 4]);
+            gl.color_mask(mask[0] != 0, mask[1] != 0, mask[2] != 0, mask[3] != 0);
+            if scissor {
+                gl.enable(glow::SCISSOR_TEST);
+            }
+            gl.bind_framebuffer(
+                glow::DRAW_FRAMEBUFFER,
+                std::num::NonZeroU32::new(previous as u32).map(glow::NativeFramebuffer),
+            );
         }
     }
 
@@ -331,6 +517,8 @@ impl ShaderRenderer {
         shaders: &[Option<String>; NUM_BUFFERS],
         render_mode: RenderMode,
     ) -> Vec<String> {
+        self.snapshot.extended.destroy(&self.gl);
+        self.snapshot.extended = Arc::new(ExtendedTargets::default());
         let mut errors = Vec::new();
         for (i, shader_src) in shaders.iter().enumerate() {
             if let Some(old) = self.snapshot.programs[i].take() {
@@ -356,6 +544,42 @@ impl ShaderRenderer {
         shaders: &[Option<String>; NUM_BUFFERS],
         render_mode: RenderMode,
     ) -> Vec<String> {
+        self.compile_plan_atomic(
+            shaders,
+            render_mode,
+            &crate::extended::RenderPlan::default(),
+            false,
+        )
+    }
+
+    pub fn compile_result_atomic(&mut self, result: &crate::eval::EvalResult) -> Vec<String> {
+        if result.regions.len() > crate::extended::MAX_REGIONS {
+            return vec!["Image region limit exceeded".into()];
+        }
+        for region in &result.regions {
+            if let Err(error) = region.validate() {
+                return vec![error];
+            }
+        }
+        self.compile_plan_atomic(
+            &result.shaders,
+            result.render_mode,
+            &result.render_plan,
+            !result.regions.is_empty(),
+        )
+    }
+
+    fn compile_plan_atomic(
+        &mut self,
+        shaders: &[Option<String>; NUM_BUFFERS],
+        render_mode: RenderMode,
+        plan: &crate::extended::RenderPlan,
+        regions: bool,
+    ) -> Vec<String> {
+        if let Err(error) = Self::validate_plan(plan, self.resolution) {
+            return vec![error];
+        }
+        let mut extended = ExtendedTargets::default();
         let mut programs = std::array::from_fn::<_, NUM_BUFFERS, _>(|_| None);
         let mut errors = Vec::new();
         for (i, source) in shaders.iter().enumerate() {
@@ -368,17 +592,132 @@ impl ShaderRenderer {
                 }
             }
         }
+        for (index, source) in plan.passes.iter().enumerate() {
+            match compile_program(&self.gl, &shader::fragment_source(source)) {
+                Ok(program) => match Self::create_single(&self.gl, self.resolution) {
+                    Ok(target) => extended
+                        .passes
+                        .push((resolve_program_state(&self.gl, program), target)),
+                    Err(error) => {
+                        unsafe {
+                            self.gl.delete_program(program);
+                        }
+                        errors.push(error);
+                    }
+                },
+                Err(error) => errors.push(format!("automatic pass {index}: {error}")),
+            }
+        }
+        let max_units =
+            unsafe { self.gl.get_parameter_i32(glow::MAX_TEXTURE_IMAGE_UNITS) } as usize;
+        for program in programs
+            .iter()
+            .flatten()
+            .chain(extended.passes.iter().map(|(program, _)| program))
+        {
+            let extra = program
+                .loc_passes
+                .iter()
+                .filter(|loc| loc.is_some())
+                .count()
+                + program
+                    .loc_history
+                    .iter()
+                    .flatten()
+                    .filter(|loc| loc.is_some())
+                    .count();
+            if extra + 9 > max_units {
+                errors.push("Extended shader exceeds available texture units".into());
+            }
+            for (index, location) in program.loc_passes.iter().enumerate() {
+                if location.is_some() && index >= plan.passes.len() {
+                    errors.push("Missing intermediate render pass".into());
+                }
+            }
+            for (output, locations) in program.loc_history.iter().enumerate() {
+                if locations
+                    .iter()
+                    .enumerate()
+                    .any(|(index, loc)| loc.is_some() && index + 1 > plan.history[output])
+                {
+                    errors.push("Missing output history storage".into());
+                }
+            }
+        }
+        for (index, (program, _)) in extended.passes.iter().enumerate() {
+            if program.loc_passes[index..].iter().any(Option::is_some) {
+                errors.push("Automatic render passes must only sample earlier passes".into());
+            }
+        }
+        if regions {
+            match Self::create_single(&self.gl, [8, 8]) {
+                Ok(target) => extended.region = Some(target),
+                Err(error) => errors.push(error),
+            }
+        }
         if !errors.is_empty() {
             for state in programs.into_iter().flatten() {
                 unsafe { self.gl.delete_program(state.program) };
             }
+            extended.destroy(&self.gl);
             return errors;
+        }
+        for (output, count) in plan.history.iter().enumerate() {
+            if self.snapshot.extended.history[output].len() == *count {
+                continue;
+            }
+            for _ in 0..*count {
+                match Self::create_single(&self.gl, self.resolution) {
+                    Ok(target) => extended.history[output].push(target),
+                    Err(error) => errors.push(error),
+                }
+            }
+        }
+        if !errors.is_empty() {
+            for state in programs.into_iter().flatten() {
+                unsafe {
+                    self.gl.delete_program(state.program);
+                }
+            }
+            extended.destroy(&self.gl);
+            return errors;
+        }
+        let previous = &self.snapshot.extended;
+        for (output, count) in plan.history.iter().enumerate() {
+            if previous.history[output].len() == *count {
+                extended.history[output] = previous.history[output].clone();
+                extended.cursor[output].store(
+                    previous.cursor[output].load(Ordering::Relaxed),
+                    Ordering::Relaxed,
+                );
+            } else {
+                for target in &previous.history[output] {
+                    unsafe {
+                        self.gl.delete_texture(target.texture);
+                        self.gl.delete_framebuffer(target.fbo);
+                    }
+                }
+            }
+        }
+        for (program, target) in &previous.passes {
+            unsafe {
+                self.gl.delete_program(program.program);
+                self.gl.delete_texture(target.texture);
+                self.gl.delete_framebuffer(target.fbo);
+            }
+        }
+        if let Some(target) = previous.region {
+            unsafe {
+                self.gl.delete_framebuffer(target.fbo);
+                self.gl.delete_texture(target.texture);
+            }
         }
         for state in self.snapshot.programs.iter().flatten() {
             unsafe { self.gl.delete_program(state.program) };
         }
         self.snapshot.programs = programs;
         self.snapshot.render_mode = render_mode;
+        self.snapshot.extended = Arc::new(extended);
         errors
     }
 }
@@ -443,6 +782,15 @@ fn resolve_program_state(gl: &glow::Context, program: glow::Program) -> ProgramS
                 gl.get_uniform_location(program, "iSource2"),
                 gl.get_uniform_location(program, "iSource3"),
             ],
+            loc_passes: std::array::from_fn(|index| {
+                gl.get_uniform_location(program, &format!("iPass{index}"))
+            }),
+            loc_history: std::array::from_fn(|output| {
+                std::array::from_fn(|delay| {
+                    gl.get_uniform_location(program, &format!("iHistory{output}_{}", delay + 1))
+                })
+            }),
+            loc_regions: gl.get_uniform_location(program, "iRegionValues"),
         }
     }
 }
@@ -512,10 +860,22 @@ pub fn render_multipass(
         let res_w = u.resolution[0] as i32;
         let res_h = u.resolution[1] as i32;
 
-        for (i, prog) in snap.programs.iter().enumerate() {
-            let Some(p) = prog else { continue };
-
-            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(snap.targets[i].fbo[write]));
+        let passes = snap
+            .extended
+            .passes
+            .iter()
+            .map(|(program, target)| (program, target.fbo));
+        let outputs = snap
+            .programs
+            .iter()
+            .enumerate()
+            .filter_map(|(index, program)| {
+                program
+                    .as_ref()
+                    .map(|program| (program, snap.targets[index].fbo[write]))
+            });
+        for (p, target) in passes.chain(outputs) {
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(target));
             gl.viewport(0, 0, res_w, res_h);
             gl.use_program(Some(p.program));
 
@@ -567,6 +927,9 @@ pub fn render_multipass(
             if let Some(ref loc) = p.loc_osc {
                 gl.uniform_1_f32_slice(Some(loc), &u.osc);
             }
+            if let Some(loc) = &p.loc_regions {
+                gl.uniform_1_f32_slice(Some(loc), &u.region_values);
+            }
             if let Some(ref loc) = p.loc_resolution {
                 gl.uniform_2_f32(Some(loc), u.resolution[0], u.resolution[1]);
             }
@@ -596,9 +959,65 @@ pub fn render_multipass(
                     gl.uniform_1_i32(Some(loc), unit as i32);
                 }
             }
-
+            let mut unit = 9;
+            for (index, loc) in p.loc_passes.iter().enumerate() {
+                if let Some(loc) = loc {
+                    let texture = snap.extended.passes[index].1.texture;
+                    gl.active_texture(glow::TEXTURE0 + unit);
+                    gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+                    gl.uniform_1_i32(Some(loc), unit as i32);
+                    unit += 1;
+                }
+            }
+            for (output, locations) in p.loc_history.iter().enumerate() {
+                let history = &snap.extended.history[output];
+                for (index, location) in locations.iter().enumerate() {
+                    if let Some(location) = location {
+                        let cursor = snap.extended.cursor[output].load(Ordering::Relaxed);
+                        let texture = history[(cursor + history.len()
+                            - (index + 1) % history.len())
+                            % history.len()]
+                        .texture;
+                        gl.active_texture(glow::TEXTURE0 + unit);
+                        gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+                        gl.uniform_1_i32(Some(location), unit as i32);
+                        unit += 1;
+                    }
+                }
+            }
             gl.bind_vertex_array(Some(snap.vao));
             gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+        }
+
+        let scissor_was_on = gl.is_enabled(glow::SCISSOR_TEST);
+        gl.disable(glow::SCISSOR_TEST);
+        for (output, history) in snap.extended.history.iter().enumerate() {
+            if history.is_empty() {
+                continue;
+            }
+            let cursor = snap.extended.cursor[output].load(Ordering::Relaxed);
+            gl.bind_framebuffer(
+                glow::READ_FRAMEBUFFER,
+                Some(snap.targets[output].fbo[write]),
+            );
+            gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(history[cursor].fbo));
+            gl.blit_framebuffer(
+                0,
+                0,
+                res_w,
+                res_h,
+                0,
+                0,
+                res_w,
+                res_h,
+                glow::COLOR_BUFFER_BIT,
+                glow::NEAREST,
+            );
+            snap.extended.cursor[output].store((cursor + 1) % history.len(), Ordering::Relaxed);
+        }
+
+        if scissor_was_on {
+            gl.enable(glow::SCISSOR_TEST);
         }
 
         ping.store(write == 0, Ordering::Relaxed);
@@ -649,6 +1068,109 @@ pub fn render_multipass(
             gl.enable(glow::BLEND);
         }
     }
+}
+
+pub fn read_regions(
+    gl: &glow::Context,
+    snapshot: &RenderSnapshot,
+    ping: &AtomicBool,
+    resolution: [u32; 2],
+    regions: &[crate::extended::Region],
+) -> Result<[f32; crate::extended::MAX_REGIONS], String> {
+    let mut values = [0.0; crate::extended::MAX_REGIONS];
+    if regions.is_empty() {
+        return Ok(values);
+    }
+    if regions.len() > values.len() {
+        return Err("Image region limit exceeded".into());
+    }
+    for region in regions {
+        region.validate()?;
+    }
+    if resolution.contains(&0) {
+        return Err("Region readback requires nonzero render dimensions".into());
+    }
+    let target = snapshot
+        .extended
+        .region
+        .ok_or("Region readback target is not configured")?;
+    let latest = 1 - ping.load(Ordering::Relaxed) as usize;
+    unsafe {
+        let read = gl.get_parameter_i32(glow::READ_FRAMEBUFFER_BINDING);
+        let draw = gl.get_parameter_i32(glow::DRAW_FRAMEBUFFER_BINDING);
+        let alignment = gl.get_parameter_i32(glow::PACK_ALIGNMENT);
+        let scissor = gl.is_enabled(glow::SCISSOR_TEST);
+        gl.disable(glow::SCISSOR_TEST);
+        gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
+        for (slot, region) in regions.iter().enumerate() {
+            let [x, y, width, height] = region.rect;
+            let x0 = (x * resolution[0] as f32).floor() as i32;
+            let y0 = (y * resolution[1] as f32).floor() as i32;
+            let x1 = ((x + width) * resolution[0] as f32).ceil() as i32;
+            let y1 = ((y + height) * resolution[1] as f32).ceil() as i32;
+            gl.bind_framebuffer(
+                glow::READ_FRAMEBUFFER,
+                Some(snapshot.targets[region.output].fbo[latest]),
+            );
+            gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(target.fbo));
+            gl.blit_framebuffer(
+                x0,
+                y0,
+                x1,
+                y1,
+                0,
+                0,
+                8,
+                8,
+                glow::COLOR_BUFFER_BIT,
+                glow::LINEAR,
+            );
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(target.fbo));
+            let mut pixels = [0u8; 8 * 8 * 4];
+            gl.read_pixels(
+                0,
+                0,
+                8,
+                8,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelPackData::Slice(Some(&mut pixels)),
+            );
+            let total: f32 = pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|pixel| {
+                    if region.channel == 4 {
+                        (pixel[0] as f32 * 0.2126
+                            + pixel[1] as f32 * 0.7152
+                            + pixel[2] as f32 * 0.0722)
+                            / 255.0
+                    } else {
+                        pixel[region.channel] as f32 / 255.0
+                    }
+                })
+                .sum();
+            values[slot] = total / 64.0;
+        }
+        gl.bind_framebuffer(
+            glow::READ_FRAMEBUFFER,
+            std::num::NonZeroU32::new(read as u32).map(glow::NativeFramebuffer),
+        );
+        gl.bind_framebuffer(
+            glow::DRAW_FRAMEBUFFER,
+            std::num::NonZeroU32::new(draw as u32).map(glow::NativeFramebuffer),
+        );
+        gl.pixel_store_i32(glow::PACK_ALIGNMENT, alignment);
+        if scissor {
+            gl.enable(glow::SCISSOR_TEST);
+        }
+        let error = gl.get_error();
+        if error != glow::NO_ERROR {
+            return Err(format!("Region readback failed: OpenGL error {error:#x}"));
+        }
+    }
+    Ok(values)
 }
 
 fn draw_display_buffer(

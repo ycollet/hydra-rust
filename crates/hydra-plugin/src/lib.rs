@@ -694,15 +694,30 @@ impl HydraGlWindow {
     ) -> (RenderMode, Option<String>) {
         match hydra_rust::eval_with_audio_settings(code, audio_analyzer.settings()) {
             Ok(result) => {
+                if !result.regions.is_empty() || !result.region_outputs.is_empty() {
+                    let error =
+                        "Image region controls and OSC output are standalone-only".to_string();
+                    log::warn!("hydra-plugin: {error}");
+                    return (Default::default(), Some(error));
+                }
                 if result.screencap {
                     log::warn!("hydra-plugin: screencap() is only supported by the desktop app");
                 }
-                if let Some(ref td) = result.text_data {
-                    renderer.upload_text(td);
-                }
-                let mut errs = renderer.compile_buffers(&result.shaders, result.render_mode);
+                let extended = !result.render_plan.passes.is_empty()
+                    || result.render_plan.history.iter().any(|count| *count > 0);
+                let mut errs = if extended {
+                    renderer.compile_result_atomic(&result)
+                } else {
+                    renderer.compile_buffers(&result.shaders, result.render_mode)
+                };
                 if !errs.is_empty() {
                     log::warn!("hydra-plugin: shader compile error(s): {errs:?}");
+                    if extended {
+                        return (Default::default(), Some(errs.join("\n")));
+                    }
+                }
+                if let Some(ref td) = result.text_data {
+                    renderer.upload_text(td);
                 }
                 for (i, filter) in result.buffer_filter.iter().enumerate() {
                     if let Some(mode) = filter {
@@ -1038,7 +1053,14 @@ impl baseview::WindowHandler for HydraGlWindow {
         }
 
         let (w, h) = self.editor_size.load();
-        self.renderer.ensure_resolution(w, h);
+        if let Err(error) = self.renderer.ensure_resolution_checked(w, h) {
+            log::error!("hydra-plugin: {error}");
+            self.last_error = Some(error);
+            unsafe {
+                gl_context.make_not_current();
+            }
+            return;
+        }
         // `render_multipass`'s final screen blit reuses whatever GL
         // viewport is already set (it only touches it for per-buffer FBO
         // passes); on at least some platforms/backends resizing the
@@ -1064,6 +1086,7 @@ impl baseview::WindowHandler for HydraGlWindow {
 
         let midi_frame = self.midi_poller.poll();
         let uniforms = RenderUniforms {
+            region_values: [0.0; hydra_rust::extended::MAX_REGIONS],
             time: self.start.elapsed().as_secs_f32(),
             resolution: [w as f32, h as f32],
             mouse: [

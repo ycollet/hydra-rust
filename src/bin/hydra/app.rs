@@ -332,6 +332,11 @@ pub struct HydraApp {
     /// (sidebar, code editor) is painted on top - and saves it as a PNG.
     pending_screenshot: bool,
     pending_buffer_clear: [bool; 4],
+    regions: Vec<hydra_rust::extended::Region>,
+    region_values: Arc<std::sync::Mutex<Option<[f32; hydra_rust::extended::MAX_REGIONS]>>>,
+    region_error: Arc<std::sync::Mutex<Option<String>>>,
+    #[cfg(feature = "osc")]
+    region_sender: hydra_rust::extended::RegionSender,
     banks: Vec<Bank>,
     current_bank: usize,
     /// The last slot recalled or saved to, for the sidebar's highlight -
@@ -465,6 +470,11 @@ impl HydraApp {
             pending_confirmation: false,
             pending_screenshot: false,
             pending_buffer_clear: [false; 4],
+            regions: Vec::new(),
+            region_values: Arc::new(std::sync::Mutex::new(None)),
+            region_error: Arc::new(std::sync::Mutex::new(None)),
+            #[cfg(feature = "osc")]
+            region_sender: hydra_rust::extended::RegionSender::default(),
             banks: session.banks,
             current_bank: session.current_bank,
             active_slot: None,
@@ -857,17 +867,40 @@ impl HydraApp {
         };
         match result {
             Ok(result) => {
-                #[cfg(feature = "javascript")]
-                if self.javascript {
-                    let errors =
-                        renderer.compile_buffers_atomic(&result.shaders, result.render_mode);
+                #[cfg(feature = "osc")]
+                let (next_region_sender, output_errors) = {
+                    let mut sender = hydra_rust::extended::RegionSender::default();
+                    let errors = sender
+                        .configure(&result.region_outputs, result.regions.len())
+                        .err()
+                        .into_iter()
+                        .collect::<Vec<_>>();
+                    (sender, errors)
+                };
+                #[cfg(not(feature = "osc"))]
+                let output_errors = Vec::new();
+                let transactional = self.javascript
+                    || !result.render_plan.passes.is_empty()
+                    || result.render_plan.history.iter().any(|count| *count > 0)
+                    || !result.regions.is_empty()
+                    || !output_errors.is_empty();
+                if transactional {
+                    let errors = if output_errors.is_empty() {
+                        renderer.compile_result_atomic(&result)
+                    } else {
+                        output_errors
+                    };
                     if !errors.is_empty() {
-                        let mut message = format!("shader compile error: {}", errors.join("; "));
-                        if let Err(error) = self
-                            .javascript_runtime
-                            .as_mut()
-                            .expect("JavaScript runtime initialized")
-                            .rollback_last_eval()
+                        let message = format!("shader compile error: {}", errors.join("; "));
+                        #[cfg(feature = "javascript")]
+                        let mut message = message;
+                        #[cfg(feature = "javascript")]
+                        if self.javascript
+                            && let Err(error) = self
+                                .javascript_runtime
+                                .as_mut()
+                                .expect("JavaScript runtime initialized")
+                                .rollback_last_eval()
                         {
                             self.javascript_suspended = true;
                             message.push_str(&format!("; JavaScript rollback failed: {error}"));
@@ -880,13 +913,19 @@ impl HydraApp {
                 if let Some(ref td) = result.text_data {
                     renderer.upload_text(td);
                 }
-                let compile_errors = if self.javascript {
+                let compile_errors = if transactional {
                     Vec::new()
                 } else {
                     renderer.compile_buffers(&result.shaders, result.render_mode)
                 };
                 self.render_resolution_override = result.render_resolution;
                 if compile_errors.is_empty() {
+                    self.regions = result.regions.clone();
+                    *self.region_values.lock().unwrap() = None;
+                    #[cfg(feature = "osc")]
+                    {
+                        self.region_sender = next_region_sender;
+                    }
                     for (pending, clear) in self
                         .pending_buffer_clear
                         .iter_mut()
@@ -1141,8 +1180,25 @@ impl HydraApp {
             })
         });
 
-        renderer.ensure_resolution(buf_w, buf_h);
+        if let Err(error) = renderer.ensure_resolution_checked(buf_w, buf_h) {
+            log::error!("{error}");
+            self.error = Some((error, Instant::now()));
+            return;
+        }
         renderer.clear_buffers(std::mem::take(&mut self.pending_buffer_clear));
+        if let Some(error) = self.region_error.lock().unwrap().take() {
+            log::error!("{error}");
+            self.error = Some((error, Instant::now()));
+        }
+        let region_sample = *self.region_values.lock().unwrap();
+        let region_values = region_sample.unwrap_or([0.0; hydra_rust::extended::MAX_REGIONS]);
+        #[cfg(feature = "osc")]
+        if region_sample.is_some()
+            && let Err(error) = self.region_sender.send(&region_values)
+        {
+            log::error!("{error}");
+            self.error = Some((error, Instant::now()));
+        }
 
         #[cfg(feature = "webcam")]
         for slot in 0..NUM_SOURCES {
@@ -1227,6 +1283,7 @@ impl HydraApp {
             && let Some(runtime) = &mut self.javascript_runtime
         {
             let input = hydra_rust::javascript::JavascriptFrame {
+                regions: region_values,
                 time,
                 resolution: [buf_w as f32, buf_h as f32],
                 mouse,
@@ -1283,6 +1340,7 @@ impl HydraApp {
         let snap = renderer.snapshot();
         let ping = renderer.ping().clone();
         let uniforms = RenderUniforms {
+            region_values,
             time,
             resolution: [buf_w as f32, buf_h as f32],
             mouse,
@@ -1306,8 +1364,20 @@ impl HydraApp {
             javascript_values: [0.0; 128],
         };
 
+        let regions = self.regions.clone();
+        let region_values = self.region_values.clone();
+        let region_error = self.region_error.clone();
         let cb = eframe::egui_glow::CallbackFn::new(move |_info, painter| {
             renderer::render_multipass(painter.gl(), &snap, &ping, uniforms);
+            if !regions.is_empty() {
+                match renderer::read_regions(painter.gl(), &snap, &ping, [buf_w, buf_h], &regions) {
+                    Ok(values) => *region_values.lock().unwrap() = Some(values),
+                    Err(error) => {
+                        *region_values.lock().unwrap() = None;
+                        *region_error.lock().unwrap() = Some(error);
+                    }
+                }
+            }
             #[cfg(feature = "stream")]
             if let Some(sink) = &broadcast_sink {
                 // render_multipass leaves the real window framebuffer bound
@@ -1386,6 +1456,10 @@ impl HydraApp {
                 self.javascript_active = false;
                 self.javascript_suspended = false;
                 self.javascript_reset_confirmation = false;
+                #[cfg(feature = "osc")]
+                {
+                    self.region_sender = hydra_rust::extended::RegionSender::default();
+                }
                 self.error = None;
                 log::info!("JavaScript interpreter reset; evaluate to apply its new state");
             }

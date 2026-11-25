@@ -17,9 +17,7 @@ use rquickjs::context::EvalOptions;
 use rquickjs::{Context, Ctx, Exception, Function, Module, Object, Persistent, Runtime};
 use serde::{Deserialize, Serialize};
 
-use crate::eval::{
-    Arg, BufferFilter, EvalResult, FUNCTIONS, Node, Op, OpKind, RenderMode, compile_node,
-};
+use crate::eval::{Arg, BufferFilter, EvalResult, FUNCTIONS, Node, Op, OpKind, RenderMode};
 pub use crate::javascript_settings::JavascriptSettings;
 pub use crate::shader::NUM_JS_VALUES;
 
@@ -31,6 +29,7 @@ type Rejections = Rc<RefCell<HashMap<u64, Vec<String>>>>;
 
 #[derive(Clone, Copy, Debug, Serialize)]
 pub struct JavascriptFrame {
+    pub regions: [f32; crate::extended::MAX_REGIONS],
     pub time: f32,
     pub resolution: [f32; 2],
     pub mouse: [f32; 2],
@@ -61,6 +60,7 @@ fn serialize_array<S: serde::Serializer, const N: usize>(
 impl Default for JavascriptFrame {
     fn default() -> Self {
         Self {
+            regions: [0.0; crate::extended::MAX_REGIONS],
             time: 0.0,
             resolution: [0.0; 2],
             mouse: [0.0; 2],
@@ -110,6 +110,9 @@ struct Snapshot {
     text: Option<TextRequest>,
     clear: [bool; 4],
     commands: Vec<native::Command>,
+    regions: Vec<crate::extended::Region>,
+    region_outputs: Vec<crate::extended::RegionOutput>,
+    history_limit: usize,
 }
 
 #[derive(Clone, Deserialize)]
@@ -191,6 +194,8 @@ enum Value {
     Callback(usize),
     #[serde(rename = "texture")]
     Texture(TextureRef),
+    #[serde(rename = "parameter")]
+    Parameter(Box<Graph>),
 }
 
 fn js_error(ctx: &Ctx<'_>, error: rquickjs::Error) -> String {
@@ -613,6 +618,7 @@ impl JavascriptRuntime {
         .chain(input.resolution.iter())
         .chain(input.mouse.iter())
         .chain(input.fft.iter())
+        .chain(input.regions.iter())
         .any(|v| !v.is_finite())
         {
             return Err("JavaScript frame inputs must be finite".into());
@@ -749,6 +755,13 @@ fn compile_snapshot(snapshot: &Snapshot) -> Result<EvalResult, String> {
         );
     }
     let mut budget = 4096;
+    if !(1..=crate::extended::MAX_HISTORY).contains(&snapshot.history_limit) {
+        return Err("History limit must be in 1..8 frames".into());
+    }
+    let mut render_plan = crate::extended::RenderPlan {
+        history_limit: snapshot.history_limit,
+        ..Default::default()
+    };
     let mut shaders = [None, None, None, None];
     for (i, graph) in snapshot.buffers.iter().enumerate() {
         if let Some(graph) = graph {
@@ -769,7 +782,12 @@ fn compile_snapshot(snapshot: &Snapshot) -> Result<EvalResult, String> {
                 .map(|(index, definition)| functions::compile(definition, index))
                 .collect::<Result<Vec<_>, _>>()?
                 .join("\n");
-            shaders[i] = Some(format!("{glsl}{}", compile_node(&node)?));
+            let start = render_plan.passes.len();
+            let body = crate::extended::compile(&node, &mut render_plan)?;
+            for pass in &mut render_plan.passes[start..] {
+                *pass = format!("{glsl}{pass}");
+            }
+            shaders[i] = Some(format!("{glsl}{body}"));
         }
     }
     let mut filters = [None; 4];
@@ -817,6 +835,9 @@ fn compile_snapshot(snapshot: &Snapshot) -> Result<EvalResult, String> {
         render_resolution: snapshot.resolution.map(|r| (r[0], r[1])),
         buffer_filter: filters,
         buffer_clear: snapshot.clear,
+        render_plan,
+        regions: snapshot.regions.clone(),
+        region_outputs: snapshot.region_outputs.clone(),
         #[cfg(any(
             feature = "webcam",
             feature = "image_url",
@@ -833,6 +854,20 @@ fn compile_snapshot(snapshot: &Snapshot) -> Result<EvalResult, String> {
         #[cfg(feature = "stream")]
         broadcast_request: None,
     };
+    if result.regions.len() > crate::extended::MAX_REGIONS
+        || result.region_outputs.len() > crate::extended::MAX_REGIONS
+    {
+        return Err("Image region or OSC output limit exceeded".into());
+    }
+    for region in &result.regions {
+        region.validate()?;
+    }
+    for output in &result.region_outputs {
+        output.validate(result.regions.len())?;
+        if !cfg!(feature = "osc") {
+            return Err("Region OSC output requires the osc feature".into());
+        }
+    }
     native::apply(&snapshot.commands, &mut result)?;
     Ok(result)
 }
@@ -851,6 +886,43 @@ fn graph_node(
     *budget -= graph.ops.len();
     let mut ops = Vec::new();
     for operation in &graph.ops {
+        if let Some(name) = operation.name.strip_prefix("native_") {
+            if name == "history" {
+                let [Value::Number(output), Value::Number(delay)] = operation.args.as_slice()
+                else {
+                    return Err("History requires static indices".into());
+                };
+                if operation.other.is_some() {
+                    return Err("History cannot have a texture operand".into());
+                }
+                ops.push(Op::Source {
+                    func: "history_src".into(),
+                    args: vec![Arg::Lit(*output), Arg::Lit(*delay)],
+                });
+            } else {
+                let effect = crate::extended::Effect::parse(name)?;
+                let [Value::Number(radius)] = operation.args.as_slice() else {
+                    return Err("Effect radius requires a static number".into());
+                };
+                if !radius.is_finite() || !(0.0..=32.0).contains(radius) {
+                    return Err("Effect radius must be in 0..32 pixels".into());
+                }
+                let other = graph_node(
+                    operation.other.as_ref().ok_or("Missing effect input")?,
+                    definitions,
+                    slots,
+                    depth + 1,
+                    budget,
+                    used,
+                )?;
+                ops.push(Op::Effect {
+                    other,
+                    effect,
+                    radius: Arg::Lit(*radius),
+                });
+            }
+            continue;
+        }
         if operation.name == "tileable" {
             if !ops.is_empty() || operation.args.len() != 1 {
                 return Err("Invalid tileable graph".into());
@@ -901,6 +973,17 @@ fn graph_node(
                         texture.index
                     )))
                 }
+                (Value::Parameter(graph), InputKind::Float) => Ok(Arg::Texture {
+                    node: Box::new(graph_node(
+                        graph,
+                        definitions,
+                        slots,
+                        depth + 1,
+                        budget,
+                        used,
+                    )?),
+                    channel: 0,
+                }),
                 _ => Err("invalid graph argument".to_string()),
             })
             .collect::<Result<Vec<_>, _>>()?;

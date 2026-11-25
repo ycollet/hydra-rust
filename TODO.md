@@ -7,16 +7,20 @@ or a committed implementation roadmap.
 
 ## Highest-interest candidates
 
-- [ ] **Per-pixel parameters:** let textures drive ordinary float parameters, not
-  just dedicated `modulate*` operators. For example, `osc(noise(2) * 40)` produces
-  spatially varying frequency.
-- [ ] **Automatic multipass effects:** introduce intermediate rendering passes for
-  neighbourhood operations such as blur, sharpen, Sobel edges, emboss,
-  dilation/erosion and GPU pixel sorting.
-- [ ] **Multi-frame delays:** retain output history in ring buffers for temporal
-  echoes, frame holds, motion extraction and delayed feedback.
-- [ ] **Image-to-audio/CV feedback:** read image strips as audio waveforms and image
-  regions as control signals, allowing visuals to drive sound and modular hardware.
+- [x] **Per-pixel parameters:** textures can drive ordinary float parameters through their red channel.
+  Example: use `osc(noise(2) * 40)` in Rhai or `osc(noise(2).mul(40))` in JavaScript.
+- [x] **Automatic multipass effects:** support blur, sharpen, Sobel edges, emboss, dilation, and erosion.
+  Example: `osc(10).blur(1).out()` uses intermediate native rendering passes.
+- [x] **Multi-frame delays:** allocate output history on demand, with eight frames maximum per output.
+  Example: `history(o0,4).blend(osc(10),0.1).out()` creates delayed feedback.
+- [x] **Image-region controls:** sample normalized regions and optionally send their intensity through Open Sound Control (OSC).
+  Example: `sendRegion(region(o0),"127.0.0.1:9000","/brightness",30)` sends a JavaScript region signal.
+- [ ] **GPU pixel sorting:** add a separately bounded multipass sorting effect.
+- [ ] **Image-to-audio feedback:** convert image strips into audio waveforms.
+- [ ] **Direct control-voltage output:** connect region signals to suitable hardware through an explicit native device backend.
+
+These extensions preserve ordinary Hydra sketches but require hydra-rust when used.
+See [native rendering extensions](DOCUMENTATION.md#native-rendering-extensions) for limits and examples.
 
 ## Additional ideas
 
