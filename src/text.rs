@@ -39,6 +39,38 @@ impl Default for TextConfig {
     }
 }
 
+pub(crate) fn parse_size(value: &str, property: &str) -> Result<TextSize, String> {
+    let value = value.trim();
+    if value == "auto" && property == "fontSize" {
+        return Ok(TextSize::Auto);
+    }
+    let percent = value.ends_with('%');
+    let number = value
+        .strip_suffix('%')
+        .or_else(|| value.strip_suffix("px"))
+        .unwrap_or(value)
+        .trim()
+        .parse::<f32>()
+        .map_err(|_| {
+            format!("Text {property} must be a static number, pixel size, or percentage")
+        })?;
+    if !number.is_finite() || number < 0.0 || (property == "fontSize" && number == 0.0) {
+        return Err(format!(
+            "Text {property} must be finite and {}",
+            if property == "fontSize" {
+                "positive"
+            } else {
+                "nonnegative"
+            }
+        ));
+    }
+    Ok(if percent {
+        TextSize::Percent(number)
+    } else {
+        TextSize::Pixels(number)
+    })
+}
+
 fn default_font() -> &'static FontArc {
     static FONT: OnceLock<FontArc> = OnceLock::new();
     FONT.get_or_init(|| FontArc::try_from_slice(HACK_FONT).expect("valid font"))

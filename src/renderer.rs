@@ -158,6 +158,38 @@ impl ShaderRenderer {
         self.snapshot
     }
 
+    pub fn clear_buffers(&mut self, buffers: [bool; NUM_BUFFERS]) {
+        if !buffers.iter().any(|clear| *clear) {
+            return;
+        }
+        unsafe {
+            let framebuffer = self.gl.get_parameter_i32(glow::DRAW_FRAMEBUFFER_BINDING);
+            let scissor = self.gl.is_enabled(glow::SCISSOR_TEST);
+            let mut mask = [0; 4];
+            self.gl
+                .get_parameter_i32_slice(glow::COLOR_WRITEMASK, &mut mask);
+            self.gl.disable(glow::SCISSOR_TEST);
+            self.gl.color_mask(true, true, true, true);
+            for (index, clear) in buffers.iter().enumerate() {
+                if *clear {
+                    for fbo in self.snapshot.targets[index].fbo {
+                        self.gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(fbo));
+                        self.gl.clear_buffer_f32_slice(glow::COLOR, 0, &[0.0; 4]);
+                    }
+                }
+            }
+            self.gl.bind_framebuffer(
+                glow::DRAW_FRAMEBUFFER,
+                std::num::NonZeroU32::new(framebuffer as u32).map(glow::NativeFramebuffer),
+            );
+            self.gl
+                .color_mask(mask[0] != 0, mask[1] != 0, mask[2] != 0, mask[3] != 0);
+            if scissor {
+                self.gl.enable(glow::SCISSOR_TEST);
+            }
+        }
+    }
+
     pub fn ensure_resolution(&mut self, width: u32, height: u32) {
         if self.resolution == [width, height] || width == 0 || height == 0 {
             return;

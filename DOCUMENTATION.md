@@ -504,6 +504,111 @@ Mouse coordinates range from zero to one.
 With the `audio` feature, callbacks can also read `a.fft`, `a.onset`, `a.beat`, and `a.bpm`.
 For example, `.scale(() => 1 + a.fft[0])` follows the first audio frequency band.
 
+### Native feature parity
+
+JavaScript shares the native shader compiler, text renderer, and device managers.
+Device actions and buffer clearing apply only after successful evaluation and shader compilation.
+Create device signals while evaluating the sketch, not inside frame callbacks.
+Missing Cargo features produce explicit errors.
+
+#### Shader and text helpers
+
+`.tileable(width)` uses the existing native edge-blending implementation.
+The default width is `0.15`; callbacks and patterns also work.
+
+```javascript
+osc(10).tileable(() => 0.15).repeat(3, 3).out();
+```
+
+`text`, `strokeText`, `fillStrokeText`, and `strokeFillText` use the bundled native font.
+Their configuration matches the [native text helpers](#text-rendering).
+`hydraText` supplies global defaults; per-call settings override them.
+All text nodes share one texture, so the last text call wins.
+
+```javascript
+hydraText.fontSize = "50%";
+strokeText("Hydra", { lineWidth: "3px" }).out();
+```
+
+#### Source initialization
+
+These methods return their source object and queue native source requests.
+They do not create browser cameras, canvases, or media elements.
+
+| Method | Required feature | Example |
+|--------|------------------|---------|
+| `initCam(index=0)` | `webcam` | `s0.initCam(0); src(s0).out();` |
+| `initImage(url)` | `image_url` | `s0.initImage("https://example.com/picture.png"); src(s0).out();` |
+| `initGif(url)` | `image_url` | `s0.initGif("https://example.com/animation.gif"); src(s0).out();` |
+| `initVideo(location)` | `video` | `s0.initVideo("clip.mp4"); src(s0).out();` |
+| `initStream(address)` | `stream` | `s0.initStream("127.0.0.1:9000"); src(s0).out();` |
+
+Locations use the same rules as their native source managers.
+Image and animated-image loading use network URLs; JavaScript library loading remains local-only.
+For example, camera capture requires a build with `javascript,webcam`.
+Browser-only `initScreen` and generic canvas initialization remain unsupported.
+
+#### Audio controls
+
+The `fft` feature exposes audio settings; `audio` additionally enables microphone capture.
+Global setters include `setBins`, `setCutoff`, `setScale`, and `setSmooth`.
+`a.bins[index]` exposes native `cutoff`, `scale`, and `smooth` properties.
+The standalone application synchronizes these settings with its audio manager before evaluation.
+`a.show()` and `a.hide()` control the native audio overlay.
+
+```javascript
+a.setBins(4).setSmooth(0.5);
+a.bins[0].scale = 2;
+osc(() => 10 + a.fft[0] * 20).out();
+```
+
+#### MIDI and OSC controls
+
+Musical Instrument Digital Interface (MIDI) controls require the `midi` feature.
+Open Sound Control (OSC) controls require the `osc` feature.
+MIDI methods include `start`, `pause`, `show`, and `hide`.
+These controls accept no arguments.
+Value methods include `midi.note`, `midi.velocity`, `midi.cc`, and `midi.aft`.
+They accept an index, optional zero-based channel, and optional input index or exact input name.
+Use `"*"` or omit a selector to match any value.
+Signals support `.range(min,max)` and `.scale(factor)`.
+Controller signals additionally support `.smooth(factor=0.01)`.
+Note and velocity signals support `.adsr(attack,decay,sustain,release)`.
+Attack, decay, and release use milliseconds; sustain ranges from zero to one.
+Numeric note indices work; note names, reusable selectors, and Rhai's global MIDI aliases remain unsupported.
+
+```javascript
+midi.start();
+var level = midi.cc(74, 0, "Keys").smooth(0.1).range(0, 0.5);
+osc(20).brightness(level).out();
+```
+
+`_osc.start(port=57101)`, `pause`, `show`, and `hide` control the native listener and overlay.
+`_osc.get(address,argIndex=0)` returns a signal with `.range()` and `.scale()`.
+Bindings remain stable across evaluations.
+The interpreter allows 64 MIDI values, 16 MIDI envelopes, and 32 OSC values before reset.
+At most 256 native requests can accompany an evaluation.
+
+```javascript
+_osc.start(57101);
+var level = _osc.get("/level", 0).scale(0.5);
+osc(20).brightness(level).out();
+```
+
+#### Buffer clearing
+
+`o0.clear()` through `o3.clear()` clear both native feedback textures once.
+Clearing preserves the buffer's shader and sampling settings.
+The application applies clearing after any requested render-size change.
+Existing shaders continue drawing on subsequent frames.
+For example, use `solid(0,0,0,1).out(o0)` to keep an output black.
+Browser framebuffer objects and direct `regl` access remain unsupported.
+
+```javascript
+o0.clear().setLinear();
+src(o0).blend(osc(10), 0.1).out(o0);
+```
+
 ### Dynamic shader functions
 
 Libraries can call `setFunction()` at runtime to add chain operations and sources.
@@ -542,10 +647,8 @@ Evaluate a corrected sketch to resume.
 Reset the interpreter if resource exhaustion prevents normal recovery.
 JavaScript runs on the interface thread, never on the plugin's real-time audio thread.
 
-The initial JavaScript bridge focuses on shader graphs and audio signal reads.
-Native source initialization, text generation, and `.tileable()` remain Rhai-only.
-Musical Instrument Digital Interface (MIDI) controls and Open Sound Control (OSC) controls also remain Rhai-only.
-For example, use Rhai for `s0.initCam()` rather than expecting browser camera APIs in JavaScript.
+Native helpers do not make browser-dependent extensions compatible without adaptation.
+For example, use native `text("Hydra")` instead of constructing a browser canvas.
 
 ## Example
 

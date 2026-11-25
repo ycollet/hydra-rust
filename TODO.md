@@ -112,13 +112,13 @@ JavaScript execution in the plugin also remains outside this scope.
 
 ### Native feature parity
 
-- [ ] **Native shader helpers:** expose existing native helpers through JavaScript rather than duplicating their implementations.
+- [x] **Native shader helpers:** expose existing native helpers through JavaScript rather than duplicating their implementations.
   Example: support `osc(10).tileable(0.15).out()` and native `text("Hydra")`.
-- [ ] **Source initialization:** bridge existing source managers without introducing browser camera or canvas objects.
+- [x] **Source initialization:** bridge existing source managers without introducing browser camera or canvas objects.
   Example: support `s0.initCam()` when the application includes the `webcam` feature.
-- [ ] **Device controls:** expose native audio setters, Musical Instrument Digital Interface controls, and Open Sound Control controls.
+- [x] **Device controls:** expose native audio setters, Musical Instrument Digital Interface controls, and Open Sound Control controls.
   Example: support `a.setBins(4)` when the application includes the `audio` feature.
-- [ ] **Native buffer operations:** adapt selected framebuffer helpers without exposing browser graphics internals.
+- [x] **Native buffer operations:** adapt selected framebuffer helpers without exposing browser graphics internals.
   Example: provide native `o0.clear()` for an adapted subset of `hydra-outputs.js`.
 
 ### Runtime and editing improvements

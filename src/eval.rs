@@ -180,6 +180,7 @@ pub struct EvalResult {
     /// `setNearest`/`setLinear`/`setMode` on - see `BufferFilter`'s own
     /// doc comment for why this doesn't reset like `render_mode` does.
     pub buffer_filter: [Option<BufferFilter>; 4],
+    pub buffer_clear: [bool; 4],
     #[cfg(any(
         feature = "webcam",
         feature = "image_url",
@@ -1907,22 +1908,8 @@ pub(crate) fn compile_node(node: &Node) -> Result<String, String> {
 }
 
 fn text_size(value: &Dynamic, property: &str) -> Result<text::TextSize, Box<rhai::EvalAltResult>> {
-    let (number, percent) = if let Some(value) = value.clone().try_cast::<ImmutableString>() {
-        let value = value.trim();
-        if value == "auto" && property == "fontSize" {
-            return Ok(text::TextSize::Auto);
-        }
-        let percent = value.ends_with('%');
-        let number = value
-            .strip_suffix('%')
-            .or_else(|| value.strip_suffix("px"))
-            .unwrap_or(value)
-            .trim()
-            .parse::<f32>()
-            .map_err(|_| {
-                format!("Text {property} must be a static number, pixel size, or percentage")
-            })?;
-        (number, percent)
+    let value = if let Some(value) = value.clone().try_cast::<ImmutableString>() {
+        value.to_string()
     } else {
         let number = value
             .as_float()
@@ -1931,24 +1918,9 @@ fn text_size(value: &Dynamic, property: &str) -> Result<text::TextSize, Box<rhai
             .ok_or_else(|| {
                 format!("Text {property} must be a static number, pixel size, or percentage")
             })?;
-        (number as f32, false)
+        (number as f32).to_string()
     };
-    if !number.is_finite() || number < 0.0 || (property == "fontSize" && number == 0.0) {
-        return Err(format!(
-            "Text {property} must be finite and {}",
-            if property == "fontSize" {
-                "positive"
-            } else {
-                "nonnegative"
-            }
-        )
-        .into());
-    }
-    Ok(if percent {
-        text::TextSize::Percent(number)
-    } else {
-        text::TextSize::Pixels(number)
-    })
+    text::parse_size(&value, property).map_err(Into::into)
 }
 
 fn rasterize_text(
@@ -3407,6 +3379,7 @@ fn eval_impl(
         screencap: patch.screencap,
         render_resolution: patch.render_resolution,
         buffer_filter: patch.buffer_filter,
+        buffer_clear: [false; 4],
         #[cfg(any(
             feature = "webcam",
             feature = "image_url",

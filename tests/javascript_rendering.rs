@@ -157,7 +157,7 @@ fn native_rendering_uploads_callbacks_and_preserves_programs_after_compile_failu
             if time == 0.25 {
                 let bad = js
                     .eval(
-                        "solid(()=>0.9).out();setFunction({name:'broken',type:'src',\
+                        "o0.clear();solid(()=>0.9).out();setFunction({name:'broken',type:'src',\
                          inputs:[],glsl:'return invalid;'});broken().out(o1);render(o1)",
                     )
                     .unwrap();
@@ -207,6 +207,84 @@ fn native_rendering_uploads_callbacks_and_preserves_programs_after_compile_failu
             glow::PixelPackData::Slice(Some(&mut pixel)),
         );
         assert!((pixel[0] as i32 - 191).abs() <= 1, "{pixel:?}");
+
+        js.reset(JavascriptSettings::default()).unwrap();
+        let filled = js
+            .eval("solid(1,0,0,1).out();solid(0,1,0,1).out(o1)")
+            .unwrap();
+        assert!(
+            renderer
+                .compile_buffers_atomic(&filled.shaders, filled.render_mode)
+                .is_empty()
+        );
+        for _ in 0..2 {
+            render_multipass(
+                &gl,
+                &renderer.snapshot(),
+                renderer.ping(),
+                uniforms([0.0; 128]),
+            );
+        }
+        let feedback = js.eval("src(o0).out();src(o1).out(o1);o0.clear()").unwrap();
+        assert!(
+            renderer
+                .compile_buffers_atomic(&feedback.shaders, feedback.render_mode)
+                .is_empty()
+        );
+        let draw = gl.get_parameter_i32(glow::DRAW_FRAMEBUFFER_BINDING);
+        let read = gl.get_parameter_i32(glow::READ_FRAMEBUFFER_BINDING);
+        gl.enable(glow::SCISSOR_TEST);
+        gl.scissor(0, 0, 0, 0);
+        gl.color_mask(false, false, false, false);
+        renderer.clear_buffers(feedback.buffer_clear);
+        assert_eq!(gl.get_parameter_i32(glow::DRAW_FRAMEBUFFER_BINDING), draw);
+        assert_eq!(gl.get_parameter_i32(glow::READ_FRAMEBUFFER_BINDING), read);
+        assert!(gl.is_enabled(glow::SCISSOR_TEST));
+        let mut mask = [1; 4];
+        gl.get_parameter_i32_slice(glow::COLOR_WRITEMASK, &mut mask);
+        assert_eq!(mask, [0; 4]);
+        gl.disable(glow::SCISSOR_TEST);
+        gl.color_mask(true, true, true, true);
+        for _ in 0..2 {
+            render_multipass(
+                &gl,
+                &renderer.snapshot(),
+                renderer.ping(),
+                uniforms([0.0; 128]),
+            );
+            gl.read_pixels(
+                4,
+                4,
+                1,
+                1,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelPackData::Slice(Some(&mut pixel)),
+            );
+            assert_eq!(&pixel[..3], &[0, 0, 0]);
+        }
+        let retained = js.eval("render(o1)").unwrap();
+        assert!(
+            renderer
+                .compile_buffers_atomic(&retained.shaders, retained.render_mode)
+                .is_empty()
+        );
+        render_multipass(
+            &gl,
+            &renderer.snapshot(),
+            renderer.ping(),
+            uniforms([0.0; 128]),
+        );
+        gl.read_pixels(
+            4,
+            4,
+            1,
+            1,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelPackData::Slice(Some(&mut pixel)),
+        );
+        assert_eq!(&pixel[..3], &[0, 255, 0]);
         gl.bind_framebuffer(glow::FRAMEBUFFER, None);
         gl.delete_framebuffer(target);
         gl.delete_texture(texture);
@@ -223,6 +301,23 @@ fn native_rendering_uploads_callbacks_and_preserves_programs_after_compile_failu
             .compile_buffers_atomic(&example.shaders, example.render_mode)
             .is_empty()
     );
+    for code in [
+        "osc(10).tileable(()=>0.15).out()",
+        "strokeText('Hydra',{lineWidth:'3px'}).out()",
+    ] {
+        let graph = JavascriptRuntime::new(root.clone())
+            .unwrap()
+            .eval(code)
+            .unwrap();
+        assert!(
+            renderer
+                .compile_buffers_atomic(&graph.shaders, graph.render_mode)
+                .is_empty()
+        );
+        if let Some(text) = &graph.text_data {
+            renderer.upload_text(text);
+        }
+    }
     let override_graph = js
         .eval(
             "setFunction({name:'osc',type:'src',inputs:[],glsl:'return vec4(_st,0,1);'});\

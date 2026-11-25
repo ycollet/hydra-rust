@@ -331,6 +331,7 @@ pub struct HydraApp {
     /// exactly what was just drawn to the window - before any UI layer
     /// (sidebar, code editor) is painted on top - and saves it as a PNG.
     pending_screenshot: bool,
+    pending_buffer_clear: [bool; 4],
     banks: Vec<Bank>,
     current_bank: usize,
     /// The last slot recalled or saved to, for the sidebar's highlight -
@@ -463,6 +464,7 @@ impl HydraApp {
             current_file: session.current_file,
             pending_confirmation: false,
             pending_screenshot: false,
+            pending_buffer_clear: [false; 4],
             banks: session.banks,
             current_bank: session.current_bank,
             active_slot: None,
@@ -832,6 +834,8 @@ impl HydraApp {
                         .javascript_runtime
                         .as_mut()
                         .expect("JavaScript runtime initialized");
+                    #[cfg(feature = "audio")]
+                    runtime.sync_audio_settings(self.audio_manager.settings())?;
                     let code = if code.is_empty() { "hush()" } else { code };
                     if self.javascript_module {
                         runtime.eval_module_named(code, &filename)
@@ -882,6 +886,15 @@ impl HydraApp {
                     renderer.compile_buffers(&result.shaders, result.render_mode)
                 };
                 self.render_resolution_override = result.render_resolution;
+                if compile_errors.is_empty() {
+                    for (pending, clear) in self
+                        .pending_buffer_clear
+                        .iter_mut()
+                        .zip(result.buffer_clear)
+                    {
+                        *pending |= clear;
+                    }
+                }
                 for (i, filter) in result.buffer_filter.iter().enumerate() {
                     if let Some(mode) = filter {
                         renderer.set_buffer_filter(i, *mode);
@@ -1129,6 +1142,7 @@ impl HydraApp {
         });
 
         renderer.ensure_resolution(buf_w, buf_h);
+        renderer.clear_buffers(std::mem::take(&mut self.pending_buffer_clear));
 
         #[cfg(feature = "webcam")]
         for slot in 0..NUM_SOURCES {
@@ -1223,6 +1237,12 @@ impl HydraApp {
                 audio_onset: audio.onset,
                 audio_beat: audio.beat,
                 audio_bpm: audio.bpm,
+                #[cfg(feature = "midi")]
+                midi_values: midi_frame.values,
+                #[cfg(feature = "midi")]
+                midi_envelope: midi_frame.envelope,
+                #[cfg(feature = "osc")]
+                osc: osc_frame_values,
             };
             match runtime.frame(input) {
                 Ok(values) => self.javascript_values = values,

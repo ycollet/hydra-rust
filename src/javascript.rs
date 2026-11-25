@@ -2,7 +2,7 @@
 //!
 //! Failed evaluations preserve graphs and callbacks, but cannot undo JavaScript global mutations.
 //! Evaluations reuse inactive callback slots and protect slots referenced by the previous graph.
-//! Libraries run locally without browser, network, or hardware access.
+//! Native device requests apply only after the host accepts the compiled graph.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -24,10 +24,11 @@ pub use crate::javascript_settings::JavascriptSettings;
 pub use crate::shader::NUM_JS_VALUES;
 
 mod library;
+mod native;
 use library::Libraries;
 type Rejections = Rc<RefCell<HashMap<u64, Vec<String>>>>;
 
-#[derive(Clone, Copy, Debug, Default, Serialize)]
+#[derive(Clone, Copy, Debug, Serialize)]
 pub struct JavascriptFrame {
     pub time: f32,
     pub resolution: [f32; 2],
@@ -39,6 +40,44 @@ pub struct JavascriptFrame {
     pub audio_onset: f32,
     pub audio_beat: f32,
     pub audio_bpm: f32,
+    #[cfg(feature = "midi")]
+    #[serde(serialize_with = "serialize_array")]
+    pub midi_values: [f32; crate::midi::NUM_MIDI_VALUES],
+    #[cfg(feature = "midi")]
+    pub midi_envelope: [f32; crate::midi::NUM_MIDI_ENVELOPES],
+    #[cfg(feature = "osc")]
+    pub osc: [f32; crate::osc::NUM_OSC_SLOTS],
+}
+
+#[cfg(feature = "midi")]
+fn serialize_array<S: serde::Serializer, const N: usize>(
+    values: &[f32; N],
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    values.as_slice().serialize(serializer)
+}
+
+impl Default for JavascriptFrame {
+    fn default() -> Self {
+        Self {
+            time: 0.0,
+            resolution: [0.0; 2],
+            mouse: [0.0; 2],
+            beat: 0.0,
+            tempo: 0.0,
+            phase: 0.0,
+            fft: [0.0; 8],
+            audio_onset: 0.0,
+            audio_beat: 0.0,
+            audio_bpm: 0.0,
+            #[cfg(feature = "midi")]
+            midi_values: [0.0; crate::midi::NUM_MIDI_VALUES],
+            #[cfg(feature = "midi")]
+            midi_envelope: [0.0; crate::midi::NUM_MIDI_ENVELOPES],
+            #[cfg(feature = "osc")]
+            osc: [0.0; crate::osc::NUM_OSC_SLOTS],
+        }
+    }
 }
 
 pub struct JavascriptRuntime {
@@ -67,6 +106,18 @@ struct Snapshot {
     screencap: bool,
     slots: usize,
     audio: bool,
+    text: Option<TextRequest>,
+    clear: [bool; 4],
+    commands: Vec<native::Command>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TextRequest {
+    content: String,
+    mode: String,
+    font_size: String,
+    line_width: String,
 }
 
 #[derive(Clone, Deserialize)]
@@ -298,6 +349,14 @@ impl JavascriptRuntime {
                 serde_json::to_string(&metadata).unwrap()
             ))
             .map_err(|e| js_error(&ctx, e))?;
+            ctx.eval::<(), _>(format!("globalThis.__features = {};", serde_json::json!({
+                "webcam": cfg!(feature = "webcam"), "image_url": cfg!(feature = "image_url"),
+                "video": cfg!(feature = "video"), "stream": cfg!(feature = "stream"),
+                "fft": cfg!(feature = "fft"), "midi": cfg!(feature = "midi"), "osc": cfg!(feature = "osc")
+            }))).map_err(|e| js_error(&ctx, e))?;
+            #[cfg(feature = "fft")]
+            ctx.eval::<(), _>(format!("globalThis.__audioSettings = {};", native::audio_settings(&crate::audio::AudioSettings::default())))
+                .map_err(|e| js_error(&ctx, e))?;
             ctx.eval::<(), _>(include_str!("javascript/bridge.js"))
                 .map_err(|e| js_error(&ctx, e))
         })?;
@@ -367,6 +426,19 @@ impl JavascriptRuntime {
 
     pub fn eval(&mut self, code: &str) -> Result<EvalResult, String> {
         self.eval_named(code, &self.library_root.join("sketch.js"))
+    }
+
+    #[cfg(feature = "fft")]
+    pub fn sync_audio_settings(
+        &self,
+        settings: &crate::audio::AudioSettings,
+    ) -> Result<(), String> {
+        self.start();
+        self.run(&format!(
+            "__bridge.setAudioSettings({}); ''",
+            native::audio_settings(settings)
+        ))
+        .map(|_| ())
     }
 
     pub fn eval_named(&mut self, code: &str, filename: &Path) -> Result<EvalResult, String> {
@@ -504,6 +576,19 @@ impl JavascriptRuntime {
         {
             return Err("JavaScript frame inputs must be finite".into());
         }
+        #[cfg(feature = "midi")]
+        if input
+            .midi_values
+            .iter()
+            .chain(input.midi_envelope.iter())
+            .any(|v| !v.is_finite())
+        {
+            return Err("JavaScript MIDI frame inputs must be finite".into());
+        }
+        #[cfg(feature = "osc")]
+        if input.osc.iter().any(|v| !v.is_finite()) {
+            return Err("JavaScript OSC frame inputs must be finite".into());
+        }
         self.start();
         let result = (|| {
             let input = serde_json::to_string(&input).map_err(|e| e.to_string())?;
@@ -639,6 +724,7 @@ fn compile_snapshot(snapshot: &Snapshot) -> Result<EvalResult, String> {
         "ext_src".into(),
         ("src".into(), vec![0.0], "ext_src".into()),
     );
+    definitions.insert("text_src".into(), ("src".into(), vec![], "text_src".into()));
     let mut glsl = String::new();
     for d in &snapshot.definitions {
         if !identifier(&d.name) || d.inputs.len() > 32 || d.glsl.len() > 64 * 1024 {
@@ -715,13 +801,33 @@ fn compile_snapshot(snapshot: &Snapshot) -> Result<EvalResult, String> {
             _ => return Err("invalid render buffer".into()),
         }
     };
-    Ok(EvalResult {
+    let mut result = EvalResult {
         shaders,
         render_mode,
-        text_data: None,
+        text_data: snapshot
+            .text
+            .as_ref()
+            .map(|request| {
+                if request.content.len() > 4096 {
+                    return Err("Text content byte limit exceeded".to_string());
+                }
+                let mode = match request.mode.as_str() {
+                    "fill" => crate::text::TextMode::Fill,
+                    "stroke" => crate::text::TextMode::Stroke,
+                    "fillStroke" => crate::text::TextMode::FillStroke,
+                    _ => return Err("Invalid text mode".into()),
+                };
+                let config = crate::text::TextConfig {
+                    font_size: crate::text::parse_size(&request.font_size, "fontSize")?,
+                    line_width: crate::text::parse_size(&request.line_width, "lineWidth")?,
+                };
+                Ok(crate::text::rasterize(&request.content, mode, &config))
+            })
+            .transpose()?,
         screencap: snapshot.screencap,
         render_resolution: snapshot.resolution.map(|r| (r[0], r[1])),
         buffer_filter: filters,
+        buffer_clear: snapshot.clear,
         #[cfg(any(
             feature = "webcam",
             feature = "image_url",
@@ -737,7 +843,9 @@ fn compile_snapshot(snapshot: &Snapshot) -> Result<EvalResult, String> {
         osc_requests: Vec::new(),
         #[cfg(feature = "stream")]
         broadcast_request: None,
-    })
+    };
+    native::apply(&snapshot.commands, &mut result)?;
+    Ok(result)
 }
 
 fn graph_node(
@@ -753,6 +861,25 @@ fn graph_node(
     *budget -= graph.ops.len();
     let mut ops = Vec::new();
     for operation in &graph.ops {
+        if operation.name == "tileable" {
+            if !ops.is_empty() || operation.args.len() != 1 {
+                return Err("Invalid tileable graph".into());
+            }
+            let width = match &operation.args[0] {
+                Value::Number(n) if n.is_finite() && (*n as f32).is_finite() => Arg::Lit(*n),
+                Value::Callback(i) if *i < slots => Arg::Expr(format!("iJsValues[{i}]")),
+                _ => return Err("Invalid tileable width".into()),
+            };
+            let other = graph_node(
+                operation.other.as_ref().ok_or("Missing tileable graph")?,
+                definitions,
+                slots,
+                depth + 1,
+                budget,
+            )?;
+            ops.push(Op::Tileable { other, width });
+            continue;
+        }
         let (kind, defaults, shader_name) = definitions
             .get(&operation.name)
             .ok_or("unknown graph function")?;

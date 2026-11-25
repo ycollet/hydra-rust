@@ -29,6 +29,270 @@ fn persistent_context_and_native_emitter() {
 }
 
 #[test]
+fn native_tileable_and_text_helpers_share_the_native_implementations() {
+    for code in [
+        "osc(10).tileable().repeat(3,3).out()",
+        "osc(10).tileable(0.2).tileable(0.1).out()",
+        "text('Hydra').out()",
+        "strokeText('Hydra',{fontSize:'50%',lineWidth:'3px'}).out()",
+        "fillStrokeText('Hydra',{fontSize:40,lineWidth:2}).out()",
+    ] {
+        let js = runtime().eval(code).unwrap();
+        let native = hydra_rust::eval(code).unwrap();
+        assert_eq!(js.shaders, native.shaders, "{code}");
+        if let Some(text) = js.text_data {
+            let native = native.text_data.unwrap();
+            assert_eq!((text.width, text.height), (native.width, native.height));
+            assert_eq!(text.pixels, native.pixels);
+            assert!(
+                text.pixels
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .any(|pixel| pixel[3] != 0)
+            );
+        }
+    }
+    let mut js = runtime();
+    let graph = js.eval("osc(10).tileable(()=>time*0.1).out()").unwrap();
+    let slot = callback_slot(graph.shaders[0].as_ref().unwrap());
+    assert_eq!(
+        js.frame(JavascriptFrame {
+            time: 2.0,
+            ..Default::default()
+        })
+        .unwrap()[slot],
+        0.2
+    );
+    for code in [
+        "osc(10).tileable(Infinity).out()",
+        "text('Hydra',{fontSize:()=>40}).out()",
+        "text('Hydra',{fontSize:'bad'}).out()",
+        "text('x'.repeat(4097)).out()",
+    ] {
+        assert!(js.eval(code).is_err(), "{code}");
+    }
+}
+
+#[test]
+fn buffer_clear_is_one_shot_and_rolls_back_with_failed_graphs() {
+    let mut js = runtime();
+    let original = js.eval("osc(10).out();o1.clear().setNearest()").unwrap();
+    assert_eq!(original.buffer_clear, [false, true, false, false]);
+    assert_eq!(js.eval("").unwrap().buffer_clear, [false; 4]);
+    assert!(js.eval("o0.clear();osc('bad').out()").is_err());
+    assert_eq!(js.eval("").unwrap().buffer_clear, [false; 4]);
+    js.eval("o2.clear();solid(1).out()").unwrap();
+    js.rollback_last_eval().unwrap();
+    let restored = js.eval("").unwrap();
+    assert_eq!(restored.shaders, original.shaders);
+    assert_eq!(restored.buffer_clear, [false; 4]);
+    js.eval("update=()=>o0.clear()").unwrap();
+    assert!(
+        js.frame(JavascriptFrame::default())
+            .unwrap_err()
+            .contains("during frame")
+    );
+}
+
+#[cfg(feature = "fft")]
+#[test]
+fn audio_controls_queue_native_settings_and_preserve_bin_validation() {
+    use hydra_rust::audio::{AudioSettings, BinProperty};
+    use hydra_rust::eval::AudioRequest;
+    let mut js = runtime();
+    let mut settings = AudioSettings::default();
+    settings.set_bins(6);
+    settings.set(Some(5), BinProperty::Scale, 3.0).unwrap();
+    js.sync_audio_settings(&settings).unwrap();
+    let graph = js
+        .eval(
+            "if(a.bins[5].scale!==3)throw Error('settings');\
+         a.setBins(8).setCutoff(0.1).setScale(2).setSmooth(0.5);\
+         a.bins[7].scale=4;a.show();osc(()=>a.fft[7]).out()",
+        )
+        .unwrap();
+    assert!(matches!(graph.audio_requests[0], AudioRequest::SetBins(8)));
+    assert!(matches!(
+        graph.audio_requests[4],
+        AudioRequest::SetBin {
+            index: 7,
+            property: BinProperty::Scale,
+            value: 4.0
+        }
+    ));
+    assert!(js.uses_audio());
+    assert_eq!(js.eval("").unwrap().audio_requests.len(), 0);
+    assert!(js.eval("a.setBins(2);a.bins[7].scale=1").is_err());
+    js.eval("if(a.bins.length!==8 || a.bins[7].scale!==4)throw Error('rollback')")
+        .unwrap();
+    for code in [
+        "a.setBins(0)",
+        "a.setBins(9)",
+        "a.setBins(2.5)",
+        "a.setSmooth(NaN)",
+    ] {
+        assert!(js.eval(code).is_err(), "{code}");
+    }
+    js.eval("update=()=>a.setBins(4)").unwrap();
+    assert!(
+        js.frame(JavascriptFrame::default())
+            .unwrap_err()
+            .contains("during frame")
+    );
+}
+
+#[cfg(feature = "midi")]
+#[test]
+fn midi_controls_bind_native_filtered_values_and_envelopes() {
+    use hydra_rust::eval::MidiRequest;
+    use hydra_rust::midi::{MidiBridge, MidiPoller};
+    let mut js = runtime();
+    let graph = js
+        .eval(
+            "midi.start().show();\
+         solid(midi.cc(74,1,'Keys').smooth(1).range(0,2),\
+         midi.velocity(60,1,'Keys'),midi.note(60,1,'Keys').adsr(0,0,1,0),1).out()",
+        )
+        .unwrap();
+    assert!(matches!(graph.midi_requests[0], MidiRequest::Start));
+    let bridge = MidiBridge::new();
+    bridge.register_input(0, "Keys");
+    let mut poller = MidiPoller::new(bridge.clone());
+    for request in &graph.midi_requests {
+        match request {
+            MidiRequest::Bind { slot, binding } => bridge.bind(*slot, binding.clone()).unwrap(),
+            MidiRequest::FilteredAdsrSlot {
+                slot,
+                note,
+                filter,
+                adsr,
+            } => bridge.set_filtered_adsr_slot(*slot, *note, filter.clone(), *adsr),
+            _ => {}
+        }
+    }
+    bridge.control_change_from(0, 1, 74, 0.25);
+    bridge.note_on_from(0, 1, 60, 0.75);
+    let midi = poller.poll();
+    let frame = JavascriptFrame {
+        midi_values: midi.values,
+        midi_envelope: midi.envelope,
+        ..Default::default()
+    };
+    assert_eq!(&js.frame(frame).unwrap()[..3], &[0.5, 0.75, 0.75]);
+    bridge.control_change_from(0, 2, 74, 1.0);
+    let midi = poller.poll();
+    assert_eq!(
+        js.frame(JavascriptFrame {
+            midi_values: midi.values,
+            ..frame
+        })
+        .unwrap()[0],
+        0.5
+    );
+    assert!(
+        !js.eval("")
+            .unwrap()
+            .midi_requests
+            .iter()
+            .any(|r| matches!(r, MidiRequest::Start))
+    );
+    for code in [
+        "midi.cc(128)",
+        "midi.note(60,16)",
+        "midi.cc(1).smooth(2)",
+        "midi.note(1).adsr(0,0,2,0)",
+    ] {
+        assert!(js.eval(code).is_err(), "{code}");
+    }
+    assert_eq!(js.frame(frame).unwrap()[0], 0.5);
+}
+
+#[cfg(feature = "osc")]
+#[test]
+fn osc_controls_bind_deduplicated_native_slots() {
+    use hydra_rust::eval::OscRequest;
+    let mut js = runtime();
+    let graph = js.eval(
+        "_osc.start(57102).show();solid(_osc.get('/level',1).scale(2),_osc.get('/level',1),0,1).out()"
+    ).unwrap();
+    assert!(matches!(graph.osc_requests[0], OscRequest::Start(57102)));
+    assert_eq!(
+        graph
+            .osc_requests
+            .iter()
+            .filter(|r| matches!(r, OscRequest::Bind { .. }))
+            .count(),
+        1
+    );
+    let mut frame = JavascriptFrame::default();
+    frame.osc[0] = 0.25;
+    assert_eq!(&js.frame(frame).unwrap()[..2], &[0.5, 0.25]);
+    for code in ["_osc.start(0)", "_osc.get('bad')", "_osc.get('/x',256)"] {
+        assert!(js.eval(code).is_err(), "{code}");
+    }
+    js.eval("update=()=>_osc.get('/x')").unwrap();
+    assert!(js.frame(frame).unwrap_err().contains("during frame"));
+}
+
+#[test]
+fn sources_only_queue_explicit_feature_gated_requests() {
+    for (code, enabled) in [
+        ("s2.initCam(1);src(s2).out()", cfg!(feature = "webcam")),
+        (
+            "s2.initImage('local.png');src(s2).out()",
+            cfg!(feature = "image_url"),
+        ),
+        (
+            "s2.initGif('local.gif');src(s2).out()",
+            cfg!(feature = "image_url"),
+        ),
+        (
+            "s2.initVideo('local.mp4');src(s2).out()",
+            cfg!(feature = "video"),
+        ),
+        (
+            "s2.initStream('127.0.0.1:9000');src(s2).out()",
+            cfg!(feature = "stream"),
+        ),
+    ] {
+        let mut js = runtime();
+        if enabled {
+            let result = js.eval(code).unwrap();
+            assert_eq!(
+                result.shaders,
+                hydra_rust::eval("src(s2).out()").unwrap().shaders
+            );
+            #[cfg(any(
+                feature = "webcam",
+                feature = "image_url",
+                feature = "video",
+                feature = "stream"
+            ))]
+            {
+                assert_eq!(result.source_requests.len(), 1);
+                assert!(js.eval("").unwrap().source_requests.is_empty());
+            }
+        } else {
+            assert!(js.eval(code).err().unwrap().contains("requires"));
+        }
+    }
+    #[cfg(feature = "webcam")]
+    {
+        let mut js = runtime();
+        for code in ["s0.initCam(-1)", "s0.initCam(0.5)"] {
+            assert!(js.eval(code).is_err());
+        }
+        js.eval("update=()=>s0.initCam()").unwrap();
+        assert!(
+            js.frame(JavascriptFrame::default())
+                .unwrap_err()
+                .contains("during frame")
+        );
+    }
+}
+
+#[test]
 fn callbacks_and_update_run_once_per_frame_without_shader_rebuild() {
     let mut js = runtime();
     let graph = js
@@ -659,12 +923,23 @@ fn frame_inputs_audio_errors_and_explicit_unsupported_methods() {
             .is_err()
     );
     for code in [
-        "s0.initCam()",
-        "a.setBins(4)",
-        "midi.start()",
+        "s0.initScreen()",
+        "midi.value()",
         "fetch('https://example.com')",
     ] {
         assert!(js.eval(code).err().unwrap().contains("unsupported"));
+    }
+    for (code, enabled) in [
+        ("s0.initCam()", cfg!(feature = "webcam")),
+        ("a.setBins(4)", cfg!(feature = "fft")),
+        ("midi.start()", cfg!(feature = "midi")),
+        ("_osc.start()", cfg!(feature = "osc")),
+    ] {
+        if enabled {
+            js.eval(code).unwrap();
+        } else {
+            assert!(js.eval(code).err().unwrap().contains("requires"));
+        }
     }
 }
 
