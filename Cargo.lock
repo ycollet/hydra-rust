@@ -2694,6 +2694,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "cpal",
+ "crossbeam-queue",
  "eframe",
  "env_logger",
  "ffmpeg-sidecar",

@@ -7,7 +7,7 @@ use egui::{Color32, FontId, TextBuffer};
 #[cfg(feature = "audio")]
 use hydra_rust::audio::AudioManager;
 #[cfg(feature = "stream")]
-use hydra_rust::broadcast::{BroadcastManager, push_captured_frame};
+use hydra_rust::broadcast::{BroadcastManager, capture_dimensions, push_owned_captured_frame};
 #[cfg(feature = "audio")]
 use hydra_rust::eval::AudioRequest;
 #[cfg(feature = "stream")]
@@ -1212,6 +1212,10 @@ impl HydraApp {
                 renderer.upload_source(slot, &frame);
             }
         }
+        #[cfg(feature = "image_url")]
+        if let Some(error) = self.image_manager.take_error() {
+            self.error = Some((error, Instant::now()));
+        }
         #[cfg(feature = "video")]
         for slot in 0..NUM_SOURCES {
             if let Some(frame) = self.video_manager.poll(slot) {
@@ -1315,22 +1319,22 @@ impl HydraApp {
             }
         }
 
-        // A script's broadcastStream(port) reads the just-rendered frame
-        // back off the GPU, at the real window resolution (not buf_w/buf_h -
-        // matches real hydra.js's own canvas.captureStream(), which
-        // captures the displayed canvas regardless of any internal render
-        // scale). Throttled to ~25fps (the encoder's own target rate, see
-        // broadcast.rs) since read_pixels is a real GPU-CPU sync cost, not
-        // worth paying every render frame just to immediately drop most of
-        // the results.
+        // Capture only useful frames, since readback waits for the GPU.
         #[cfg(feature = "stream")]
-        let broadcast_sink = if self.broadcast_manager.is_active()
+        let broadcast_sink = if self.broadcast_manager.needs_capture()
             && self
                 .last_broadcast_capture
                 .is_none_or(|t| t.elapsed() >= std::time::Duration::from_millis(40))
         {
             self.last_broadcast_capture = Some(Instant::now());
-            self.broadcast_manager.frame_sink()
+            match capture_dimensions(res_w, res_h).and_then(|size| renderer.prepare_capture(size)) {
+                Ok(()) => self.broadcast_manager.frame_sink(),
+                Err(error) => {
+                    log::error!("{error}");
+                    self.error = Some((error, Instant::now()));
+                    None
+                }
+            }
         } else {
             None
         };
@@ -1380,25 +1384,12 @@ impl HydraApp {
             }
             #[cfg(feature = "stream")]
             if let Some(sink) = &broadcast_sink {
-                // render_multipass leaves the real window framebuffer bound
-                // (it restores whatever egui had bound before this
-                // callback ran) - read_pixels here reads exactly what was
-                // just drawn to the screen, respecting render()'s mode.
-                use glow::HasContext;
-                let gl = painter.gl();
-                let mut buf = vec![0u8; (res_w * res_h * 3) as usize];
-                unsafe {
-                    gl.read_pixels(
-                        0,
-                        0,
-                        res_w as i32,
-                        res_h as i32,
-                        glow::RGB,
-                        glow::UNSIGNED_BYTE,
-                        glow::PixelPackData::Slice(Some(&mut buf)),
-                    );
+                match renderer::read_capture(painter.gl(), &snap, [res_w, res_h]) {
+                    Ok((width, height, pixels)) => {
+                        push_owned_captured_frame(sink, width, height, pixels)
+                    }
+                    Err(error) => *region_error.lock().unwrap() = Some(error),
                 }
-                push_captured_frame(sink, res_w, res_h, &buf);
             }
             if take_screenshot {
                 // Same reasoning as the broadcast readback above: this runs

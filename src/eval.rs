@@ -2507,6 +2507,7 @@ fn eval_impl(
     }));
 
     let mut engine = Engine::new();
+    engine.set_max_operations(1_000_000);
     engine.build_type::<Node>();
     {
         let state = state.clone();
@@ -3571,6 +3572,11 @@ fn eval_impl(
     #[cfg(feature = "osc")]
     scope.push("_osc", Osc);
 
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
+    engine.on_progress(move |_| {
+        (std::time::Instant::now() >= deadline)
+            .then(|| Dynamic::from("Rhai execution exceeded the 200 ms time limit"))
+    });
     let result = engine
         .eval_with_scope::<Dynamic>(&mut scope, code)
         .map_err(|e| e.to_string())?;

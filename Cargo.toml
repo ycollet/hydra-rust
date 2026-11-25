@@ -51,6 +51,7 @@ regex = "1"
 rfd = { version = "0.15", optional = true }
 cpal = { version = "0.15", optional = true }
 rustfft = { version = "6", optional = true }
+crossbeam-queue = { version = "0.3", optional = true }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 ureq = { version = "2", optional = true, features = ["tls"] }
 midir = { version = "0.10", optional = true }
@@ -94,14 +95,14 @@ webcam = ["dep:nokhwa"]
 # own - lets a host application (e.g. the `hydra-plugin` crate, fed by a
 # DAW's own audio buffer) reuse the same FFT-reactive (`a.fft[]`) pipeline
 # as the desktop app without pulling in `cpal`/microphone access at all.
-fft = ["dep:rustfft"]
+fft = ["dep:rustfft", "dep:crossbeam-queue"]
 # `audio` keeps its old meaning (mic capture via `cpal`, exposed as
 # `AudioManager`) - now built on top of `fft` rather than duplicating it.
 audio = ["dep:cpal", "fft"]
 # Linux JACK input, also usable through PipeWire's JACK compatibility layer.
 jack = ["audio", "cpal/jack"]
 image_url = ["dep:ureq"]
-midi = ["dep:midir"]
+midi = ["dep:midir", "dep:crossbeam-queue"]
 osc = ["dep:rosc"]
 video = ["dep:ffmpeg-sidecar"]
 stream = ["dep:webrtc", "dep:rtc", "dep:tokio", "dep:bytes", "dep:async-trait", "video"]

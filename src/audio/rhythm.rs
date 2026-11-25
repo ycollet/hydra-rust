@@ -1,4 +1,6 @@
+use crossbeam_queue::ArrayQueue;
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use rustfft::num_complex::Complex;
 
@@ -9,26 +11,27 @@ pub(super) const CAPACITY: usize = 65_536;
 const HOP: usize = 256;
 
 pub(super) struct PendingAudio {
-    pub samples: VecDeque<f32>,
-    pub sample_rate: u32,
-    pub discontinuity: bool,
+    pub samples: ArrayQueue<f32>,
+    pub sample_rate: AtomicU32,
+    pub discontinuity: AtomicBool,
+    pub overrun: AtomicBool,
 }
 
 impl PendingAudio {
     pub fn new() -> Self {
         Self {
-            samples: VecDeque::with_capacity(CAPACITY),
-            sample_rate: 44_100,
-            discontinuity: false,
+            samples: ArrayQueue::new(CAPACITY),
+            sample_rate: AtomicU32::new(44_100),
+            discontinuity: AtomicBool::new(false),
+            overrun: AtomicBool::new(false),
         }
     }
 
-    pub fn push(&mut self, sample: f32) {
-        if self.samples.len() == CAPACITY {
-            self.samples.pop_front();
-            self.discontinuity = true;
+    pub fn push(&self, sample: f32) {
+        if self.samples.force_push(sample).is_some() {
+            self.overrun.store(true, Ordering::Release);
+            self.discontinuity.store(true, Ordering::Release);
         }
-        self.samples.push_back(sample);
     }
 }
 

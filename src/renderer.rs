@@ -86,6 +86,7 @@ pub struct RenderSnapshot {
     /// single incoming camera frame (~30Hz per active source).
     source_dims: [Option<(u32, u32)>; NUM_SOURCES],
     extended: Arc<ExtendedTargets>,
+    capture: Option<(SingleTarget, [u32; 2])>,
 }
 
 #[derive(Clone, Copy)]
@@ -128,6 +129,48 @@ pub struct ShaderRenderer {
     gl: Arc<glow::Context>,
     resolution: [u32; 2],
     ping: Arc<AtomicBool>,
+    vertex_shader: glow::Shader,
+    shader_sources: [Option<String>; NUM_BUFFERS],
+    pass_sources: Vec<String>,
+}
+
+struct StagedResources {
+    gl: Arc<glow::Context>,
+    programs: Vec<glow::Program>,
+    targets: Vec<SingleTarget>,
+}
+
+impl StagedResources {
+    fn program(&mut self, vertex: glow::Shader, source: &str) -> Result<ProgramState, String> {
+        let program = compile_program(&self.gl, vertex, &shader::fragment_source(source))?;
+        self.programs.push(program);
+        Ok(resolve_program_state(&self.gl, program))
+    }
+
+    fn target(&mut self, resolution: [u32; 2]) -> Result<SingleTarget, String> {
+        let target = ShaderRenderer::create_single(&self.gl, resolution)?;
+        self.targets.push(target);
+        Ok(target)
+    }
+
+    fn commit(mut self) {
+        self.programs.clear();
+        self.targets.clear();
+    }
+}
+
+impl Drop for StagedResources {
+    fn drop(&mut self) {
+        unsafe {
+            for program in &self.programs {
+                self.gl.delete_program(*program);
+            }
+            for target in &self.targets {
+                self.gl.delete_framebuffer(target.fbo);
+                self.gl.delete_texture(target.texture);
+            }
+        }
+    }
 }
 
 impl Drop for ShaderRenderer {
@@ -146,6 +189,11 @@ impl Drop for ShaderRenderer {
                 self.gl.delete_program(prog.program);
             }
             self.gl.delete_program(self.snapshot.display.program);
+            self.gl.delete_shader(self.vertex_shader);
+            if let Some((target, _)) = self.snapshot.capture {
+                self.gl.delete_framebuffer(target.fbo);
+                self.gl.delete_texture(target.texture);
+            }
             if let Some(tex) = self.snapshot.text_texture {
                 self.gl.delete_texture(tex);
             }
@@ -163,13 +211,18 @@ impl ShaderRenderer {
         let (vao, vbo) = create_fullscreen_quad(&gl);
         let resolution = [512, 512];
         let targets = std::array::from_fn(|_| create_buffer_target(&gl, resolution));
-        let display_program = compile_program(&gl, &shader::display_fragment_source())
-            .expect("display shader must compile");
+        let vertex_shader = compile_vertex_shader(&gl).expect("vertex shader must compile");
+        let display_program =
+            compile_program(&gl, vertex_shader, &shader::display_fragment_source())
+                .expect("display shader must compile");
         let display = resolve_program_state(&gl, display_program);
 
-        let default_program =
-            compile_program(&gl, &shader::fragment_source(shader::DEFAULT_SHADER))
-                .expect("default shader must compile");
+        let default_program = compile_program(
+            &gl,
+            vertex_shader,
+            &shader::fragment_source(shader::DEFAULT_SHADER),
+        )
+        .expect("default shader must compile");
         let slot0 = Some(resolve_program_state(&gl, default_program));
 
         Self {
@@ -183,11 +236,15 @@ impl ShaderRenderer {
                 source_textures: [None; NUM_SOURCES],
                 source_dims: [None; NUM_SOURCES],
                 extended: Arc::new(ExtendedTargets::default()),
+                capture: None,
             },
             vbo,
             gl,
             resolution,
             ping: Arc::new(AtomicBool::new(false)),
+            vertex_shader,
+            shader_sources: [Some(shader::DEFAULT_SHADER.into()), None, None, None],
+            pass_sources: Vec::new(),
         }
     }
 
@@ -197,6 +254,28 @@ impl ShaderRenderer {
 
     pub fn snapshot(&self) -> RenderSnapshot {
         self.snapshot.clone()
+    }
+
+    pub fn prepare_capture(&mut self, resolution: [u32; 2]) -> Result<(), String> {
+        if self
+            .snapshot
+            .capture
+            .is_some_and(|(_, size)| size == resolution)
+        {
+            return Ok(());
+        }
+        let maximum = unsafe { self.gl.get_parameter_i32(glow::MAX_TEXTURE_SIZE) } as u32;
+        if resolution.contains(&0) || resolution.iter().any(|dimension| *dimension > maximum) {
+            return Err("Capture dimensions exceed the graphics device limit".into());
+        }
+        let target = Self::create_single(&self.gl, resolution)?;
+        if let Some((previous, _)) = self.snapshot.capture.replace((target, resolution)) {
+            unsafe {
+                self.gl.delete_framebuffer(previous.fbo);
+                self.gl.delete_texture(previous.texture);
+            }
+        }
+        Ok(())
     }
 
     pub fn clear_buffers(&mut self, buffers: [bool; NUM_BUFFERS]) {
@@ -519,16 +598,22 @@ impl ShaderRenderer {
     ) -> Vec<String> {
         self.snapshot.extended.destroy(&self.gl);
         self.snapshot.extended = Arc::new(ExtendedTargets::default());
+        self.pass_sources.clear();
         let mut errors = Vec::new();
         for (i, shader_src) in shaders.iter().enumerate() {
+            if self.shader_sources[i] == *shader_src {
+                continue;
+            }
             if let Some(old) = self.snapshot.programs[i].take() {
                 unsafe { self.gl.delete_program(old.program) };
             }
+            self.shader_sources[i] = None;
             if let Some(code) = shader_src {
                 let full_src = shader::fragment_source(code);
-                match compile_program(&self.gl, &full_src) {
+                match compile_program(&self.gl, self.vertex_shader, &full_src) {
                     Ok(program) => {
                         self.snapshot.programs[i] = Some(resolve_program_state(&self.gl, program));
+                        self.shader_sources[i] = Some(code.clone());
                     }
                     Err(e) => errors.push(format!("buffer {i}: {e}")),
                 }
@@ -580,32 +665,46 @@ impl ShaderRenderer {
             return vec![error];
         }
         let mut extended = ExtendedTargets::default();
+        let mut resources = StagedResources {
+            gl: Arc::clone(&self.gl),
+            programs: Vec::new(),
+            targets: Vec::new(),
+        };
         let mut programs = std::array::from_fn::<_, NUM_BUFFERS, _>(|_| None);
         let mut errors = Vec::new();
         for (i, source) in shaders.iter().enumerate() {
             if let Some(source) = source {
-                match compile_program(&self.gl, &shader::fragment_source(source)) {
-                    Ok(program) => {
-                        programs[i] = Some(resolve_program_state(&self.gl, program));
-                    }
+                if self.shader_sources[i].as_ref() == Some(source) {
+                    programs[i] = self.snapshot.programs[i];
+                    continue;
+                }
+                match resources.program(self.vertex_shader, source) {
+                    Ok(program) => programs[i] = Some(program),
                     Err(error) => errors.push(format!("buffer {i}: {error}")),
                 }
             }
         }
         for (index, source) in plan.passes.iter().enumerate() {
-            match compile_program(&self.gl, &shader::fragment_source(source)) {
-                Ok(program) => match Self::create_single(&self.gl, self.resolution) {
-                    Ok(target) => extended
-                        .passes
-                        .push((resolve_program_state(&self.gl, program), target)),
-                    Err(error) => {
-                        unsafe {
-                            self.gl.delete_program(program);
-                        }
-                        errors.push(error);
-                    }
-                },
-                Err(error) => errors.push(format!("automatic pass {index}: {error}")),
+            let previous = self.snapshot.extended.passes.get(index);
+            let program = if self.pass_sources.get(index) == Some(source) {
+                Ok(previous.expect("cached pass has a target").0)
+            } else {
+                resources.program(self.vertex_shader, source)
+            };
+            let program = match program {
+                Ok(program) => program,
+                Err(error) => {
+                    errors.push(format!("automatic pass {index}: {error}"));
+                    continue;
+                }
+            };
+            let target = match previous {
+                Some((_, target)) => Ok(*target),
+                None => resources.target(self.resolution),
+            };
+            match target {
+                Ok(target) => extended.passes.push((program, target)),
+                Err(error) => errors.push(error),
             }
         }
         let max_units =
@@ -650,16 +749,16 @@ impl ShaderRenderer {
             }
         }
         if regions {
-            match Self::create_single(&self.gl, [8, 8]) {
+            let target = match self.snapshot.extended.region {
+                Some(target) => Ok(target),
+                None => resources.target([8 * crate::extended::MAX_REGIONS as u32, 8]),
+            };
+            match target {
                 Ok(target) => extended.region = Some(target),
                 Err(error) => errors.push(error),
             }
         }
         if !errors.is_empty() {
-            for state in programs.into_iter().flatten() {
-                unsafe { self.gl.delete_program(state.program) };
-            }
-            extended.destroy(&self.gl);
             return errors;
         }
         for (output, count) in plan.history.iter().enumerate() {
@@ -667,19 +766,13 @@ impl ShaderRenderer {
                 continue;
             }
             for _ in 0..*count {
-                match Self::create_single(&self.gl, self.resolution) {
+                match resources.target(self.resolution) {
                     Ok(target) => extended.history[output].push(target),
                     Err(error) => errors.push(error),
                 }
             }
         }
         if !errors.is_empty() {
-            for state in programs.into_iter().flatten() {
-                unsafe {
-                    self.gl.delete_program(state.program);
-                }
-            }
-            extended.destroy(&self.gl);
             return errors;
         }
         let previous = &self.snapshot.extended;
@@ -699,25 +792,38 @@ impl ShaderRenderer {
                 }
             }
         }
-        for (program, target) in &previous.passes {
+        for (index, (program, target)) in previous.passes.iter().enumerate() {
             unsafe {
-                self.gl.delete_program(program.program);
-                self.gl.delete_texture(target.texture);
-                self.gl.delete_framebuffer(target.fbo);
+                if extended.passes.get(index).map(|(state, _)| state.program)
+                    != Some(program.program)
+                {
+                    self.gl.delete_program(program.program);
+                }
+                if index >= extended.passes.len() {
+                    self.gl.delete_texture(target.texture);
+                    self.gl.delete_framebuffer(target.fbo);
+                }
             }
         }
-        if let Some(target) = previous.region {
+        if let Some(target) = previous.region.filter(|_| !regions) {
             unsafe {
                 self.gl.delete_framebuffer(target.fbo);
                 self.gl.delete_texture(target.texture);
             }
         }
-        for state in self.snapshot.programs.iter().flatten() {
-            unsafe { self.gl.delete_program(state.program) };
+        for (index, state) in self.snapshot.programs.iter().enumerate() {
+            if let Some(state) = state
+                && programs[index].map(|program| program.program) != Some(state.program)
+            {
+                unsafe { self.gl.delete_program(state.program) };
+            }
         }
         self.snapshot.programs = programs;
         self.snapshot.render_mode = render_mode;
         self.snapshot.extended = Arc::new(extended);
+        self.shader_sources = shaders.clone();
+        self.pass_sources = plan.passes.clone();
+        resources.commit();
         errors
     }
 }
@@ -1118,28 +1224,32 @@ pub fn read_regions(
                 y0,
                 x1,
                 y1,
+                slot as i32 * 8,
                 0,
-                0,
-                8,
+                (slot as i32 + 1) * 8,
                 8,
                 glow::COLOR_BUFFER_BIT,
                 glow::LINEAR,
             );
-            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(target.fbo));
-            let mut pixels = [0u8; 8 * 8 * 4];
-            gl.read_pixels(
-                0,
-                0,
-                8,
-                8,
-                glow::RGBA,
-                glow::UNSIGNED_BYTE,
-                glow::PixelPackData::Slice(Some(&mut pixels)),
-            );
-            let total: f32 = pixels
-                .as_chunks::<4>()
-                .0
-                .iter()
+        }
+        gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(target.fbo));
+        let width = 8 * regions.len();
+        let mut pixels = [0u8; 8 * 8 * 4 * crate::extended::MAX_REGIONS];
+        gl.read_pixels(
+            0,
+            0,
+            width as i32,
+            8,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelPackData::Slice(Some(&mut pixels[..width * 8 * 4])),
+        );
+        for (slot, region) in regions.iter().enumerate() {
+            let total: f32 = (0..8)
+                .flat_map(|row| {
+                    let start = (row * width + slot * 8) * 4;
+                    pixels[start..start + 8 * 4].as_chunks::<4>().0.iter()
+                })
                 .map(|pixel| {
                     if region.channel == 4 {
                         (pixel[0] as f32 * 0.2126
@@ -1171,6 +1281,70 @@ pub fn read_regions(
         }
     }
     Ok(values)
+}
+
+pub fn read_capture(
+    gl: &glow::Context,
+    snapshot: &RenderSnapshot,
+    source_resolution: [u32; 2],
+) -> Result<(u32, u32, Vec<u8>), String> {
+    if source_resolution.contains(&0)
+        || source_resolution
+            .iter()
+            .any(|dimension| *dimension > i32::MAX as u32)
+    {
+        return Err("Capture requires valid render dimensions".into());
+    }
+    let (target, [width, height]) = snapshot.capture.ok_or("Capture target is not configured")?;
+    let mut pixels = vec![0; width as usize * height as usize * 3];
+    unsafe {
+        let read = gl.get_parameter_i32(glow::READ_FRAMEBUFFER_BINDING);
+        let draw = gl.get_parameter_i32(glow::DRAW_FRAMEBUFFER_BINDING);
+        let alignment = gl.get_parameter_i32(glow::PACK_ALIGNMENT);
+        let scissor = gl.is_enabled(glow::SCISSOR_TEST);
+        gl.disable(glow::SCISSOR_TEST);
+        gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(target.fbo));
+        gl.blit_framebuffer(
+            0,
+            0,
+            source_resolution[0] as i32,
+            source_resolution[1] as i32,
+            0,
+            0,
+            width as i32,
+            height as i32,
+            glow::COLOR_BUFFER_BIT,
+            glow::LINEAR,
+        );
+        gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(target.fbo));
+        gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
+        gl.read_pixels(
+            0,
+            0,
+            width as i32,
+            height as i32,
+            glow::RGB,
+            glow::UNSIGNED_BYTE,
+            glow::PixelPackData::Slice(Some(&mut pixels)),
+        );
+        gl.bind_framebuffer(
+            glow::READ_FRAMEBUFFER,
+            std::num::NonZeroU32::new(read as u32).map(glow::NativeFramebuffer),
+        );
+        gl.bind_framebuffer(
+            glow::DRAW_FRAMEBUFFER,
+            std::num::NonZeroU32::new(draw as u32).map(glow::NativeFramebuffer),
+        );
+        gl.pixel_store_i32(glow::PACK_ALIGNMENT, alignment);
+        if scissor {
+            gl.enable(glow::SCISSOR_TEST);
+        }
+        let error = gl.get_error();
+        if error != glow::NO_ERROR {
+            return Err(format!("Capture readback failed: OpenGL error {error:#x}"));
+        }
+    }
+    Ok((width, height, pixels))
 }
 
 fn draw_display_buffer(
@@ -1223,7 +1397,7 @@ fn as_u8_slice(data: &[f32]) -> &[u8] {
     unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(data)) }
 }
 
-fn compile_program(gl: &glow::Context, frag_src: &str) -> Result<glow::Program, String> {
+fn compile_vertex_shader(gl: &glow::Context) -> Result<glow::Shader, String> {
     unsafe {
         let vert = gl
             .create_shader(glow::VERTEX_SHADER)
@@ -1235,7 +1409,16 @@ fn compile_program(gl: &glow::Context, frag_src: &str) -> Result<glow::Program, 
             gl.delete_shader(vert);
             return Err(format!("vertex shader: {log}"));
         }
+        Ok(vert)
+    }
+}
 
+fn compile_program(
+    gl: &glow::Context,
+    vert: glow::Shader,
+    frag_src: &str,
+) -> Result<glow::Program, String> {
+    unsafe {
         let frag = gl
             .create_shader(glow::FRAGMENT_SHADER)
             .map_err(|e| e.to_string())?;
@@ -1243,16 +1426,22 @@ fn compile_program(gl: &glow::Context, frag_src: &str) -> Result<glow::Program, 
         gl.compile_shader(frag);
         if !gl.get_shader_compile_status(frag) {
             let log = gl.get_shader_info_log(frag);
-            gl.delete_shader(vert);
             gl.delete_shader(frag);
             return Err(format!("fragment shader: {log}"));
         }
 
-        let program = gl.create_program().map_err(|e| e.to_string())?;
+        let program = match gl.create_program() {
+            Ok(program) => program,
+            Err(error) => {
+                gl.delete_shader(frag);
+                return Err(error);
+            }
+        };
         gl.attach_shader(program, vert);
         gl.attach_shader(program, frag);
         gl.link_program(program);
-        gl.delete_shader(vert);
+        gl.detach_shader(program, vert);
+        gl.detach_shader(program, frag);
         gl.delete_shader(frag);
 
         if !gl.get_program_link_status(program) {

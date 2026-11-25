@@ -65,22 +65,31 @@ mod imp {
     /// method, so the GL render callback (which only holds a cloned `Arc`,
     /// not the whole manager - see `frame_sink`) can call it directly.
     pub fn push_captured_frame(sink: &FrameSlot, width: u32, height: u32, rgb_bottom_up: &[u8]) {
+        push_owned_captured_frame(sink, width, height, rgb_bottom_up.to_vec());
+    }
+
+    pub fn push_owned_captured_frame(
+        sink: &FrameSlot,
+        width: u32,
+        height: u32,
+        mut pixels: Vec<u8>,
+    ) {
         let row_bytes = (width as usize) * 3;
-        if rgb_bottom_up.len() != row_bytes * height as usize {
+        if pixels.len() != row_bytes * height as usize {
+            log::warn!("broadcastStream: captured frame dimensions do not match its pixels");
             return;
         }
-        let mut flipped = vec![0u8; rgb_bottom_up.len()];
-        for y in 0..height as usize {
-            let src = &rgb_bottom_up[y * row_bytes..(y + 1) * row_bytes];
-            let dst_y = height as usize - 1 - y;
-            flipped[dst_y * row_bytes..(dst_y + 1) * row_bytes].copy_from_slice(src);
+        for y in 0..height as usize / 2 {
+            let (top, bottom) = pixels.split_at_mut((height as usize - 1 - y) * row_bytes);
+            top[y * row_bytes..(y + 1) * row_bytes].swap_with_slice(&mut bottom[..row_bytes]);
         }
-        *sink.lock().unwrap() = Some((width, height, flipped));
+        *sink.lock().unwrap() = Some((width, height, pixels));
     }
 
     struct BroadcastState {
         stopped: Arc<AtomicBool>,
         latest_frame: Arc<FrameSlot>,
+        capture_demand: Arc<AtomicBool>,
     }
 
     impl Drop for BroadcastState {
@@ -88,6 +97,7 @@ mod imp {
             // Tells the broadcast thread's frame-feed loop to stop, kill
             // ffmpeg, and close the peer connection - see run_broadcast.
             self.stopped.store(true, Ordering::Relaxed);
+            self.capture_demand.store(false, Ordering::Release);
         }
     }
 
@@ -103,6 +113,13 @@ mod imp {
 
         pub fn is_active(&self) -> bool {
             self.state.is_some()
+        }
+
+        pub fn needs_capture(&self) -> bool {
+            self.state.as_ref().is_some_and(|state| {
+                !state.stopped.load(Ordering::Relaxed)
+                    && state.capture_demand.load(Ordering::Acquire)
+            })
         }
 
         /// A clone of the shared frame slot, if actively broadcasting - for
@@ -129,17 +146,20 @@ mod imp {
 
             let latest_frame: Arc<FrameSlot> = Arc::new(Mutex::new(None));
             let stopped = Arc::new(AtomicBool::new(false));
+            let capture_demand = Arc::new(AtomicBool::new(false));
 
             let frame_slot = latest_frame.clone();
             let stop_flag = stopped.clone();
+            let demand_flag = capture_demand.clone();
             thread::Builder::new()
                 .name("hydra-broadcast".into())
-                .spawn(move || run_broadcast(port, frame_slot, stop_flag))
+                .spawn(move || run_broadcast(port, frame_slot, stop_flag, demand_flag))
                 .expect("spawn broadcast thread");
 
             self.state = Some(BroadcastState {
                 stopped,
                 latest_frame,
+                capture_demand,
             });
         }
 
@@ -206,25 +226,39 @@ mod imp {
 
     /// Runs on its own dedicated OS thread for as long as the broadcast is
     /// active - mirrors `stream.rs::run_receiver`'s shape.
-    fn run_broadcast(port: u16, latest_frame: Arc<FrameSlot>, stopped: Arc<AtomicBool>) {
+    fn run_broadcast(
+        port: u16,
+        latest_frame: Arc<FrameSlot>,
+        stopped: Arc<AtomicBool>,
+        capture_demand: Arc<AtomicBool>,
+    ) {
         let Some(runtime) = webrtc::runtime::default_runtime() else {
             log::warn!("broadcastStream: no async runtime available");
             return;
         };
         let runtime_for_session = runtime.clone();
+        let demand_for_session = capture_demand.clone();
         runtime.block_on(Box::pin(async move {
-            if let Err(e) =
-                broadcast_session(port, latest_frame, stopped, runtime_for_session).await
+            if let Err(e) = broadcast_session(
+                port,
+                latest_frame,
+                stopped,
+                demand_for_session,
+                runtime_for_session,
+            )
+            .await
             {
                 log::warn!("broadcastStream: session ended: {e}");
             }
         }));
+        capture_demand.store(false, Ordering::Release);
     }
 
     async fn broadcast_session(
         port: u16,
         latest_frame: Arc<FrameSlot>,
         stopped: Arc<AtomicBool>,
+        capture_demand: Arc<AtomicBool>,
         runtime: Arc<dyn Runtime>,
     ) -> Result<(), String> {
         let listener =
@@ -310,7 +344,9 @@ mod imp {
             while !stopped_for_feed.load(Ordering::Relaxed) {
                 runtime_for_feed.sleep(Duration::from_millis(20)).await;
 
-                if viewers_for_feed.lock().unwrap().is_empty() {
+                let watching = !viewers_for_feed.lock().unwrap().is_empty();
+                capture_demand.store(watching, Ordering::Release);
+                if !watching {
                     if let Some((mut child, _)) = ffmpeg.take() {
                         let _ = child.kill();
                     }
@@ -509,18 +545,21 @@ mod imp {
 
     const ENCODE_FPS: u32 = 25;
 
-    /// A captured frame wider than this is downscaled (in `ffmpeg`, via
-    /// `-vf scale=...`, *before* the VP8 encode step) rather than encoded
-    /// at its native size. Found necessary via real end-to-end testing, not
-    /// just theory: a Retina display's actual framebuffer resolution
-    /// (e.g. 3456x1920 physical pixels behind a smaller logical window
-    /// size) is enough raw pixels that realtime `libvpx` encoding fell
-    /// far behind - hundreds of percent CPU with no RTP output ever
-    /// actually reaching the peer. `read_pixels` itself still reads the
-    /// full native resolution (downscaling *before* readback would need
-    /// an extra GL render pass); this only caps the far more expensive
-    /// encode step.
+    /// Limits encoding work before the app transfers pixels from the GPU.
     const MAX_BROADCAST_WIDTH: u32 = 1280;
+
+    pub fn capture_dimensions(width: u32, height: u32) -> Result<[u32; 2], String> {
+        if width == 0 || height == 0 {
+            return Err("Broadcast capture requires nonzero dimensions".into());
+        }
+        if width <= MAX_BROADCAST_WIDTH {
+            return Ok([width, height]);
+        }
+        let height =
+            ((height as u64 * MAX_BROADCAST_WIDTH as u64 + width as u64) / (2 * width as u64) * 2)
+                .max(2) as u32;
+        Ok([MAX_BROADCAST_WIDTH, height])
+    }
 
     fn spawn_encoder(
         width: u32,
@@ -569,6 +608,45 @@ mod imp {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn capture_demand_requires_an_active_viewer_and_stops_with_the_session() {
+            let stopped = Arc::new(AtomicBool::new(false));
+            let demand = Arc::new(AtomicBool::new(false));
+            let mut manager = BroadcastManager {
+                state: Some(BroadcastState {
+                    stopped: stopped.clone(),
+                    latest_frame: Arc::new(Mutex::new(None)),
+                    capture_demand: demand.clone(),
+                }),
+            };
+            assert!(!manager.needs_capture());
+            demand.store(true, Ordering::Release);
+            assert!(manager.needs_capture());
+            manager.stop();
+            assert!(!manager.needs_capture());
+            assert!(!demand.load(Ordering::Acquire));
+            assert!(stopped.load(Ordering::Relaxed));
+        }
+
+        #[test]
+        fn capture_dimensions_downscale_before_readback_and_preserve_small_frames() {
+            assert_eq!(capture_dimensions(1920, 1080).unwrap(), [1280, 720]);
+            assert_eq!(capture_dimensions(800, 601).unwrap(), [800, 601]);
+            assert_eq!(capture_dimensions(2560, 1441).unwrap(), [1280, 720]);
+            assert!(capture_dimensions(0, 100).is_err());
+        }
+
+        #[test]
+        fn owned_capture_flips_in_place_and_preserves_the_middle_row() {
+            let sink = Mutex::new(None);
+            let pixels = vec![1, 2, 3, 4, 5, 6, 7, 8, 9];
+            let pointer = pixels.as_ptr();
+            push_owned_captured_frame(&sink, 1, 3, pixels);
+            let (_, _, pixels) = sink.lock().unwrap().take().unwrap();
+            assert_eq!(pixels, vec![7, 8, 9, 4, 5, 6, 1, 2, 3]);
+            assert_eq!(pixels.as_ptr(), pointer);
+        }
 
         #[test]
         fn indices_to_prune_finds_only_failed_writes_in_descending_order() {

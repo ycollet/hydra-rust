@@ -32,6 +32,7 @@ chains implicitly write to `o0`; an explicit `.out()` is also valid.
 - [Screenshots](#screenshots)
 - [Text rendering](#text-rendering)
 - [Pattern easing](#pattern-easing)
+- [Runtime and resource limits](#runtime-and-resource-limits)
 - [Current limitations](#current-limitations)
 - [Testing against a real-world sketch corpus](#testing-against-a-real-world-sketch-corpus)
 - [How chains work](#how-chains-work)
@@ -996,13 +997,78 @@ curve resets the smoothing window to `1`. A later `.smooth(amount)`
 changes that window, and `.fit()` preserves the curve. Unknown names
 log a warning and leave the pattern unchanged.
 
+## Runtime and resource limits
+
+### Rhai execution
+
+Rhai evaluation stops after 1,000,000 operations or 200 milliseconds of interpreter execution.
+For example, `while true {}` reports an error instead of freezing the application indefinitely.
+These limits do not interrupt preprocessing, native functions, or graphics-driver compilation.
+JavaScript retains its separate [runtime settings](#runtime-settings-and-recovery).
+
+### Audio and MIDI queues
+
+Audio callbacks publish samples without locking analysis or rendering state.
+Musical Instrument Digital Interface (MIDI) callbacks use the same bounded-queue approach.
+The audio queue holds 65,536 samples.
+The MIDI queue holds 4,096 events.
+Both queues keep the newest data when full.
+
+An audio overrun resets beat history.
+A MIDI overrun clears held notes and releases envelopes before applying retained events.
+For example, newer controller changes still reach `midiCC(1)` after an overrun.
+Overruns produce warnings in the application logs.
+These queues avoid renderer-lock stalls but do not guarantee a fixed maximum callback duration.
+
+### Rendering and capture
+
+Reevaluation reuses unchanged shader programs and compatible intermediate textures.
+For example, changing the source color in `solid(0.2,0.3,0.4,1).blur(1).out()` recompiles only the affected pass.
+Failed compilation preserves the previous graph and its feedback history.
+
+Region controls collect their samples into one small texture before reading it.
+Each region still uses an eight-by-eight sample grid.
+All regions share one graphics readback per frame.
+For example, sixteen `region(o0,0,0,1,1,0)` controls require one readback instead of sixteen.
+
+Broadcast capture starts only when viewers connect.
+Frames wider than 1280 pixels shrink on the graphics card before transfer to the processor.
+For example, a 1920-by-1080 broadcast transfers a 1280-by-720 frame.
+Screenshots retain the full window resolution.
+
+### Images and animated GIFs
+
+Media limits use mebibytes (MiB), where one MiB equals 1,048,576 bytes.
+
+| Resource | Limit |
+|---|---|
+| Downloaded bytes per request | 32 MiB |
+| Decoded red, green, and blue pixel storage per image or animation | 64 MiB |
+| Shared decoded pixel storage per image manager | 256 MiB |
+| Frames per animated Graphics Interchange Format (GIF) file | 500 |
+| Concurrent loading workers per image manager | 2 |
+| Queued requests per source slot | 1 |
+
+Oversized media produces a visible application error and a log warning.
+For example, `s0.initGif("https://example.com/large.gif")` fails when its decoded frames exceed 64 MiB.
+GIF decoding processes frames individually instead of collecting all intermediate color buffers first.
+Decoders also receive a 64 MiB allocation limit.
+Some codecs treat internal allocation limits as best effort.
+Downloads, temporary decoding buffers, frame uploads, and graphics textures remain separate from the shared decoded-storage budget.
+
+New requests replace queued requests and cancel older loads for the same slot.
+Cancellation checks run between download reads and GIF frames.
+A running native decoder may finish before noticing cancellation.
+For example, evaluating `s0.initImage("https://example.com/new.png")` cancels an older pending load for `s0`.
+Requests use a 20-second timeout and a two-second socket-read timeout.
+
 ## Current limitations
 
 - Max nesting depth of 16
 - Audio reactivity, webcam input, image-URL loading, MIDI input, video playback, and WebRTC streaming each require building with their own Cargo feature (off by default) — see [Feature-gated functions](#feature-gated-functions) above
 - `initVideo` (the `video` feature) additionally requires a standalone `ffmpeg` binary on `PATH` at runtime — it's spawned as a subprocess, not linked into this binary, so building hydra-rust itself never needs FFmpeg's dev libraries. Missing it just logs a warning rather than failing. `initStream`/`broadcastStream` (the `stream` feature) share this same `ffmpeg` requirement.
 - `initStream`/`broadcastStream` are hydra-rust-to-hydra-rust only — not interoperable with real hydra.js's own (currently broken) `initStream`/`pb.setName()` — and connect directly by IP:port with no NAT traversal, so both instances need to be reachable from each other directly (typically the same LAN). `broadcastStream` supports any number of simultaneous viewers, sharing one `ffmpeg` encode between them.
-- `broadcastStream` downscales anything wider than 1280px before encoding, regardless of the actual window/display resolution — realtime software VP8 encoding at a Retina display's true (2x+) framebuffer resolution can't keep up otherwise (found via real testing, not just a theoretical cap).
+- `broadcastStream` captures only for connected viewers. It downscales frames wider than 1280 pixels before reading them from the graphics card.
 
 ### Stub functions (accepted, but not yet implemented)
 
@@ -1457,6 +1523,8 @@ cargo run --features image_url --bin hydra
 Without this feature, both are no-ops (logged once) that still return the slot's source node
 for chaining, so a script that calls them keeps working even in a build without `image_url`.
 
+See [media limits](#images-and-animated-gifs) for download, storage, and frame limits.
+
 ## Feature: `midi`
 
 ```bash
@@ -1585,10 +1653,10 @@ relay server, no STUN/TURN. This means no NAT traversal: both instances need to 
 reachable from each other, which typically means the same LAN or the same machine. Requires a
 standalone `ffmpeg` binary on `PATH` at runtime, same as `video` — it does the actual VP8
 encode/decode in both directions (`webrtc-rs`, the WebRTC crate used here, only handles
-transport/RTP relaying, never codec work itself). A broadcast frame wider than 1280px is
-downscaled before encoding — found necessary via real end-to-end testing: a Retina display's
-actual framebuffer resolution is far more pixels than realtime software VP8 encoding can keep up
-with otherwise.
+transport/RTP relaying, never codec work itself).
+Broadcast capture runs only while viewers connect.
+Frames wider than 1280 pixels shrink on the graphics card before capture and encoding.
+For example, a 1920-by-1080 window broadcasts at 1280-by-720.
 
 | Function | Description | Example |
 |---|---|---|

@@ -105,6 +105,7 @@ impl AudioSettings {
 #[cfg(feature = "fft")]
 mod analysis {
     use std::collections::VecDeque;
+    use std::sync::atomic::Ordering;
     use std::sync::{Arc, Mutex};
 
     use rustfft::{Fft, FftPlanner, num_complex::Complex};
@@ -120,15 +121,12 @@ mod analysis {
     /// (typically on a different thread, e.g. a render loop) polls FFT
     /// bins out of.
     ///
-    /// Splitting the buffer from the analyzer like this means the
-    /// producer side never runs any FFT/allocation - only a bounded
-    /// `VecDeque` push behind a quick mutex lock - which is what makes it
-    /// safe to call `push` directly from a real-time audio thread (e.g.
-    /// a VST3/CLAP plugin's `process()`).
+    /// Bounded queues keep the producer independent of render-thread analysis.
+    /// Overflow keeps the newest samples. Analyzers share the latest FFT window.
     #[derive(Clone)]
     pub struct AudioBuffer {
         pub(super) samples: Arc<Mutex<VecDeque<f32>>>,
-        pending: Arc<Mutex<PendingAudio>>,
+        pending: Arc<PendingAudio>,
     }
 
     impl Default for AudioBuffer {
@@ -139,14 +137,10 @@ mod analysis {
 
     impl AudioBuffer {
         pub fn new() -> Self {
-            let buffer = Self {
+            Self {
                 samples: Arc::new(Mutex::new(VecDeque::with_capacity(FFT_SIZE))),
-                pending: Arc::new(Mutex::new(PendingAudio::new())),
-            };
-            // macOS allocates the native mutex on first lock, not in Mutex::new().
-            drop(buffer.samples.lock().unwrap());
-            drop(buffer.pending.lock().unwrap());
-            buffer
+                pending: Arc::new(PendingAudio::new()),
+            }
         }
 
         /// Pushes samples, downmixing to mono first if `channels > 1`
@@ -154,11 +148,20 @@ mod analysis {
         /// callback layout). No allocation after construction. Latest FFT
         /// samples and a bounded queue for fixed-hop rhythm analysis are retained.
         pub fn push(&self, data: &[f32], channels: usize) {
-            push_samples(&self.samples, data, channels);
-            let mut pending = self.pending.lock().unwrap();
+            self.push_converted(data, channels, |sample| sample);
+        }
+
+        pub(super) fn push_converted<T: Copy>(
+            &self,
+            data: &[T],
+            channels: usize,
+            convert: impl Fn(T) -> f32,
+        ) {
             let channels = channels.max(1);
             for frame in data.chunks(channels) {
-                pending.push(frame.iter().sum::<f32>() / channels as f32);
+                let sample =
+                    frame.iter().map(|sample| convert(*sample)).sum::<f32>() / channels as f32;
+                self.pending.push(sample);
             }
         }
 
@@ -168,20 +171,21 @@ mod analysis {
             if sample_rate == 0 {
                 return Err("Audio sample rate must be positive".into());
             }
-            let mut pending = self.pending.lock().unwrap();
-            if pending.sample_rate != sample_rate {
-                pending.samples.clear();
-                pending.sample_rate = sample_rate;
-                pending.discontinuity = true;
+            let pending = &self.pending;
+            if pending.sample_rate.swap(sample_rate, Ordering::AcqRel) != sample_rate {
+                for _ in 0..pending.samples.len().min(CAPACITY) {
+                    if pending.samples.pop().is_none() {
+                        break;
+                    }
+                }
+                pending.discontinuity.store(true, Ordering::Release);
             }
             Ok(())
         }
     }
 
     /// The FFT analysis side: owns the FFT planner/scratch buffers and
-    /// the smoothed-output state, and reads (without ever locking for
-    /// longer than a `VecDeque` copy) from an [`AudioBuffer`] a producer
-    /// is concurrently pushing into.
+    /// the smoothed-output state, and consumes samples without blocking the producer.
     pub struct AudioAnalyzer {
         fft: Arc<dyn Fft<f32>>,
         scratch: Vec<Complex<f32>>,
@@ -255,15 +259,29 @@ mod analysis {
         pub fn poll(&mut self, buffer: &AudioBuffer) -> [f32; NUM_FFT_BINS] {
             self.pending_samples.clear();
             {
-                let mut pending = buffer.pending.lock().unwrap();
-                if pending.discontinuity || pending.sample_rate != self.rhythm.sample_rate() {
-                    if pending.discontinuity && pending.samples.len() == CAPACITY {
+                let mut buf = buffer.samples.lock().unwrap();
+                let pending = &buffer.pending;
+                let discontinuity = pending.discontinuity.swap(false, Ordering::AcqRel);
+                let sample_rate = pending.sample_rate.load(Ordering::Acquire);
+                if discontinuity || sample_rate != self.rhythm.sample_rate() {
+                    if pending.overrun.swap(false, Ordering::AcqRel) {
                         log::warn!("Audio rhythm analysis overrun; resetting beat history");
                     }
-                    self.rhythm = RhythmDetector::new(pending.sample_rate);
-                    pending.discontinuity = false;
+                    self.rhythm = RhythmDetector::new(sample_rate);
                 }
-                self.pending_samples.extend(pending.samples.drain(..));
+                for _ in 0..pending.samples.len().min(CAPACITY) {
+                    if let Some(sample) = pending.samples.pop() {
+                        self.pending_samples.push(sample);
+                    } else {
+                        break;
+                    }
+                }
+                for &sample in self.pending_samples.iter().rev().take(FFT_SIZE).rev() {
+                    if buf.len() == FFT_SIZE {
+                        buf.pop_front();
+                    }
+                    buf.push_back(sample);
+                }
             }
             self.rhythm.process(
                 &self.pending_samples,
@@ -345,22 +363,6 @@ mod analysis {
             };
         }
         bins
-    }
-
-    pub(super) fn push_samples(samples: &Arc<Mutex<VecDeque<f32>>>, data: &[f32], channels: usize) {
-        let mut buf = samples.lock().unwrap();
-        let channels = channels.max(1);
-        for frame in data.chunks(channels) {
-            if buf.len() == FFT_SIZE {
-                buf.pop_front();
-            }
-            let sample = if channels == 1 {
-                frame[0]
-            } else {
-                frame.iter().sum::<f32>() / channels as f32
-            };
-            buf.push_back(sample);
-        }
     }
 
     #[cfg(test)]
@@ -481,7 +483,7 @@ mod analysis {
             buffer.push(&vec![0.0; CAPACITY + 1], 1);
             analyzer.poll(&buffer);
             assert_eq!(analyzer.features(), AudioFeatures::default());
-            assert_eq!(buffer.pending.lock().unwrap().samples.capacity(), CAPACITY);
+            assert_eq!(buffer.pending.samples.capacity(), CAPACITY);
         }
 
         #[test]
@@ -516,6 +518,7 @@ mod analysis {
             for chunk in data.chunks(512) {
                 buffer.push(chunk, 1);
             }
+            AudioAnalyzer::new().poll(&buffer);
             let samples = buffer.samples.lock().unwrap();
             assert_eq!(samples.capacity(), capacity);
             assert_eq!(samples.len(), FFT_SIZE);
@@ -537,6 +540,7 @@ mod analysis {
                 .chunks(2)
                 .map(|frame| frame.iter().sum::<f32>() / 2.0)
                 .collect();
+            AudioAnalyzer::new().poll(&buffer);
             let samples = buffer.samples.lock().unwrap();
             assert_eq!(samples.capacity(), capacity);
             assert_eq!(samples.len(), FFT_SIZE);
@@ -549,10 +553,44 @@ mod analysis {
         }
 
         #[test]
+        fn producer_does_not_wait_for_fft_snapshots_and_analyzers_share_the_latest_window() {
+            let buffer = AudioBuffer::new();
+            let guard = buffer.samples.lock().unwrap();
+            let producer = buffer.clone();
+            let (done, received) = std::sync::mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                producer.push(&[0.5; FFT_SIZE], 1);
+                done.send(()).unwrap();
+            });
+            let completed = received.recv_timeout(std::time::Duration::from_secs(1));
+            drop(guard);
+            worker.join().unwrap();
+            assert!(
+                completed.is_ok(),
+                "Audio producer waited for the FFT snapshot lock"
+            );
+            let first = AudioAnalyzer::new().poll(&buffer);
+            let second = AudioAnalyzer::new().poll(&buffer);
+            assert_eq!(first, second);
+            assert!(first.iter().any(|value| *value > 0.0));
+        }
+
+        #[test]
+        fn integer_capture_converts_and_downmixes_without_a_temporary_sample_buffer() {
+            let buffer = AudioBuffer::new();
+            buffer.push_converted(&[i16::MAX, 0, -i16::MAX, 0], 2, |sample| {
+                sample as f32 / i16::MAX as f32
+            });
+            let samples = std::iter::from_fn(|| buffer.pending.samples.pop()).collect::<Vec<_>>();
+            assert_eq!(samples, vec![0.5, -0.5]);
+        }
+
+        #[test]
         fn empty_and_zero_channel_pushes_keep_mono_behavior() {
             let buffer = AudioBuffer::new();
             buffer.push(&[], 0);
             buffer.push(&[1.0, -0.0, 3.0], 0);
+            AudioAnalyzer::new().poll(&buffer);
             let samples = buffer.samples.lock().unwrap();
             assert_eq!(
                 samples.iter().copied().collect::<Vec<_>>(),
@@ -785,9 +823,9 @@ mod capture {
                 device.build_input_stream(
                     &stream_config,
                     move |data: &[i16], _: &_| {
-                        let floats: Vec<f32> =
-                            data.iter().map(|&s| s as f32 / i16::MAX as f32).collect();
-                        buffer.push(&floats, channels)
+                        buffer.push_converted(data, channels, |sample| {
+                            sample as f32 / i16::MAX as f32
+                        })
                     },
                     err_fn,
                     None,
@@ -798,11 +836,9 @@ mod capture {
                 device.build_input_stream(
                     &stream_config,
                     move |data: &[u16], _: &_| {
-                        let floats: Vec<f32> = data
-                            .iter()
-                            .map(|&s| (s as f32 - u16::MAX as f32 / 2.0) / (u16::MAX as f32 / 2.0))
-                            .collect();
-                        buffer.push(&floats, channels)
+                        buffer.push_converted(data, channels, |sample| {
+                            (sample as f32 - u16::MAX as f32 / 2.0) / (u16::MAX as f32 / 2.0)
+                        })
                     },
                     err_fn,
                     None,

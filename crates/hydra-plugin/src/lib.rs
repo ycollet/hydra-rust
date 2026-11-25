@@ -1488,12 +1488,7 @@ impl Plugin for HydraPlugin {
         _aux: &mut AuxiliaryBuffers,
         context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
-        // Drain every MIDI event the host delivered for this block and
-        // apply it directly to `midi_bridge` - `MidiBridge`'s own methods
-        // just lock a `Mutex` and write plain floats/array slots (same
-        // real-time-safety trade-off `audio_buffer.push()` below already
-        // makes - no heap allocation either way), so this is safe to call
-        // from `process()`.
+        // Render-side filtering must not delay the host's audio thread.
         while let Some(event) = context.next_event() {
             match event {
                 NoteEvent::NoteOn {
@@ -1540,12 +1535,7 @@ impl Plugin for HydraPlugin {
             }
         }
 
-        // v1: audio is passed through unchanged - this is purely an
-        // analysis tap. Downmix the host's planar channel buffers to mono
-        // and push into `audio_buffer`; the editor's render loop (a
-        // different thread) is what actually runs the FFT on this data
-        // (see `HydraGlWindow::on_frame`), so this stays a cheap, no-alloc
-        // `Vec`/`VecDeque` push, safe for the real-time audio thread.
+        // Reuse storage because the host cannot tolerate allocation inside its audio callback.
         let num_samples = buffer.samples();
         let channel_data = buffer.as_slice();
         let num_channels = channel_data.len().max(1);

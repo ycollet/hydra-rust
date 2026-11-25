@@ -74,6 +74,8 @@ pub const DEFAULT_CC_SMOOTH: f32 = 0.01;
 
 #[cfg(feature = "midi")]
 mod imp {
+    use crossbeam_queue::ArrayQueue;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Instant;
 
@@ -343,7 +345,21 @@ mod imp {
     /// own structured [`nih_plug::prelude::NoteEvent`]s instead, with no
     /// `midir`/system-MIDI-device dependency at all.
     #[derive(Clone)]
-    pub struct MidiBridge(Arc<Mutex<SharedState>>);
+    pub struct MidiBridge(
+        Arc<Mutex<SharedState>>,
+        Arc<ArrayQueue<MidiEvent>>,
+        Arc<AtomicBool>,
+    );
+
+    const EVENT_CAPACITY: usize = 4096;
+    #[derive(Clone, Copy)]
+    struct MidiEvent {
+        input: usize,
+        channel: u8,
+        kind: MidiValueKind,
+        index: u8,
+        value: f32,
+    }
 
     impl Default for MidiBridge {
         fn default() -> Self {
@@ -353,10 +369,60 @@ mod imp {
 
     impl MidiBridge {
         pub fn new() -> Self {
-            let bridge = Self(Arc::new(Mutex::new(SharedState::new())));
+            let bridge = Self(
+                Arc::new(Mutex::new(SharedState::new())),
+                Arc::new(ArrayQueue::new(EVENT_CAPACITY)),
+                Arc::new(AtomicBool::new(false)),
+            );
             // Initialize macOS's lazily allocated native mutex off the audio thread.
             drop(bridge.0.lock().unwrap());
             bridge
+        }
+
+        fn publish(&self, input: usize, channel: u8, kind: MidiValueKind, index: u8, value: f32) {
+            if channel >= 16 || index as usize >= NUM_MIDI_NOTES {
+                return;
+            }
+            if self
+                .1
+                .force_push(MidiEvent {
+                    input,
+                    channel,
+                    kind,
+                    index,
+                    value,
+                })
+                .is_some()
+            {
+                self.2.store(true, Ordering::Release);
+            }
+        }
+
+        fn drain(&self, state: &mut SharedState) {
+            if self.2.swap(false, Ordering::AcqRel) {
+                log::warn!("MIDI queue overrun; resetting note states and releasing envelopes");
+                state.note_velocity.fill(0.0);
+                for input in &mut state.inputs {
+                    for channel in &mut input.channels {
+                        channel.velocity.fill(StampedValue::default());
+                    }
+                }
+                for slot in state.slots.iter_mut().flatten() {
+                    slot.envelope.stop();
+                }
+            }
+            for _ in 0..self.1.len().min(EVENT_CAPACITY) {
+                let Some(event) = self.1.pop() else {
+                    break;
+                };
+                state.event(
+                    event.input,
+                    event.channel,
+                    event.kind,
+                    event.index,
+                    event.value,
+                );
+            }
         }
 
         /// `velocity` is normalized to `[0, 1]`, matching nih-plug's own
@@ -389,6 +455,7 @@ mod imp {
         /// Plugins expose their routed host input as index 0, named "host".
         pub fn register_input(&self, index: usize, name: &str) {
             let mut state = self.0.lock().unwrap();
+            self.drain(&mut state);
             while state.inputs.len() <= index {
                 state.inputs.push(InputState::new(""));
             }
@@ -396,13 +463,7 @@ mod imp {
         }
 
         pub fn note_on_from(&self, input: usize, channel: u8, note: u8, velocity: f32) {
-            self.0.lock().unwrap().event(
-                input,
-                channel,
-                MidiValueKind::Note,
-                note,
-                velocity.max(0.0),
-            );
+            self.publish(input, channel, MidiValueKind::Note, note, velocity.max(0.0));
         }
 
         pub fn note_off_from(&self, input: usize, channel: u8, note: u8) {
@@ -410,21 +471,15 @@ mod imp {
         }
 
         pub fn poly_pressure_from(&self, input: usize, channel: u8, note: u8, pressure: f32) {
-            self.0
-                .lock()
-                .unwrap()
-                .event(input, channel, MidiValueKind::Aftertouch, note, pressure);
+            self.publish(input, channel, MidiValueKind::Aftertouch, note, pressure);
         }
 
         pub fn control_change_from(&self, input: usize, channel: u8, cc: u8, value: f32) {
-            self.0
-                .lock()
-                .unwrap()
-                .event(input, channel, MidiValueKind::Cc, cc, value);
+            self.publish(input, channel, MidiValueKind::Cc, cc, value);
         }
 
         pub fn channel_pressure_from(&self, input: usize, channel: u8, pressure: f32) {
-            self.0.lock().unwrap().event(
+            self.publish(
                 input,
                 channel,
                 MidiValueKind::ChannelAftertouch,
@@ -448,6 +503,7 @@ mod imp {
                 );
             }
             let mut state = self.0.lock().unwrap();
+            self.drain(&mut state);
             if state.bindings[slot].as_ref() != Some(&binding) {
                 state.binding_versions[slot] += 1;
                 state.bindings[slot] = Some(binding);
@@ -457,7 +513,9 @@ mod imp {
 
         pub fn set_cc_smooth(&self, index: usize, factor: f32) {
             if index < NUM_MIDI_CC {
-                self.0.lock().unwrap().cc_smooth_factor[index] = factor;
+                let mut state = self.0.lock().unwrap();
+                self.drain(&mut state);
+                state.cc_smooth_factor[index] = factor;
             }
         }
 
@@ -478,6 +536,7 @@ mod imp {
                 return;
             }
             let mut state = self.0.lock().unwrap();
+            self.drain(&mut state);
             state.slots[slot] = Some(EnvelopeSlot {
                 note,
                 filter,
@@ -560,6 +619,7 @@ mod imp {
 
         pub fn poll(&mut self) -> MidiFrame {
             let mut state = self.bridge.0.lock().unwrap();
+            self.bridge.drain(&mut state);
 
             let mut note = [0.0; NUM_MIDI_NOTES];
             for (i, v) in state.note_velocity.iter().enumerate() {
@@ -823,17 +883,62 @@ mod imp {
         }
 
         #[test]
+        fn producer_does_not_wait_for_the_render_state_lock() {
+            let bridge = MidiBridge::new();
+            let guard = bridge.0.lock().unwrap();
+            let producer = bridge.clone();
+            let (done, received) = std::sync::mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                producer.note_on(60, 0.75);
+                producer.control_change(1, 0.5);
+                done.send(()).unwrap();
+            });
+            let completed = received.recv_timeout(std::time::Duration::from_secs(1));
+            drop(guard);
+            worker.join().unwrap();
+            assert!(
+                completed.is_ok(),
+                "MIDI producer waited for the render state lock"
+            );
+            let frame = MidiPoller::new(bridge).poll();
+            assert_eq!(frame.velocity[60], 0.75);
+            assert_eq!(frame.cc[1], 0.5);
+        }
+
+        #[test]
+        fn queue_overrun_clears_notes_and_releases_envelopes_before_applying_new_events() {
+            let bridge = MidiBridge::new();
+            bridge.set_filtered_adsr_slot(0, 60, MidiFilter::default(), [0.0, 0.0, 1.0, 0.0]);
+            let mut poller = MidiPoller::new(bridge.clone());
+            bridge.note_on(60, 1.0);
+            assert_eq!(poller.poll().envelope[0], 1.0);
+            bridge.note_off(60);
+            for _ in 0..EVENT_CAPACITY {
+                bridge.control_change(1, 0.5);
+            }
+            let frame = poller.poll();
+            assert_eq!(frame.velocity[60], 0.0);
+            assert_eq!(frame.envelope[0], 0.0);
+            assert_eq!(frame.cc[1], 0.5);
+            bridge.note_on(61, 0.8);
+            assert_eq!(poller.poll().velocity[61], 0.8);
+        }
+
+        #[test]
         fn poly_aftertouch_sets_the_given_notes_value() {
             let bridge = MidiBridge::new();
             bridge.handle_raw_message(0, &[0xA0, 60, 100]);
-            assert_eq!(bridge.0.lock().unwrap().aftertouch[60], 100.0 / 127.0);
+            assert_eq!(MidiPoller::new(bridge).poll().aftertouch[60], 100.0 / 127.0);
         }
 
         #[test]
         fn channel_aftertouch_sets_the_shared_value_from_a_two_byte_message() {
             let bridge = MidiBridge::new();
             bridge.handle_raw_message(0, &[0xD0, 64]);
-            assert_eq!(bridge.0.lock().unwrap().channel_aftertouch, 64.0 / 127.0);
+            assert_eq!(
+                MidiPoller::new(bridge).poll().channel_aftertouch,
+                64.0 / 127.0
+            );
         }
 
         #[test]
@@ -841,7 +946,7 @@ mod imp {
             let bridge = MidiBridge::new();
             bridge.handle_raw_message(0, &[0xA0, 10, 20]);
             bridge.handle_raw_message(0, &[0xA0, 11, 40]);
-            let guard = bridge.0.lock().unwrap();
+            let guard = MidiPoller::new(bridge).poll();
             assert_eq!(guard.aftertouch[10], 20.0 / 127.0);
             assert_eq!(guard.aftertouch[11], 40.0 / 127.0);
         }
@@ -851,8 +956,8 @@ mod imp {
             let bridge = MidiBridge::new();
             bridge.handle_raw_message(0, &[0x90, 60]); // note-on missing its velocity byte
             bridge.handle_raw_message(0, &[0xA0, 60]); // poly aftertouch missing its value byte
-            let guard = bridge.0.lock().unwrap();
-            assert_eq!(guard.note_velocity[60], 0.0);
+            let guard = MidiPoller::new(bridge).poll();
+            assert_eq!(guard.velocity[60], 0.0);
             assert_eq!(guard.aftertouch[60], 0.0);
         }
 

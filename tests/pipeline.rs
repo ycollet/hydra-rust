@@ -20,6 +20,20 @@ fn ok_shader0(src: &str) -> String {
 }
 
 #[test]
+fn runaway_rhai_execution_returns_an_error_and_does_not_poison_later_evaluations() {
+    let start = std::time::Instant::now();
+    let error = eval("while true {}")
+        .err()
+        .expect("Infinite loop must stop");
+    assert!(
+        error.contains("200 ms") || error.contains("operations"),
+        "{error}"
+    );
+    assert!(start.elapsed() < std::time::Duration::from_secs(5));
+    assert!(eval("osc(10).out()").is_ok());
+}
+
+#[test]
 fn tileable_wraps_the_complete_graph_and_composes_with_later_operations() {
     let shader = ok_shader0(
         "noise(5).color(1,0.5,0.2).blend(osc(12).rotate(0.3),0.4)\

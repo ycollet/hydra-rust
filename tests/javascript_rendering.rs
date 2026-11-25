@@ -1,5 +1,6 @@
 #![cfg(all(feature = "javascript", target_os = "macos"))]
 
+use std::cell::RefCell;
 use std::ffi::{CString, c_void};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -27,6 +28,51 @@ unsafe extern "C" {
 
 struct NativeContext(*mut c_void);
 
+#[derive(Default, Clone)]
+struct GlCalls {
+    programs: Vec<u32>,
+    textures: usize,
+    readbacks: usize,
+}
+
+thread_local! {
+    static GL_CALLS: RefCell<GlCalls> = RefCell::default();
+}
+
+unsafe extern "C" fn counted_create_program() -> u32 {
+    let create: unsafe extern "C" fn() -> u32 = unsafe {
+        std::mem::transmute(dlsym(
+            (-2_isize) as *mut c_void,
+            c"glCreateProgram".as_ptr(),
+        ))
+    };
+    let program = unsafe { create() };
+    GL_CALLS.with_borrow_mut(|calls| calls.programs.push(program));
+    program
+}
+
+unsafe extern "C" fn counted_gen_textures(count: i32, textures: *mut u32) {
+    let generate: unsafe extern "C" fn(i32, *mut u32) =
+        unsafe { std::mem::transmute(dlsym((-2_isize) as *mut c_void, c"glGenTextures".as_ptr())) };
+    GL_CALLS.with_borrow_mut(|calls| calls.textures += count as usize);
+    unsafe { generate(count, textures) };
+}
+
+unsafe extern "C" fn counted_read_pixels(
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    format: u32,
+    kind: u32,
+    pixels: *mut c_void,
+) {
+    let read: unsafe extern "C" fn(i32, i32, i32, i32, u32, u32, *mut c_void) =
+        unsafe { std::mem::transmute(dlsym((-2_isize) as *mut c_void, c"glReadPixels".as_ptr())) };
+    GL_CALLS.with_borrow_mut(|calls| calls.readbacks += 1);
+    unsafe { read(x, y, width, height, format, kind, pixels) };
+}
+
 impl NativeContext {
     fn new() -> Self {
         const OPENGL_PROFILE: i32 = 99;
@@ -52,6 +98,14 @@ impl NativeContext {
     fn gl(&self) -> Arc<glow::Context> {
         Arc::new(unsafe {
             glow::Context::from_loader_function(|symbol| {
+                match symbol {
+                    "glCreateProgram" => {
+                        return counted_create_program as *const () as *const c_void;
+                    }
+                    "glGenTextures" => return counted_gen_textures as *const () as *const c_void,
+                    "glReadPixels" => return counted_read_pixels as *const () as *const c_void,
+                    _ => {}
+                }
                 let name = CString::new(symbol).unwrap();
                 dlsym((-2_isize) as *mut c_void, name.as_ptr()).cast_const()
             })
@@ -90,6 +144,50 @@ fn uniforms(values: [f32; 128]) -> RenderUniforms {
         midi_values: std::array::from_fn(|_| 0.0),
         osc: std::array::from_fn(|_| 0.0),
     }
+}
+
+#[test]
+fn graph_replacement_reuses_programs_and_targets_and_discards_only_failed_staging() {
+    let context = NativeContext::new();
+    let gl = context.gl();
+    let mut renderer = ShaderRenderer::new(gl.clone());
+    renderer.ensure_resolution_checked(8, 8).unwrap();
+    let graph = hydra_rust::eval("solid(0.2,0.3,0.4,1.0).blur(1.0).out(o0);").unwrap();
+    assert!(renderer.compile_result_atomic(&graph).is_empty());
+    let before = GL_CALLS.with_borrow(Clone::clone);
+    assert!(renderer.compile_result_atomic(&graph).is_empty());
+    let after = GL_CALLS.with_borrow(Clone::clone);
+    assert_eq!(after.programs, before.programs);
+    assert_eq!(after.textures, before.textures);
+
+    let changed = hydra_rust::eval("solid(0.6,0.3,0.4,1.0).blur(1.0).out(o0);").unwrap();
+    assert!(renderer.compile_result_atomic(&changed).is_empty());
+    let partial = GL_CALLS.with_borrow(Clone::clone);
+    assert_eq!(partial.programs.len(), before.programs.len() + 1);
+    assert_eq!(partial.textures, before.textures);
+    let mut invalid = hydra_rust::eval("solid(0.6,0.3,0.4,1.0).blur(1.0).out(o0);").unwrap();
+    invalid.shaders[1] = Some("void mainImage(out vec4 c,in vec2 st){c=vec4(1.0);}".into());
+    invalid.render_plan.passes[0] = "void mainImage(out vec4 c,in vec2 st){c=invalid;}".into();
+    assert!(!renderer.compile_result_atomic(&invalid).is_empty());
+    let failed = GL_CALLS.with_borrow(Clone::clone);
+    assert_eq!(failed.programs.len(), partial.programs.len() + 1);
+    unsafe {
+        assert!(!gl.is_program(glow::NativeProgram(
+            std::num::NonZeroU32::new(*failed.programs.last().unwrap()).unwrap()
+        )));
+    }
+    assert!(renderer.compile_result_atomic(&changed).is_empty());
+    assert_eq!(
+        GL_CALLS.with_borrow(|calls| calls.programs.len()),
+        failed.programs.len()
+    );
+    renderer.ensure_resolution_checked(16, 16).unwrap();
+    assert!(renderer.compile_result_atomic(&changed).is_empty());
+    assert_eq!(
+        GL_CALLS.with_borrow(|calls| calls.programs.len()),
+        failed.programs.len()
+    );
+    assert_eq!(unsafe { gl.get_error() }, glow::NO_ERROR);
 }
 
 #[test]
@@ -276,6 +374,59 @@ fn extended_gpu_passes_history_and_region_readback() {
         .unwrap();
         assert!((values[0] - 0.25).abs() < 0.005);
         assert!((values[1] - (0.25 * 0.2126 + 0.5 * 0.7152 + 0.75 * 0.0722)).abs() < 0.005);
+        assert_eq!(gl.get_parameter_i32(glow::READ_FRAMEBUFFER_BINDING), read);
+        assert_eq!(gl.get_parameter_i32(glow::DRAW_FRAMEBUFFER_BINDING), write);
+        assert_eq!(gl.get_parameter_i32(glow::PACK_ALIGNMENT), 8);
+        assert!(gl.is_enabled(glow::SCISSOR_TEST));
+        gl.disable(glow::SCISSOR_TEST);
+        js.reset(JavascriptSettings::default()).unwrap();
+        let mut script = "setFunction({name:'atlasRamp',type:'src',inputs:[],glsl:'return vec4(st.x,0.5,0.75,1.0);'});atlasRamp().out();".to_string();
+        for slot in 0..16 {
+            script.push_str(&format!(
+                "region(o0,{},0,0.25,1,{});",
+                (slot % 4) as f32 / 4.0,
+                slot % 5
+            ));
+        }
+        let atlas = js.eval(&script).unwrap();
+        assert!(renderer.compile_result_atomic(&atlas).is_empty());
+        draw(&renderer, [0.0; 128], 16.0);
+        let before = GL_CALLS.with_borrow(|calls| calls.readbacks);
+        let values = hydra_rust::renderer::read_regions(
+            &gl,
+            &renderer.snapshot(),
+            renderer.ping(),
+            [16, 16],
+            &atlas.regions,
+        )
+        .unwrap();
+        assert_eq!(GL_CALLS.with_borrow(|calls| calls.readbacks), before + 1);
+        for (slot, value) in values.iter().enumerate() {
+            let red = ((slot % 4) as f32 + 0.5) / 4.0;
+            let expected = match slot % 5 {
+                0 => red,
+                1 => 0.5,
+                2 => 0.75,
+                3 => 1.0,
+                _ => red * 0.2126 + 0.5 * 0.7152 + 0.75 * 0.0722,
+            };
+            assert!(
+                (value - expected).abs() < 0.005,
+                "region {slot}: {value} versus {expected}"
+            );
+        }
+        renderer.prepare_capture([4, 3]).unwrap();
+        let textures = GL_CALLS.with_borrow(|calls| calls.textures);
+        renderer.prepare_capture([4, 3]).unwrap();
+        assert_eq!(GL_CALLS.with_borrow(|calls| calls.textures), textures);
+        gl.enable(glow::SCISSOR_TEST);
+        let readbacks = GL_CALLS.with_borrow(|calls| calls.readbacks);
+        let (width, height, pixels) =
+            hydra_rust::renderer::read_capture(&gl, &renderer.snapshot(), [8, 8]).unwrap();
+        assert_eq!((width, height, pixels.len()), (4, 3, 36));
+        assert!((pixels[0] as i32 - 32).abs() <= 1);
+        assert!((pixels[9] as i32 - 223).abs() <= 1);
+        assert_eq!(GL_CALLS.with_borrow(|calls| calls.readbacks), readbacks + 1);
         assert_eq!(gl.get_parameter_i32(glow::READ_FRAMEBUFFER_BINDING), read);
         assert_eq!(gl.get_parameter_i32(glow::DRAW_FRAMEBUFFER_BINDING), write);
         assert_eq!(gl.get_parameter_i32(glow::PACK_ALIGNMENT), 8);
