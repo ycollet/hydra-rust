@@ -30,7 +30,7 @@ description = "Hydra visual synthesizer — Rhai scripting to GLSL, rendered via
 license = "AGPL-3.0-or-later"
 
 [dependencies]
-rquickjs = { version = "0.14", optional = true }
+rquickjs = { version = "0.14", optional = true, features = ["loader"] }
 rhai = { version = "1", features = ["no_module", "no_time"] }
 glow = "0.16"
 ab_glyph = "0.2"

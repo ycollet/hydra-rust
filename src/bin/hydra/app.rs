@@ -26,6 +26,7 @@ use hydra_rust::eval::SourceRequest;
 use hydra_rust::format_code;
 #[cfg(feature = "image_url")]
 use hydra_rust::imageload::ImageManager;
+use hydra_rust::javascript_settings::JavascriptSettings;
 #[cfg(feature = "midi")]
 use hydra_rust::midi::MidiManager;
 #[cfg(feature = "osc")]
@@ -52,7 +53,11 @@ struct Session {
     #[serde(default)]
     javascript: bool,
     #[serde(default)]
+    javascript_module: bool,
+    #[serde(default)]
     library_root: Option<PathBuf>,
+    #[serde(default)]
+    javascript_settings: JavascriptSettings,
     tempo: f32,
     font_size: f32,
     text_opacity: f32,
@@ -71,7 +76,9 @@ impl Default for Session {
         Self {
             code: String::new(),
             javascript: false,
+            javascript_module: false,
             library_root: None,
+            javascript_settings: JavascriptSettings::default(),
             tempo: 120.0,
             font_size: 20.0,
             text_opacity: 0.55,
@@ -82,18 +89,71 @@ impl Default for Session {
     }
 }
 
-/// A scene bank: a native port of HYDRACTRL's own 4-bank-x-16-slot scene
-/// storage (github.com/dxviie/HYDRACTRL). Each slot holds a saved Hydra
-/// sketch's source code, `None` when empty - no thumbnail preview (unlike
-/// HYDRACTRL's browser-canvas one), since there's no cheap equivalent here
-/// and it wasn't requested.
 const NUM_BANKS: usize = 4;
 const SLOTS_PER_BANK: usize = 16;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum ScriptLanguage {
+    #[default]
+    Rhai,
+    Javascript,
+}
+
+impl ScriptLanguage {
+    fn selected(javascript: bool) -> Self {
+        if javascript {
+            Self::Javascript
+        } else {
+            Self::Rhai
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+struct Scene {
+    code: String,
+    language: Option<ScriptLanguage>,
+    module: bool,
+}
+
+impl<'de> Deserialize<'de> for Scene {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum StoredScene {
+            Legacy(String),
+            Tagged {
+                code: String,
+                #[serde(default)]
+                language: Option<ScriptLanguage>,
+                #[serde(default)]
+                module: bool,
+            },
+        }
+        Ok(match StoredScene::deserialize(deserializer)? {
+            StoredScene::Legacy(code) => Self {
+                code,
+                language: None,
+                module: false,
+            },
+            StoredScene::Tagged {
+                code,
+                language,
+                module,
+            } => Self {
+                code,
+                language,
+                module,
+            },
+        })
+    }
+}
 
 #[derive(Serialize, Deserialize, Clone)]
 struct Bank {
     #[serde(default = "empty_slots")]
-    slots: Vec<Option<String>>,
+    slots: Vec<Option<Scene>>,
 }
 
 impl Default for Bank {
@@ -104,27 +164,61 @@ impl Default for Bank {
     }
 }
 
-fn empty_slots() -> Vec<Option<String>> {
+fn empty_slots() -> Vec<Option<Scene>> {
     vec![None; SLOTS_PER_BANK]
 }
 
-/// The on-disk `.bhr` ("bank hydra rust") export/import format - matches
-/// `Bank`'s own shape plus a version tag for future-proofing (not
-/// otherwise enforced yet).
+impl Bank {
+    fn assign_legacy_language(&mut self, language: ScriptLanguage) {
+        for scene in self.slots.iter_mut().flatten() {
+            scene.language.get_or_insert(language);
+        }
+    }
+}
+
+/// Keep older exports readable while newer exports carry each scene's language.
 #[derive(Serialize, Deserialize)]
 struct BankFile {
     version: u32,
-    slots: Vec<Option<String>>,
+    slots: Vec<Option<Scene>>,
 }
 
-/// The on-disk `.shr` ("slot hydra rust") format: a single saved sketch,
-/// versioned the same way `BankFile` is - `-ss`/`-sl`'s counterpart to
-/// `-bs`/`-bl`, for sharing or backing up one sketch rather than a whole
-/// bank. Not tied to any particular slot index (portable on its own).
+impl BankFile {
+    fn into_bank(self, legacy_language: ScriptLanguage) -> Result<Bank, String> {
+        if !matches!(self.version, 1 | 2) {
+            return Err(format!("Unsupported bank version: {}", self.version));
+        }
+        if self.slots.len() != SLOTS_PER_BANK {
+            return Err(format!("A bank must contain {SLOTS_PER_BANK} slots"));
+        }
+        let mut bank = Bank { slots: self.slots };
+        bank.assign_legacy_language(legacy_language);
+        Ok(bank)
+    }
+}
+
+/// Slot exports keep language metadata without depending on a bank or slot index.
 #[derive(Serialize, Deserialize)]
 struct SlotFile {
     version: u32,
     code: String,
+    #[serde(default)]
+    language: Option<ScriptLanguage>,
+    #[serde(default)]
+    module: bool,
+}
+
+impl SlotFile {
+    fn into_scene(self, legacy_language: ScriptLanguage) -> Result<Scene, String> {
+        if !matches!(self.version, 1 | 2) {
+            return Err(format!("Unsupported slot version: {}", self.version));
+        }
+        Ok(Scene {
+            code: self.code,
+            language: Some(self.language.unwrap_or(legacy_language)),
+            module: self.module,
+        })
+    }
 }
 
 fn session_path() -> PathBuf {
@@ -198,7 +292,13 @@ pub struct HydraApp {
     nsm: Option<hydra_rust::nsm::NsmClient>,
     code: String,
     javascript: bool,
+    javascript_module: bool,
     library_root: PathBuf,
+    javascript_settings: JavascriptSettings,
+    #[cfg(feature = "javascript")]
+    javascript_settings_draft: JavascriptSettings,
+    #[cfg(feature = "javascript")]
+    javascript_reset_confirmation: bool,
     #[cfg(feature = "javascript")]
     javascript_runtime: Option<hydra_rust::javascript::JavascriptRuntime>,
     #[cfg(feature = "javascript")]
@@ -318,14 +418,30 @@ impl HydraApp {
         if session.current_bank >= NUM_BANKS {
             session.current_bank = 0;
         }
+        for bank in &mut session.banks {
+            bank.assign_legacy_language(ScriptLanguage::selected(session.javascript));
+        }
+        let cli_javascript = javascript || library_root.is_some();
+        let file_is_module = file_arg
+            .as_ref()
+            .or(session.current_file.as_ref())
+            .is_some_and(|path| path.extension().is_some_and(|extension| extension == "mjs"));
+        let startup_javascript = cli_javascript || session.javascript;
+        let startup_module = file_is_module || session.javascript_module;
         let mut app = Self {
             #[cfg(feature = "nsm")]
             nsm,
             code: session.code,
-            javascript: javascript || library_root.is_some() || session.javascript,
+            javascript: startup_javascript,
+            javascript_module: startup_module,
             library_root: library_root
                 .or(session.library_root)
                 .unwrap_or_else(|| PathBuf::from(".")),
+            #[cfg(feature = "javascript")]
+            javascript_settings_draft: session.javascript_settings.clone(),
+            javascript_settings: session.javascript_settings,
+            #[cfg(feature = "javascript")]
+            javascript_reset_confirmation: false,
             #[cfg(feature = "javascript")]
             javascript_runtime: None,
             #[cfg(feature = "javascript")]
@@ -385,8 +501,14 @@ impl HydraApp {
         };
 
         if let Some(path) = bank_load {
-            match std::fs::read_to_string(&path).map(|s| serde_json::from_str::<BankFile>(&s)) {
-                Ok(Ok(file)) => app.banks[app.current_bank].slots = file.slots,
+            match std::fs::read_to_string(&path).map(|s| {
+                serde_json::from_str::<BankFile>(&s)
+                    .map_err(|error| error.to_string())
+                    .and_then(|file| file.into_bank(ScriptLanguage::selected(cli_javascript)))
+            }) {
+                Ok(Ok(bank)) => {
+                    app.banks[app.current_bank] = bank;
+                }
                 Ok(Err(e)) => log::warn!("failed to parse bank {}: {e}", path.display()),
                 Err(e) => log::warn!("failed to read bank {}: {e}", path.display()),
             }
@@ -394,9 +516,15 @@ impl HydraApp {
 
         let mut loaded_from_file = false;
         if let Some(path) = slot_load {
-            match std::fs::read_to_string(&path).map(|s| serde_json::from_str::<SlotFile>(&s)) {
-                Ok(Ok(file)) => {
-                    app.code = file.code;
+            match std::fs::read_to_string(&path).map(|s| {
+                serde_json::from_str::<SlotFile>(&s)
+                    .map_err(|error| error.to_string())
+                    .and_then(|file| file.into_scene(ScriptLanguage::selected(cli_javascript)))
+            }) {
+                Ok(Ok(scene)) => {
+                    app.code = scene.code;
+                    app.javascript = scene.language == Some(ScriptLanguage::Javascript);
+                    app.javascript_module = scene.module;
                     // Not a `.hydra` file - `Ctrl+S` shouldn't silently
                     // overwrite the `.shr` JSON with plain code text, so
                     // leave `current_file` unset (prompts for a new path).
@@ -411,6 +539,8 @@ impl HydraApp {
             match std::fs::read_to_string(&path) {
                 Ok(contents) => {
                     app.code = contents;
+                    app.javascript = startup_javascript;
+                    app.javascript_module = startup_module;
                     app.current_file = Some(path);
                     loaded_from_file = true;
                 }
@@ -441,8 +571,10 @@ impl HydraApp {
         // to `Alt+X`, so this just happens immediately instead.
         if let Some(path) = slot_save {
             let file = SlotFile {
-                version: 1,
+                version: 2,
                 code: app.code.clone(),
+                language: Some(ScriptLanguage::selected(app.javascript)),
+                module: app.module_mode(),
             };
             if let Ok(json) = serde_json::to_string_pretty(&file) {
                 let _ = std::fs::write(&path, json);
@@ -456,7 +588,9 @@ impl HydraApp {
         Session {
             code: self.code.clone(),
             javascript: self.javascript,
+            javascript_module: self.javascript_module,
             library_root: Some(self.library_root.clone()),
+            javascript_settings: self.javascript_settings.clone(),
             tempo: self.tempo,
             font_size: self.font_size,
             text_opacity: self.text_opacity,
@@ -470,17 +604,31 @@ impl HydraApp {
     /// evaluates it immediately - as explicit a user action as `Ctrl+O`'s
     /// `load_file` (which also auto-evaluates with no confirmation gate).
     fn recall_slot(&mut self, index: usize) {
-        if let Some(code) = self.banks[self.current_bank].slots[index].clone() {
-            self.code = code;
+        if let Some(scene) = self.banks[self.current_bank].slots[index].clone() {
+            self.code = scene.code;
+            self.javascript = scene.language.unwrap_or_default() == ScriptLanguage::Javascript;
+            self.javascript_module = scene.module;
             self.current_file = None;
             self.active_slot = Some(index);
             self.evaluate();
         }
     }
 
+    fn module_mode(&self) -> bool {
+        self.javascript
+            && (self.javascript_module
+                || self.current_file.as_ref().is_some_and(|path| {
+                    path.extension().is_some_and(|extension| extension == "mjs")
+                }))
+    }
+
     /// Saves the editor's current code into slot `index` of the active bank.
     fn save_slot(&mut self, index: usize) {
-        self.banks[self.current_bank].slots[index] = Some(self.code.clone());
+        self.banks[self.current_bank].slots[index] = Some(Scene {
+            code: self.code.clone(),
+            language: Some(ScriptLanguage::selected(self.javascript)),
+            module: self.module_mode(),
+        });
         self.active_slot = Some(index);
     }
 
@@ -501,7 +649,7 @@ impl HydraApp {
         });
         if let Some(p) = path {
             let file = BankFile {
-                version: 1,
+                version: 2,
                 slots: self.banks[self.current_bank].slots.clone(),
             };
             if let Ok(json) = serde_json::to_string_pretty(&file) {
@@ -516,10 +664,23 @@ impl HydraApp {
         if let Some(p) = rfd::FileDialog::new()
             .add_filter("Hydra Bank", &["bhr"])
             .pick_file()
-            && let Ok(contents) = std::fs::read_to_string(&p)
-            && let Ok(file) = serde_json::from_str::<BankFile>(&contents)
         {
-            self.banks[self.current_bank].slots = file.slots;
+            let result = std::fs::read_to_string(&p)
+                .map_err(|error| error.to_string())
+                .and_then(|contents| {
+                    serde_json::from_str::<BankFile>(&contents).map_err(|error| error.to_string())
+                })
+                .and_then(|file| file.into_bank(ScriptLanguage::Rhai));
+            match result {
+                Ok(bank) => {
+                    self.banks[self.current_bank] = bank;
+                    self.active_slot = None;
+                }
+                Err(error) => {
+                    log::error!("Bank import failed: {error}");
+                    self.error = Some((error, Instant::now()));
+                }
+            }
         }
     }
 
@@ -649,21 +810,34 @@ impl HydraApp {
                         .canonicalize()
                         .map_err(|error| format!("library root: {error}"))
                         .and_then(|root| {
-                            hydra_rust::javascript::JavascriptRuntime::new(root.clone()).map(
-                                |runtime| {
-                                    self.library_root = root;
-                                    self.javascript_runtime = Some(runtime);
-                                },
+                            hydra_rust::javascript::JavascriptRuntime::with_settings(
+                                root.clone(),
+                                self.javascript_settings.clone(),
                             )
+                            .map(|runtime| {
+                                self.library_root = root;
+                                self.javascript_runtime = Some(runtime);
+                            })
                         })
                 } else {
                     Ok(())
                 };
                 initialized.and_then(|()| {
-                    self.javascript_runtime
+                    let filename = match &self.current_file {
+                        Some(path) => std::path::absolute(path)
+                            .map_err(|error| format!("Script path: {error}"))?,
+                        None => self.library_root.join("sketch.js"),
+                    };
+                    let runtime = self
+                        .javascript_runtime
                         .as_mut()
-                        .expect("JavaScript runtime initialized")
-                        .eval(if code.is_empty() { "hush()" } else { code })
+                        .expect("JavaScript runtime initialized");
+                    let code = if code.is_empty() { "hush()" } else { code };
+                    if self.javascript_module {
+                        runtime.eval_module_named(code, &filename)
+                    } else {
+                        runtime.eval_named(code, &filename)
+                    }
                 })
             }
             #[cfg(not(feature = "javascript"))]
@@ -895,7 +1069,7 @@ impl HydraApp {
             Some(p.clone())
         } else {
             rfd::FileDialog::new()
-                .add_filter("Hydra scripts", &["hydra", "js"])
+                .add_filter("Hydra scripts", &["hydra", "js", "mjs"])
                 .set_file_name(if self.javascript {
                     "patch.js"
                 } else {
@@ -911,12 +1085,13 @@ impl HydraApp {
 
     fn load_file(&mut self) {
         let path = rfd::FileDialog::new()
-            .add_filter("Hydra scripts", &["hydra", "js"])
+            .add_filter("Hydra scripts", &["hydra", "js", "mjs"])
             .pick_file();
         if let Some(p) = path
             && let Ok(contents) = std::fs::read_to_string(&p)
         {
             self.code = contents;
+            self.javascript_module = p.extension().is_some_and(|extension| extension == "mjs");
             self.current_file = Some(p);
             #[cfg(feature = "nsm")]
             if self.nsm.is_some() {
@@ -1168,156 +1343,260 @@ impl HydraApp {
         });
     }
 
+    #[cfg(feature = "javascript")]
+    fn reset_javascript(&mut self) {
+        let settings = self.javascript_settings_draft.clone();
+        let reset = match &mut self.javascript_runtime {
+            Some(runtime) => runtime.reset(settings.clone()),
+            None => hydra_rust::javascript::JavascriptRuntime::with_settings(
+                self.library_root.clone(),
+                settings.clone(),
+            )
+            .map(|runtime| self.javascript_runtime = Some(runtime)),
+        };
+        match reset {
+            Ok(()) => {
+                self.javascript_settings = settings;
+                self.library_root = self
+                    .javascript_runtime
+                    .as_ref()
+                    .expect("JavaScript runtime reset")
+                    .library_root()
+                    .to_path_buf();
+                self.javascript_active = false;
+                self.javascript_suspended = false;
+                self.javascript_reset_confirmation = false;
+                self.error = None;
+                log::info!("JavaScript interpreter reset; evaluate to apply its new state");
+            }
+            Err(error) => {
+                log::error!("JavaScript reset failed: {error}");
+                self.error = Some((error, Instant::now()));
+            }
+        }
+    }
+
     fn show_sidebar(&mut self, ctx: &egui::Context) {
         egui::SidePanel::right("options")
             .exact_width(200.0)
             .show(ctx, |ui| {
-                ui.heading("Options");
-                ui.add_space(8.0);
-                #[cfg(feature = "javascript")]
-                {
-                    ui.checkbox(&mut self.javascript, "JavaScript scripting");
-                    ui.small("Evaluate to apply a language change.");
-                    ui.small(format!("Libraries: {}", self.library_root.display()));
-                    if self.javascript_suspended {
-                        ui.colored_label(
-                            Color32::RED,
-                            "Callbacks paused. Fix the script and evaluate.",
-                        );
-                    }
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    ui.heading("Options");
                     ui.add_space(8.0);
-                }
-                #[cfg(not(feature = "javascript"))]
-                if self.javascript {
-                    ui.colored_label(Color32::RED, "JavaScript support is not compiled in.");
-                    if ui.button("Use Rhai instead").clicked() {
-                        self.javascript = false;
-                    }
-                }
-
-                ui.label("Tempo (BPM)");
-                ui.add(egui::Slider::new(&mut self.tempo, 20.0..=300.0));
-
-                ui.add_space(4.0);
-                ui.label("Font size");
-                ui.add(egui::Slider::new(&mut self.font_size, 10.0..=40.0));
-
-                ui.add_space(4.0);
-                ui.label("Text opacity");
-                ui.add(egui::Slider::new(&mut self.text_opacity, 0.0..=1.0));
-
-                ui.add_space(4.0);
-                ui.checkbox(&mut self.editor_visible, "Editor visible");
-
-                ui.add_space(12.0);
-                ui.separator();
-                ui.add_space(4.0);
-
-                #[cfg(feature = "webcam")]
-                {
-                    ui.horizontal(|ui| {
-                        ui.label("Cameras");
-                        if ui.small_button("Refresh").clicked() {
-                            self.source_manager.refresh_cameras();
+                    #[cfg(feature = "javascript")]
+                    {
+                        ui.checkbox(&mut self.javascript, "JavaScript scripting");
+                        ui.add_enabled(
+                            self.javascript,
+                            egui::Checkbox::new(
+                                &mut self.javascript_module,
+                                "Evaluate as a module",
+                            ),
+                        );
+                        ui.small("Evaluate to apply a language change.");
+                        ui.small(format!("Libraries: {}", self.library_root.display()));
+                        if self.javascript
+                            && !self.javascript_active
+                            && self.javascript_runtime.is_some()
+                        {
+                            ui.small("Evaluate to activate this JavaScript interpreter.");
                         }
-                    });
-                    let cameras = self.source_manager.cameras();
-                    if cameras.is_empty() {
-                        ui.small("No cameras found");
-                    } else {
-                        for cam in cameras {
-                            ui.small(format!("[{}] {}", cam.index, cam.name));
+                        if self.javascript_suspended {
+                            ui.colored_label(
+                                Color32::RED,
+                                "Callbacks paused. Fix the script and evaluate.",
+                            );
+                        }
+                        if ui.button("Reset JavaScript interpreter").clicked() {
+                            self.javascript_settings_draft = self.javascript_settings.clone();
+                            self.javascript_reset_confirmation = true;
+                        }
+                        ui.collapsing("JavaScript runtime limits", |ui| {
+                            let settings = &mut self.javascript_settings_draft;
+                            ui.add(
+                                egui::Slider::new(&mut settings.execution_ms, 1..=2000)
+                                    .text("Time (ms)"),
+                            );
+                            ui.add(
+                                egui::Slider::new(&mut settings.memory_mib, 8..=256)
+                                    .text("Heap (MiB)"),
+                            );
+                            ui.add(
+                                egui::Slider::new(&mut settings.stack_kib, 128..=2048)
+                                    .text("Stack (KiB)"),
+                            );
+                            ui.add(
+                                egui::Slider::new(&mut settings.script_kib, 1..=4096)
+                                    .text("Script (KiB)"),
+                            );
+                            ui.add(
+                                egui::Slider::new(&mut settings.library_kib, 1..=4096)
+                                    .text("Library (KiB)"),
+                            );
+                            ui.add(
+                                egui::Slider::new(&mut settings.loaded_mib, 1..=64)
+                                    .text("Loaded (MiB)"),
+                            );
+                            ui.add(
+                                egui::Slider::new(&mut settings.pending_jobs, 1..=4096)
+                                    .text("Promise jobs"),
+                            );
+                            ui.small("Applying limits resets JavaScript state.");
+                            if ui.button("Apply limits and reset").clicked() {
+                                self.javascript_reset_confirmation = true;
+                            }
+                        });
+                        if self.javascript_reset_confirmation {
+                            ui.colored_label(
+                                Color32::YELLOW,
+                                "Clear JavaScript variables, libraries, and modules?",
+                            );
+                            ui.small(
+                                "Current shaders keep their last callback values until evaluation.",
+                            );
+                            ui.horizontal(|ui| {
+                                if ui.button("Reset now").clicked() {
+                                    self.reset_javascript();
+                                }
+                                if ui.button("Cancel").clicked() {
+                                    self.javascript_reset_confirmation = false;
+                                }
+                            });
+                        }
+                        ui.add_space(8.0);
+                    }
+                    #[cfg(not(feature = "javascript"))]
+                    if self.javascript {
+                        ui.colored_label(Color32::RED, "JavaScript support is not compiled in.");
+                        if ui.button("Use Rhai instead").clicked() {
+                            self.javascript = false;
                         }
                     }
+
+                    ui.label("Tempo (BPM)");
+                    ui.add(egui::Slider::new(&mut self.tempo, 20.0..=300.0));
 
                     ui.add_space(4.0);
-                    for slot in 0..NUM_SOURCES {
-                        match self.source_manager.status(slot) {
-                            CameraStatus::Idle => {}
-                            CameraStatus::Opening { camera_index } => {
-                                ui.small(format!("s{slot}: opening cam {camera_index}..."));
-                            }
-                            CameraStatus::Active {
-                                camera_name,
-                                width,
-                                height,
-                                ..
-                            } => {
-                                ui.small(format!("s{slot}: {camera_name} ({width}x{height})"));
-                            }
-                            CameraStatus::Error { message, .. } => {
-                                ui.colored_label(
-                                    Color32::from_rgb(255, 80, 80),
-                                    format!("s{slot}: {message}"),
-                                );
-                            }
-                        }
-                    }
-                }
+                    ui.label("Font size");
+                    ui.add(egui::Slider::new(&mut self.font_size, 10.0..=40.0));
 
-                ui.add_space(12.0);
-                ui.separator();
-                ui.add_space(4.0);
-                ui.label(format!("Bank {} / {NUM_BANKS}", self.current_bank + 1));
-                ui.horizontal_wrapped(|ui| {
-                    let slots = self.banks[self.current_bank].slots.clone();
-                    for (i, slot) in slots.iter().enumerate() {
-                        let label = format!("{i:X}");
-                        let filled = slot.is_some();
-                        let active = self.active_slot == Some(i);
-                        let color = if active {
-                            Color32::from_rgb(255, 255, 255)
-                        } else if filled {
-                            Color32::from_rgb(255, 0, 200)
+                    ui.add_space(4.0);
+                    ui.label("Text opacity");
+                    ui.add(egui::Slider::new(&mut self.text_opacity, 0.0..=1.0));
+
+                    ui.add_space(4.0);
+                    ui.checkbox(&mut self.editor_visible, "Editor visible");
+
+                    ui.add_space(12.0);
+                    ui.separator();
+                    ui.add_space(4.0);
+
+                    #[cfg(feature = "webcam")]
+                    {
+                        ui.horizontal(|ui| {
+                            ui.label("Cameras");
+                            if ui.small_button("Refresh").clicked() {
+                                self.source_manager.refresh_cameras();
+                            }
+                        });
+                        let cameras = self.source_manager.cameras();
+                        if cameras.is_empty() {
+                            ui.small("No cameras found");
                         } else {
-                            Color32::from_gray(90)
-                        };
-                        let response = ui.add(
-                            egui::Button::new(egui::RichText::new(label).color(color)).small(),
-                        );
-                        if response.clicked() {
-                            // Mirror the Alt(+Shift)+<hex> keyboard shortcuts: a plain click
-                            // recalls the slot, Shift+click saves the editor's current code
-                            // into it. Without this, mouse-only users had no way to save at
-                            // all - clicking a slot always overwrote the editor, silently
-                            // discarding any code that was never bound to a slot yet (e.g.
-                            // typed before ever using the keyboard shortcut).
-                            if ui.input(|i| i.modifiers.shift) {
-                                self.save_slot(i);
-                            } else {
-                                self.recall_slot(i);
+                            for cam in cameras {
+                                ui.small(format!("[{}] {}", cam.index, cam.name));
                             }
                         }
-                        response.on_hover_text("Click: recall  •  Shift+click: save");
-                    }
-                });
 
-                ui.add_space(12.0);
-                ui.separator();
-                if let Some(ref p) = self.current_file {
-                    ui.small(
-                        p.file_name()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                            .to_string(),
-                    );
-                }
-                ui.add_space(4.0);
-                ui.small("Tab — toggle this panel");
-                ui.small("Ctrl+Enter — evaluate line");
-                ui.small("Alt+Enter — evaluate block");
-                ui.small("Ctrl+Shift+Enter — evaluate all");
-                ui.small("Ctrl+Alt+Enter — evaluate selection");
-                ui.small("Ctrl+Shift+H — toggle editor");
-                ui.small("Ctrl+S — save");
-                ui.small("Ctrl+O — open");
-                ui.small("Ctrl+P / Ctrl+Shift+S — screenshot");
-                ui.small("Ctrl+/ — toggle comment");
-                ui.small("Ctrl+Shift+F — format code");
-                ui.small("Alt+0-9/A-F — recall slot");
-                ui.small("Alt+Shift+0-9/A-F — save slot");
-                ui.small("Alt+←/→ — cycle bank");
-                ui.small("Alt+X / Alt+I — export/import bank");
+                        ui.add_space(4.0);
+                        for slot in 0..NUM_SOURCES {
+                            match self.source_manager.status(slot) {
+                                CameraStatus::Idle => {}
+                                CameraStatus::Opening { camera_index } => {
+                                    ui.small(format!("s{slot}: opening cam {camera_index}..."));
+                                }
+                                CameraStatus::Active {
+                                    camera_name,
+                                    width,
+                                    height,
+                                    ..
+                                } => {
+                                    ui.small(format!("s{slot}: {camera_name} ({width}x{height})"));
+                                }
+                                CameraStatus::Error { message, .. } => {
+                                    ui.colored_label(
+                                        Color32::from_rgb(255, 80, 80),
+                                        format!("s{slot}: {message}"),
+                                    );
+                                }
+                            }
+                        }
+                    }
+
+                    ui.add_space(12.0);
+                    ui.separator();
+                    ui.add_space(4.0);
+                    ui.label(format!("Bank {} / {NUM_BANKS}", self.current_bank + 1));
+                    ui.horizontal_wrapped(|ui| {
+                        let slots = self.banks[self.current_bank].slots.clone();
+                        for (i, slot) in slots.iter().enumerate() {
+                            let label = format!("{i:X}");
+                            let filled = slot.is_some();
+                            let active = self.active_slot == Some(i);
+                            let color = if active {
+                                Color32::from_rgb(255, 255, 255)
+                            } else if filled {
+                                Color32::from_rgb(255, 0, 200)
+                            } else {
+                                Color32::from_gray(90)
+                            };
+                            let response = ui.add(
+                                egui::Button::new(egui::RichText::new(label).color(color)).small(),
+                            );
+                            if response.clicked() {
+                                // Mirror the Alt(+Shift)+<hex> keyboard shortcuts: a plain click
+                                // recalls the slot, Shift+click saves the editor's current code
+                                // into it. Without this, mouse-only users had no way to save at
+                                // all - clicking a slot always overwrote the editor, silently
+                                // discarding any code that was never bound to a slot yet (e.g.
+                                // typed before ever using the keyboard shortcut).
+                                if ui.input(|i| i.modifiers.shift) {
+                                    self.save_slot(i);
+                                } else {
+                                    self.recall_slot(i);
+                                }
+                            }
+                            response.on_hover_text("Click: recall  •  Shift+click: save");
+                        }
+                    });
+
+                    ui.add_space(12.0);
+                    ui.separator();
+                    if let Some(ref p) = self.current_file {
+                        ui.small(
+                            p.file_name()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .to_string(),
+                        );
+                    }
+                    ui.add_space(4.0);
+                    ui.small("Tab — toggle this panel");
+                    ui.small("Ctrl+Enter — evaluate line");
+                    ui.small("Alt+Enter — evaluate block");
+                    ui.small("Ctrl+Shift+Enter — evaluate all");
+                    ui.small("Ctrl+Alt+Enter — evaluate selection");
+                    ui.small("Ctrl+Shift+H — toggle editor");
+                    ui.small("Ctrl+S — save");
+                    ui.small("Ctrl+O — open");
+                    ui.small("Ctrl+P / Ctrl+Shift+S — screenshot");
+                    ui.small("Ctrl+/ — toggle comment");
+                    ui.small("Ctrl+Shift+F — format code");
+                    ui.small("Alt+0-9/A-F — recall slot");
+                    ui.small("Alt+Shift+0-9/A-F — save slot");
+                    ui.small("Alt+←/→ — cycle bank");
+                    ui.small("Alt+X / Alt+I — export/import bank");
+                });
             });
     }
 
@@ -1677,9 +1956,15 @@ impl eframe::App for HydraApp {
         // the slot being left. Cheap: only actually clones/writes when
         // the code has changed since the last frame.
         if let Some(idx) = self.active_slot
-            && self.banks[self.current_bank].slots[idx].as_deref() != Some(self.code.as_str())
+            && self.banks[self.current_bank].slots[idx]
+                .as_ref()
+                .is_none_or(|scene| {
+                    scene.code != self.code
+                        || scene.language != Some(ScriptLanguage::selected(self.javascript))
+                        || scene.module != self.module_mode()
+                })
         {
-            self.banks[self.current_bank].slots[idx] = Some(self.code.clone());
+            self.save_slot(idx);
         }
         #[cfg(feature = "nsm")]
         if let Some(client) = &self.nsm
@@ -2144,25 +2429,37 @@ mod tests {
     #[test]
     fn bank_file_round_trips_through_json() {
         let file = BankFile {
-            version: 1,
-            slots: vec![Some("osc(60).out()".to_string()), None, None],
+            version: 2,
+            slots: vec![
+                Some(Scene {
+                    code: "osc(60).out()".into(),
+                    language: Some(ScriptLanguage::Javascript),
+                    module: true,
+                }),
+                None,
+                None,
+            ],
         };
         let json = serde_json::to_string(&file).unwrap();
         let parsed: BankFile = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.version, 1);
+        assert_eq!(parsed.version, 2);
         assert_eq!(parsed.slots, file.slots);
     }
 
     #[test]
     fn slot_file_round_trips_through_json() {
         let file = SlotFile {
-            version: 1,
+            version: 2,
             code: "osc(60).out()".to_string(),
+            language: Some(ScriptLanguage::Javascript),
+            module: true,
         };
         let json = serde_json::to_string(&file).unwrap();
         let parsed: SlotFile = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.version, 1);
+        assert_eq!(parsed.version, 2);
         assert_eq!(parsed.code, file.code);
+        assert_eq!(parsed.language, file.language);
+        assert_eq!(parsed.module, file.module);
     }
 
     #[test]
@@ -2170,6 +2467,91 @@ mod tests {
         let bank = Bank::default();
         assert_eq!(bank.slots.len(), SLOTS_PER_BANK);
         assert!(bank.slots.iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn legacy_scenes_inherit_language_without_overwriting_tagged_scenes() {
+        let mut bank: Bank = serde_json::from_str(
+            r#"{"slots":["osc(1).out()",{"code":"osc(2).out()","language":"rhai"},null]}"#,
+        )
+        .unwrap();
+        bank.assign_legacy_language(ScriptLanguage::Javascript);
+        assert_eq!(
+            bank.slots[0].as_ref().unwrap().language,
+            Some(ScriptLanguage::Javascript)
+        );
+        assert_eq!(
+            bank.slots[1].as_ref().unwrap().language,
+            Some(ScriptLanguage::Rhai)
+        );
+        let restored: Bank = serde_json::from_str(&serde_json::to_string(&bank).unwrap()).unwrap();
+        assert_eq!(restored.slots, bank.slots);
+        let legacy: SlotFile =
+            serde_json::from_str(r#"{"version":1,"code":"osc(1).out()"}"#).unwrap();
+        assert!(legacy.language.is_none());
+        assert!(!legacy.module);
+        assert!(!bank.slots[0].as_ref().unwrap().module);
+        assert!(!bank.slots[1].as_ref().unwrap().module);
+        assert!(serde_json::from_str::<Scene>(r#"{"code":"osc()","language":"python"}"#).is_err());
+        let legacy = SlotFile {
+            version: 1,
+            code: "osc(1).out()".into(),
+            language: None,
+            module: false,
+        };
+        assert_eq!(
+            legacy
+                .into_scene(ScriptLanguage::Javascript)
+                .unwrap()
+                .language,
+            Some(ScriptLanguage::Javascript)
+        );
+        let tagged = SlotFile {
+            version: 2,
+            code: "osc(2).out()".into(),
+            language: Some(ScriptLanguage::Rhai),
+            module: false,
+        };
+        assert_eq!(
+            tagged
+                .into_scene(ScriptLanguage::Javascript)
+                .unwrap()
+                .language,
+            Some(ScriptLanguage::Rhai)
+        );
+        assert!(
+            BankFile {
+                version: 2,
+                slots: vec![]
+            }
+            .into_bank(ScriptLanguage::Rhai)
+            .is_err()
+        );
+        assert!(
+            SlotFile {
+                version: 3,
+                code: "".into(),
+                language: None,
+                module: false,
+            }
+            .into_scene(ScriptLanguage::Rhai)
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn sessions_preserve_runtime_limits_and_legacy_defaults() {
+        let mut session = Session::default();
+        session.javascript_settings.execution_ms = 50;
+        session.javascript_settings.library_kib = 256;
+        let restored: Session =
+            serde_json::from_str(&serde_json::to_string(&session).unwrap()).unwrap();
+        assert_eq!(restored.javascript_settings, session.javascript_settings);
+        let old: Session = serde_json::from_str(
+            r#"{"code":"","tempo":120,"font_size":20,"text_opacity":0.5,"current_file":null}"#,
+        )
+        .unwrap();
+        assert_eq!(old.javascript_settings, JavascriptSettings::default());
     }
 
     #[test]
@@ -2186,6 +2568,7 @@ mod tests {
         }"#;
         let session: Session = serde_json::from_str(old_json).unwrap();
         assert!(!session.javascript);
+        assert!(!session.javascript_module);
         assert!(session.library_root.is_none());
         assert!(session.banks.is_empty());
         assert_eq!(session.current_bank, 0);
@@ -2196,6 +2579,7 @@ mod tests {
         let mut session = Session {
             code: "osc(10).out()".into(),
             javascript: true,
+            javascript_module: true,
             library_root: Some(PathBuf::from("examples/javascript")),
             tempo: 137.0,
             font_size: 24.0,
@@ -2204,11 +2588,16 @@ mod tests {
             banks: vec![Bank::default(); NUM_BANKS],
             ..Default::default()
         };
-        session.banks[2].slots[5] = Some("noise(2).out()".into());
+        session.banks[2].slots[5] = Some(Scene {
+            code: "noise(2).out()".into(),
+            language: Some(ScriptLanguage::Javascript),
+            module: true,
+        });
         let restored: Session =
             serde_json::from_slice(&serde_json::to_vec(&session).unwrap()).unwrap();
         assert_eq!(restored.code, session.code);
         assert!(restored.javascript);
+        assert!(restored.javascript_module);
         assert_eq!(restored.library_root, session.library_root);
         assert_eq!(restored.tempo, session.tempo);
         assert_eq!(restored.font_size, session.font_size);

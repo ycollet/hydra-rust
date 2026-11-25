@@ -259,7 +259,17 @@ hydra -sl mysketch.shr             # --slot-load: load a .shr file's code at sta
 hydra -ss mysketch.shr             # --slot-save: snapshot the starting code out to this path once, at launch
 ```
 
-`.shr` ("slot hydra rust") is the single-sketch counterpart to `.bhr`: just `{"version": 1, "code": "..."}`, versus `.bhr`'s 16-element `slots` array. It's mostly a convenience/consistency format — a plain `.hydra` file already does the "one saved sketch" job just fine — but it shares `.bhr`'s versioned-JSON envelope (useful if either format ever needs extra metadata later) and gives `-ss`/`-sl` a natural single-sketch analogue to `-bs`/`-bl`. Unlike `-bs` (which pre-fills `Alt+X`'s target for later), `-ss` has no keybinding to defer to, so it writes immediately at launch instead.
+`.shr` ("slot hydra rust") stores one sketch; `.bhr` stores a bank of 16 scenes.
+Version 2 exports include each scene's scripting language.
+For example, a slot can contain `{"version":2,"code":"osc(10).out()","language":"javascript"}`.
+Recalling a scene selects its stored language before evaluation.
+Legacy session scenes inherit the session's saved language.
+Legacy imported files default to Rhai unless a command-line JavaScript selection overrides their missing language.
+Explicit language metadata takes precedence over that command-line selection.
+For example, a tagged Rhai slot remains Rhai when loaded with `--javascript`.
+Current builds read both export versions; older builds cannot read version 2 exports.
+The `-ss` option writes immediately at launch.
+The `-bs` option instead sets the destination for later bank exports.
 
 ## Feature-gated functions
 
@@ -303,7 +313,10 @@ The options sidebar also offers a JavaScript checkbox.
 Evaluate a sketch after changing the checkbox to apply the selected language.
 The session stores the selected language and library root.
 JavaScript variables do not persist across application restarts.
-Scene banks store source text and use the currently selected language when recalled.
+Scene banks store source text and its scripting language.
+Recalling a scene automatically selects its saved language.
+Scenes also preserve whether the editor explicitly selected module evaluation.
+For example, a saved `.mjs` scene keeps module scope after recall.
 The built-in code formatter remains Rhai-only.
 
 ### Local libraries
@@ -311,7 +324,8 @@ The built-in code formatter remains Rhai-only.
 `loadScript(path)` executes a local JavaScript file in the current interpreter.
 Libraries can define functions, extend prototypes, and register shaders.
 Loading is synchronous; network URLs and browser script loading are unsupported.
-Use ordinary scripts with `loadScript()`; module imports and CommonJS `require()` are not supported.
+Use `loadScript()` for ordinary scripts and `import` for modules.
+CommonJS `require()` remains unsupported.
 Only files inside the configured library root are allowed.
 
 ```javascript
@@ -331,6 +345,94 @@ loadScript("hydra-arrays.js");
 loadScript("hydra-fractals.js");
 osc([10, 20].add(5)).mirrorX().out();
 ```
+
+### Local modules
+
+JavaScript sketches can import local `.js` and `.mjs` modules.
+Relative imports resolve beside the importing file.
+Scenes without an associated file resolve entry-point imports from the library root.
+Imported files must remain inside the configured library root, including after resolving symbolic links.
+Package names, network URLs, and import attributes remain unsupported.
+For example, `import "./libraries/pulse.mjs"` is local; `import "some-package"` is not supported.
+
+```javascript
+import { pulse } from "./libraries/pulse.mjs";
+osc(20).brightness(() => pulse(time) * 0.2).out();
+```
+
+See [pulse.mjs](examples/javascript/libraries/pulse.mjs) for the exported helper.
+Run the complete [module example](examples/javascript/module.mjs):
+
+```bash
+cargo run --features javascript -- --javascript \
+  --library-root examples/javascript examples/javascript/module.mjs
+```
+
+Files ending in `.mjs` always use module evaluation.
+The interpreter also recognizes module syntax in `.js` sketches.
+The sidebar's **Evaluate as a module** checkbox can force module evaluation without a file extension.
+For example, select it before saving a scene containing module-scoped `const` declarations.
+Ordinary scripts retain their existing global-variable behavior.
+Module variables stay inside their module.
+For example, use `globalThis.counter = 0` to share a counter between modules.
+Modules can await promises that complete within the bounded job queue.
+For example, `const value = await Promise.resolve(1)` works in a module.
+Unresolved promises report an error rather than blocking the application indefinitely.
+Reset the interpreter before retrying a module with unfinished asynchronous work.
+
+Imported modules remain cached until interpreter reset.
+Reevaluating a sketch does not reread its cached dependencies.
+For example, reset the interpreter after editing `pulse.mjs`, then evaluate the sketch again.
+
+### Logging and library errors
+
+`console.log`, `console.info`, `console.debug`, `console.warn`, and `console.error` use native application logging.
+Library errors include their source paths and line numbers.
+For example, an exception can identify `libraries/helpers.js:12`.
+
+```javascript
+console.log("Library loaded.");
+```
+
+Enable informational messages with the existing logging environment variable:
+
+```bash
+RUST_LOG=hydra_rust::javascript=info cargo run --features javascript -- --javascript
+```
+
+### Runtime settings and recovery
+
+The options sidebar offers **JavaScript runtime limits** and **Reset JavaScript interpreter**.
+Applied settings persist in ordinary sessions and session-manager projects.
+Draft changes remain unapplied until confirmation.
+
+| Setting | Default | Allowed range |
+|---------|---------|---------------|
+| JavaScript execution time | 200 milliseconds | 1 to 2,000 milliseconds |
+| Heap memory | 32 mebibytes | 8 to 256 mebibytes |
+| Stack memory | 512 kibibytes | 128 to 2,048 kibibytes |
+| Sketch source size | 1,024 kibibytes | 1 to 4,096 kibibytes |
+| Individual library size | 1,024 kibibytes | 1 to 4,096 kibibytes |
+| Total loaded library text | 16 mebibytes | 1 to 64 mebibytes |
+| Pending promise jobs per call | 256 | 1 to 4,096 |
+
+One mebibyte equals 1,048,576 bytes; one kibibyte equals 1,024 bytes.
+The sidebar abbreviates these units as MiB and KiB.
+An individual library cannot exceed the total loaded-text limit.
+Classic libraries and imported modules share the loaded-text budget.
+A 256-kibibyte sketch limit also caps serialized graph data at one mebibyte.
+Invalid settings report an error and preserve the existing interpreter.
+
+- Open the options sidebar with **Tab**.
+- Expand **JavaScript runtime limits** and adjust the desired values.
+- Select **Apply limits and reset**, then confirm **Reset now**.
+- Evaluate the sketch again.
+
+For example, select a 50-millisecond execution limit without disabling memory or promise-job limits.
+Reset clears JavaScript variables, loaded libraries, cached modules, and callback state.
+It does not delete scene banks or execute the editor's code automatically.
+Current shaders keep rendering with their last callback values until a successful evaluation replaces them.
+For example, use **Reset JavaScript interpreter** after heap exhaustion, then evaluate a corrected sketch.
 
 ### Hyper-Hydra compatibility
 
@@ -427,13 +529,7 @@ Others directly access browser canvases, `regl`, or WebGL framebuffer internals.
 Those browser integrations remain unsupported and report errors.
 For example, loading a canvas-dependent extension cannot provide browser text rendering.
 
-Script execution uses time, memory, and stack limits.
-Each evaluation or frame has a 200-millisecond execution limit.
-The interpreter allows 32 mebibytes of heap memory and 512 kibibytes of stack memory.
-One mebibyte equals 1,048,576 bytes; one kibibyte equals 1,024 bytes.
-Each call processes at most 256 pending JavaScript promise jobs.
-Scripts and individual library files cannot exceed one mebibyte.
-The interpreter limits total loaded library text to 16 mebibytes per runtime.
+Script execution enforces the configured runtime limits.
 At most 128 callback slots can protect previous graphs and build the next graph together.
 Unused slots become available on later evaluations.
 For example, repeatedly evaluating `osc(() => time).out()` reuses inactive slots.
@@ -443,7 +539,7 @@ JavaScript global mutations cannot be undone.
 For example, assigning `counter = 2` before throwing an error still changes `counter`.
 Callback errors pause JavaScript updates and appear in the editor.
 Evaluate a corrected sketch to resume.
-Restart the application if resource exhaustion prevents interpreter recovery.
+Reset the interpreter if resource exhaustion prevents normal recovery.
 JavaScript runs on the interface thread, never on the plugin's real-time audio thread.
 
 The initial JavaScript bridge focuses on shader graphs and audio signal reads.

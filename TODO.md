@@ -123,13 +123,13 @@ JavaScript execution in the plugin also remains outside this scope.
 
 ### Runtime and editing improvements
 
-- [ ] **Interpreter recovery:** add an explicit reset action with clear consequences for JavaScript variables and libraries.
+- [x] **Interpreter recovery:** add an explicit reset action with clear consequences for JavaScript variables and libraries.
   Example: recover from heap exhaustion without restarting the application.
-- [ ] **Library diagnostics:** provide native console logging and errors containing library paths and line numbers.
+- [x] **Library diagnostics:** provide native console logging and errors containing library paths and line numbers.
   Example: report `libraries/helpers.js:12` when a library throws an error.
-- [ ] **Scene languages:** store the scripting language alongside each saved scene.
+- [x] **Scene languages:** store the scripting language alongside each saved scene.
   Example: recall a Rhai scene while JavaScript mode is selected without interpreting it as JavaScript.
-- [ ] **Local modules:** support local module imports under the existing library-root restrictions.
+- [x] **Local modules:** support local module imports under the existing library-root restrictions.
   Example: load `import { pulse } from "./helpers.js";` without allowing network access.
-- [ ] **Runtime settings:** expose bounded execution, memory, and library-size settings without removing protective limits.
+- [x] **Runtime settings:** expose bounded execution, memory, and library-size settings without removing protective limits.
   Example: adjust the script timeout while retaining memory and pending-job limits.

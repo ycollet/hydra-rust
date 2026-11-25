@@ -20,6 +20,7 @@ pub mod imageload;
 mod increment;
 #[cfg(feature = "javascript")]
 pub mod javascript;
+pub mod javascript_settings;
 mod jsfunctions;
 mod jskeywords;
 mod kwargs;

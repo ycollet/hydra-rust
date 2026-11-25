@@ -53,7 +53,7 @@ impl HydraHighlighter {
                 8,
             ),
             (
-                r"\b(?:let|const|var|function|class|new|typeof|undefined|null|async|await|try|catch|throw|if|else|while|loop|for|in|fn|return|true|false|hush|initCam)\b",
+                r"\b(?:let|const|var|function|class|new|typeof|undefined|null|import|export|from|as|async|await|try|catch|throw|if|else|while|loop|for|in|fn|return|true|false|hush|initCam)\b",
                 7,
             ),
             (r"[+\-*/%]=?|[=!<>]=|&&|\|\||!", 2),

@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use glow::HasContext;
-use hydra_rust::javascript::{JavascriptFrame, JavascriptRuntime};
+use hydra_rust::javascript::{JavascriptFrame, JavascriptRuntime, JavascriptSettings};
 use hydra_rust::renderer::{RenderUniforms, ShaderRenderer, render_multipass};
 
 #[link(name = "OpenGL", kind = "framework")]
@@ -169,6 +169,44 @@ fn native_rendering_uploads_callbacks_and_preserves_programs_after_compile_failu
                 js.rollback_last_eval().unwrap();
             }
         }
+        js.reset(JavascriptSettings::default()).unwrap();
+        let mut retained = [0.0; 128];
+        retained[0] = 0.5;
+        render_multipass(
+            &gl,
+            &renderer.snapshot(),
+            renderer.ping(),
+            uniforms(retained),
+        );
+        let mut pixel = [0; 4];
+        gl.read_pixels(
+            4,
+            4,
+            1,
+            1,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelPackData::Slice(Some(&mut pixel)),
+        );
+        assert!((pixel[0] as i32 - 128).abs() <= 1, "{pixel:?}");
+        let replacement = js.eval("solid(()=>0.75,0,0,1).out()").unwrap();
+        assert!(
+            renderer
+                .compile_buffers_atomic(&replacement.shaders, replacement.render_mode)
+                .is_empty()
+        );
+        let values = js.frame(JavascriptFrame::default()).unwrap();
+        render_multipass(&gl, &renderer.snapshot(), renderer.ping(), uniforms(values));
+        gl.read_pixels(
+            4,
+            4,
+            1,
+            1,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelPackData::Slice(Some(&mut pixel)),
+        );
+        assert!((pixel[0] as i32 - 191).abs() <= 1, "{pixel:?}");
         gl.bind_framebuffer(glow::FRAMEBUFFER, None);
         gl.delete_framebuffer(target);
         gl.delete_texture(texture);
@@ -195,5 +233,28 @@ fn native_rendering_uploads_callbacks_and_preserves_programs_after_compile_failu
         renderer
             .compile_buffers_atomic(&override_graph.shaders, override_graph.render_mode)
             .is_empty()
+    );
+    let module_path = example_root.join("module.mjs");
+    let mut module = JavascriptRuntime::new(example_root).unwrap();
+    let module_graph = module
+        .eval_named(
+            &std::fs::read_to_string(&module_path).unwrap(),
+            &module_path,
+        )
+        .unwrap();
+    assert!(
+        renderer
+            .compile_buffers_atomic(&module_graph.shaders, module_graph.render_mode)
+            .is_empty()
+    );
+    assert!(
+        module
+            .frame(JavascriptFrame {
+                time: 0.5,
+                ..Default::default()
+            })
+            .unwrap()
+            .iter()
+            .any(|value| *value > 0.0)
     );
 }

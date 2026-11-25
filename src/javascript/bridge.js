@@ -2,6 +2,13 @@
   "use strict";
   const metadata = new Map(__metadata.map(m => [m.name, m]));
   delete globalThis.__metadata;
+  const consoleLog = __consoleLog;
+  delete globalThis.__consoleLog;
+  globalThis.console = Object.freeze(Object.fromEntries(
+    ["log", "info", "debug", "warn", "error"].map(level => [
+      level, (...values) => consoleLog(level === "log" ? "info" : level, values.map(String).join(" "))
+    ])
+  ));
   let callbacks = [], committedCallbacks = [], definitions = new Map(), buffers = [null,null,null,null];
   let saved, committedUpdate = null, audioRead = false, running = false;
   let activeSlots = new Set(), pendingActiveSlots = new Set();

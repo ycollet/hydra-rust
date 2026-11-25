@@ -6,22 +6,25 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::ffi::CString;
 use std::hash::{Hash, Hasher};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use rquickjs::{Context, Ctx, Exception, Function, Object, Runtime};
+use rquickjs::context::EvalOptions;
+use rquickjs::{Context, Ctx, Exception, Function, Module, Object, Persistent, Runtime};
 use serde::{Deserialize, Serialize};
 
 use crate::eval::{
     Arg, BufferFilter, EvalResult, FUNCTIONS, Node, Op, OpKind, RenderMode, compile_node,
 };
+pub use crate::javascript_settings::JavascriptSettings;
 pub use crate::shader::NUM_JS_VALUES;
 
-const MAX_SCRIPT_BYTES: usize = 1024 * 1024;
-const MAX_JOBS: usize = 256;
+mod library;
+use library::Libraries;
 type Rejections = Rc<RefCell<HashMap<u64, Vec<String>>>>;
 
 #[derive(Clone, Copy, Debug, Default, Serialize)]
@@ -47,6 +50,9 @@ pub struct JavascriptRuntime {
     can_rollback: bool,
     rejections: Rejections,
     jobs_blocked: bool,
+    library_root: PathBuf,
+    settings: JavascriptSettings,
+    evaluations: u64,
 }
 
 #[derive(Deserialize)]
@@ -104,21 +110,69 @@ enum Value {
 
 fn js_error(ctx: &Ctx<'_>, error: rquickjs::Error) -> String {
     if error.is_exception() {
-        let exception = ctx.catch();
-        if let Some(object) = exception.clone().into_object()
-            && let Ok(message) = object.get::<_, String>("message")
-        {
-            let stack = object.get::<_, String>("stack").unwrap_or_default();
-            return format!("{message}\n{stack}");
-        }
-        format!("{exception:?}")
+        exception_text(ctx.catch())
     } else {
         error.to_string()
     }
 }
 
+fn exception_text(exception: rquickjs::Value<'_>) -> String {
+    if let Some(object) = exception.clone().into_object()
+        && let Ok(message) = object.get::<_, String>("message")
+    {
+        let stack = object.get::<_, String>("stack").unwrap_or_default();
+        return format!("{message}\n{stack}");
+    }
+    format!("{exception:?}")
+}
+
+fn requires_module(ctx: &Ctx<'_>, code: &str, filename: &Path) -> Result<bool, String> {
+    let code = CString::new(code).map_err(|error| error.to_string())?;
+    let filename =
+        CString::new(filename.to_string_lossy().as_bytes()).map_err(|error| error.to_string())?;
+    let flags = rquickjs::qjs::JS_EVAL_TYPE_GLOBAL
+        | rquickjs::qjs::JS_EVAL_FLAG_STRICT
+        | rquickjs::qjs::JS_EVAL_FLAG_COMPILE_ONLY;
+    // Compile in the existing limited context without executing or creating another interpreter.
+    let failed = unsafe {
+        let value = rquickjs::qjs::JS_Eval(
+            ctx.as_raw().as_ptr(),
+            code.as_ptr(),
+            code.as_bytes().len() as _,
+            filename.as_ptr(),
+            flags as _,
+        );
+        let failed = rquickjs::qjs::JS_IsException(value);
+        rquickjs::qjs::JS_FreeValue(ctx.as_raw().as_ptr(), value);
+        failed
+    };
+    if failed {
+        let exception = ctx.catch();
+        if exception
+            .as_object()
+            .and_then(|object| object.get::<_, String>("name").ok())
+            .as_deref()
+            == Some("SyntaxError")
+        {
+            Ok(true)
+        } else {
+            Err(exception_text(exception))
+        }
+    } else {
+        Ok(false)
+    }
+}
+
 impl JavascriptRuntime {
     pub fn new(library_root: PathBuf) -> Result<Self, String> {
+        Self::with_settings(library_root, JavascriptSettings::default())
+    }
+
+    pub fn with_settings(
+        library_root: PathBuf,
+        settings: JavascriptSettings,
+    ) -> Result<Self, String> {
+        settings.validate()?;
         let root = library_root
             .canonicalize()
             .map_err(|e| format!("library root: {e}"))?;
@@ -126,8 +180,10 @@ impl JavascriptRuntime {
             return Err("library root must be a directory".into());
         }
         let runtime = Runtime::new().map_err(|e| e.to_string())?;
-        runtime.set_memory_limit(32 * 1024 * 1024);
-        runtime.set_max_stack_size(512 * 1024);
+        runtime.set_memory_limit(settings.memory_mib * 1024 * 1024);
+        runtime.set_max_stack_size(settings.stack_kib * 1024);
+        let libraries = Libraries::new(root.clone(), settings.clone());
+        runtime.set_loader(libraries.clone(), libraries.clone());
         let rejections: Rejections = Rc::new(RefCell::new(HashMap::new()));
         let tracked = rejections.clone();
         runtime.set_host_promise_rejection_tracker(Some(Box::new(
@@ -144,69 +200,60 @@ impl JavascriptRuntime {
                         }
                     }
                 } else {
-                    let message = reason
+                    let mut message = reason
                         .as_object()
                         .and_then(|o| o.get::<_, String>("message").ok())
                         .or_else(|| reason.as_string().and_then(|s| s.to_string().ok()))
                         .unwrap_or_else(|| format!("{reason:?}"));
+                    if let Some(stack) = reason
+                        .as_object()
+                        .and_then(|object| object.get::<_, String>("stack").ok())
+                    {
+                        message.push('\n');
+                        message.push_str(&stack);
+                    }
                     rejected.entry(id).or_default().push(message);
                 }
             },
         )));
-        let deadline = Arc::new(Mutex::new(Instant::now() + Duration::from_millis(200)));
+        let deadline = Arc::new(Mutex::new(
+            Instant::now() + Duration::from_millis(settings.execution_ms),
+        ));
         let interrupt = deadline.clone();
         runtime.set_interrupt_handler(Some(Box::new(move || {
             Instant::now() > *interrupt.lock().unwrap()
         })));
         let context = Context::full(&runtime).map_err(|e| e.to_string())?;
         context.with(|ctx| {
-            let loading = Rc::new(RefCell::new(Vec::<PathBuf>::new()));
-            let total = Rc::new(RefCell::new(0usize));
             let load = Function::new(
                 ctx.clone(),
                 move |ctx: Ctx<'_>, path: String| -> rquickjs::Result<()> {
-                    let base = loading
+                    let base = libraries
+                        .loading
                         .borrow()
                         .last()
                         .and_then(|p| p.parent())
-                        .unwrap_or(&root)
+                        .unwrap_or(&libraries.root)
                         .to_path_buf();
-                    let path = base
-                        .join(path)
-                        .canonicalize()
-                        .map_err(|e| Exception::throw_message(&ctx, &format!("loadScript: {e}")))?;
-                    if !path.starts_with(&root) {
-                        return Err(Exception::throw_message(
-                            &ctx,
-                            "loadScript path escapes library root",
-                        ));
-                    }
-                    if loading.borrow().contains(&path) || loading.borrow().len() >= 16 {
+                    let path = libraries.resolve_path(&base, &path).map_err(|error| {
+                        Exception::throw_message(&ctx, &format!("loadScript: {error}"))
+                    })?;
+                    if libraries.loading.borrow().contains(&path)
+                        || libraries.loading.borrow().len() >= 16
+                    {
                         return Err(Exception::throw_message(
                             &ctx,
                             "loadScript cycle or nesting limit",
                         ));
                     }
-                    let metadata = path
-                        .metadata()
-                        .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))?;
-                    if metadata.len() > MAX_SCRIPT_BYTES as u64
-                        || *total.borrow() >= 16 * MAX_SCRIPT_BYTES
-                    {
-                        return Err(Exception::throw_message(
-                            &ctx,
-                            "loadScript file or runtime byte limit",
-                        ));
-                    }
-                    let code = std::fs::read_to_string(&path)
-                        .map_err(|e| Exception::throw_message(&ctx, &e.to_string()))?;
-                    if code.len() > MAX_SCRIPT_BYTES {
-                        return Err(Exception::throw_message(&ctx, "loadScript file too large"));
-                    }
-                    *total.borrow_mut() += code.len();
-                    loading.borrow_mut().push(path);
-                    let result = ctx.eval::<(), _>(code);
-                    loading.borrow_mut().pop();
+                    let code = libraries.read(&path).map_err(|error| {
+                        Exception::throw_message(&ctx, &format!("loadScript: {error}"))
+                    })?;
+                    let mut options = EvalOptions::default();
+                    options.filename = Some(path.to_string_lossy().into_owned());
+                    libraries.loading.borrow_mut().push(path);
+                    let result = ctx.eval_with_options::<(), _>(code, options);
+                    libraries.loading.borrow_mut().pop();
                     result
                 },
             )
@@ -214,6 +261,28 @@ impl JavascriptRuntime {
             ctx.globals()
                 .set("loadScript", load)
                 .map_err(|e| js_error(&ctx, e))?;
+            let console = Function::new(
+                ctx.clone(),
+                |ctx: Ctx<'_>, level: String, message: String| {
+                    match level.as_str() {
+                        "debug" => log::debug!(target: "hydra_rust::javascript", "{message}"),
+                        "info" => log::info!(target: "hydra_rust::javascript", "{message}"),
+                        "warn" => log::warn!(target: "hydra_rust::javascript", "{message}"),
+                        "error" => log::error!(target: "hydra_rust::javascript", "{message}"),
+                        _ => {
+                            return Err(Exception::throw_message(
+                                &ctx,
+                                "Unsupported console level",
+                            ));
+                        }
+                    }
+                    Ok(())
+                },
+            )
+            .map_err(|error| js_error(&ctx, error))?;
+            ctx.globals()
+                .set("__consoleLog", console)
+                .map_err(|error| js_error(&ctx, error))?;
             let metadata: Vec<_> = FUNCTIONS
                 .iter()
                 .map(|m| {
@@ -241,11 +310,15 @@ impl JavascriptRuntime {
             can_rollback: false,
             rejections,
             jobs_blocked: false,
+            library_root: root,
+            settings,
+            evaluations: 0,
         })
     }
 
     fn start(&self) {
-        *self.deadline.lock().unwrap() = Instant::now() + Duration::from_millis(200);
+        *self.deadline.lock().unwrap() =
+            Instant::now() + Duration::from_millis(self.settings.execution_ms);
     }
 
     fn run(&self, code: &str) -> Result<String, String> {
@@ -254,22 +327,28 @@ impl JavascriptRuntime {
     }
 
     fn jobs(&self) -> Result<(), String> {
-        for _ in 0..MAX_JOBS {
+        for _ in 0..self.settings.pending_jobs {
             match self.runtime.execute_pending_job() {
-                Ok(false) => {
-                    let mut rejections = self.rejections.borrow_mut();
-                    let error = rejections
-                        .values()
-                        .find_map(|messages| messages.first())
-                        .map(|reason| format!("unhandled JavaScript rejection: {reason}"));
-                    rejections.clear();
-                    return error.map_or(Ok(()), Err);
-                }
+                Ok(false) => return self.rejection_error(),
                 Ok(true) => {}
                 Err(e) => return Err(e.0.with(|ctx| js_error(&ctx, rquickjs::Error::Exception))),
             }
         }
-        Err("JavaScript pending job limit exceeded".into())
+        if self.runtime.is_job_pending() {
+            Err("JavaScript pending job limit exceeded".into())
+        } else {
+            self.rejection_error()
+        }
+    }
+
+    fn rejection_error(&self) -> Result<(), String> {
+        let mut rejections = self.rejections.borrow_mut();
+        let error = rejections
+            .values()
+            .find_map(|messages| messages.first())
+            .map(|reason| format!("unhandled JavaScript rejection: {reason}"));
+        rejections.clear();
+        error.map_or(Ok(()), Err)
     }
 
     fn cancel_jobs(&self) {
@@ -287,22 +366,92 @@ impl JavascriptRuntime {
     }
 
     pub fn eval(&mut self, code: &str) -> Result<EvalResult, String> {
+        self.eval_named(code, &self.library_root.join("sketch.js"))
+    }
+
+    pub fn eval_named(&mut self, code: &str, filename: &Path) -> Result<EvalResult, String> {
+        self.eval_source(code, filename, false)
+    }
+
+    pub fn eval_module_named(&mut self, code: &str, filename: &Path) -> Result<EvalResult, String> {
+        self.eval_source(code, filename, true)
+    }
+
+    fn eval_source(
+        &mut self,
+        code: &str,
+        filename: &Path,
+        force_module: bool,
+    ) -> Result<EvalResult, String> {
         if self.jobs_blocked {
-            return Err("JavaScript job cancellation failed; replace the runtime".into());
+            return Err(
+                "JavaScript has unfinished asynchronous work; reset the interpreter".into(),
+            );
         }
-        if code.len() > MAX_SCRIPT_BYTES {
+        if code.len() > self.settings.script_kib * 1024 {
             return Err("JavaScript script byte limit exceeded".into());
         }
         self.start();
         self.rejections.borrow_mut().clear();
         self.can_rollback = false;
         self.run("__bridge.begin(); ''")?;
+        let mut module_promise = None;
         let result = (|| {
-            self.context
-                .with(|ctx| ctx.eval::<(), _>(code).map_err(|e| js_error(&ctx, e)))?;
+            let filename = if filename.is_absolute() {
+                filename.to_path_buf()
+            } else {
+                self.library_root.join(filename)
+            };
+            let is_module = force_module
+                || filename
+                    .extension()
+                    .is_some_and(|extension| extension == "mjs")
+                || self
+                    .context
+                    .with(|ctx| requires_module(&ctx, code, &filename))?;
+            self.evaluations = self
+                .evaluations
+                .checked_add(1)
+                .ok_or("Evaluation count limit exceeded")?;
+            let promise = self.context.with(|ctx| {
+                if is_module {
+                    let name = format!("{}#evaluation-{}", filename.display(), self.evaluations);
+                    Module::evaluate(ctx.clone(), name, code)
+                        .map(|promise| Some(Persistent::save(&ctx, promise)))
+                        .map_err(|error| js_error(&ctx, error))
+                } else {
+                    let mut options = EvalOptions::default();
+                    options.filename = Some(filename.to_string_lossy().into_owned());
+                    ctx.eval_with_options::<(), _>(code, options)
+                        .map(|()| None)
+                        .map_err(|error| js_error(&ctx, error))
+                }
+            })?;
+            module_promise = promise.clone();
             self.jobs()?;
+            if let Some(promise) = promise {
+                let resolved = self.context.with(|ctx| {
+                    match promise
+                        .restore(&ctx)
+                        .map_err(|error| js_error(&ctx, error))?
+                        .result::<()>()
+                    {
+                        Some(result) => {
+                            result.map(|()| true).map_err(|error| js_error(&ctx, error))
+                        }
+                        None => Ok(false),
+                    }
+                })?;
+                if !resolved {
+                    self.jobs_blocked = true;
+                    return Err(
+                        "Local module evaluation left an unresolved promise; reset the interpreter"
+                            .into(),
+                    );
+                }
+            }
             let encoded = self.run("__bridge.snapshot()")?;
-            if encoded.len() > 4 * MAX_SCRIPT_BYTES {
+            if encoded.len() > 4 * self.settings.script_kib * 1024 {
                 return Err("JavaScript graph byte limit exceeded".into());
             }
             let snapshot: Snapshot = serde_json::from_str(&encoded)
@@ -316,9 +465,17 @@ impl JavascriptRuntime {
         })();
         if result.is_err() {
             self.cancel_jobs();
+            if let Some(promise) = module_promise {
+                self.jobs_blocked |= self.context.with(|ctx| {
+                    promise
+                        .restore(&ctx)
+                        .map(|promise| promise.state() == rquickjs::promise::PromiseState::Pending)
+                        .map_err(|error| js_error(&ctx, error))
+                })?;
+            }
             self.start();
             self.run("__bridge.rollback(); ''")?;
-            self.jobs_blocked = self.runtime.is_job_pending();
+            self.jobs_blocked |= self.runtime.is_job_pending();
             self.rejections.borrow_mut().clear();
         }
         result
@@ -326,7 +483,9 @@ impl JavascriptRuntime {
 
     pub fn frame(&mut self, input: JavascriptFrame) -> Result<[f32; NUM_JS_VALUES], String> {
         if self.jobs_blocked {
-            return Err("JavaScript job cancellation failed; replace the runtime".into());
+            return Err(
+                "JavaScript has unfinished asynchronous work; reset the interpreter".into(),
+            );
         }
         if [
             input.time,
@@ -385,6 +544,15 @@ impl JavascriptRuntime {
 
     pub fn uses_audio(&self) -> bool {
         self.uses_audio
+    }
+
+    pub fn reset(&mut self, settings: JavascriptSettings) -> Result<(), String> {
+        *self = Self::with_settings(self.library_root.clone(), settings)?;
+        Ok(())
+    }
+
+    pub fn library_root(&self) -> &Path {
+        &self.library_root
     }
 
     /// Call only when shader validation fails before installing any new shader.
