@@ -93,21 +93,21 @@ JavaScript execution in the plugin also remains outside this scope.
 
 ### Hyper-Hydra compatibility priorities
 
-- [ ] **Shader identifiers:** accept underscore-prefixed names while generating safe shader identifiers.
+- [x] **Shader identifiers:** accept underscore-prefixed names while generating safe shader identifiers.
   Example: register `_glsl_ext_NODE_0` from `hydra-glsl.js`.
-- [ ] **Shader parameter aliases:** avoid redeclarations of `st`, `c0`, and `c1` in extension snippets.
+- [x] **Shader parameter aliases:** avoid redeclarations of `st`, `c0`, and `c1` in extension snippets.
   Example: compile `.glslCoord("uv * 2.0")` after loading `hydra-glsl.js`.
-- [ ] **Large shader registries:** support more registered functions while preserving memory and compilation limits.
+- [x] **Large shader registries:** support more registered functions while preserving memory and compilation limits.
   Example: load `hydra-swizzle.js` without exceeding the current 256-definition limit.
-- [ ] **Unused shader definitions:** compile only custom functions needed by the current graphs.
+- [x] **Unused shader definitions:** compile only custom functions needed by the current graphs.
   Example: an unused, incompatible `phoenix` shader should not block other `hydra-blend.js` modes.
-- [ ] **Texture sampler inputs:** bind `sampler2D` parameters to native output and source textures.
+- [x] **Texture sampler inputs:** bind `sampler2D` parameters to native output and source textures.
   Example: register a convolution from `hydra-convolutions.js` with `o0` as its texture input.
-- [ ] **Graph metadata adapters:** support extension helpers that inspect or copy browser Hydra graph metadata.
+- [x] **Graph metadata adapters:** support extension helpers that inspect or copy browser Hydra graph metadata.
   Example: adapt `hydra-colorspaces.js` helpers that copy `transforms`.
-- [ ] **Compatibility checks:** exercise representative helpers and compile their generated shaders.
+- [x] **Compatibility checks:** exercise representative helpers and compile their generated shaders.
   Example: check `hydra-abbreviations.js` with `osc(10).bright(0.2).out()` and check vector helpers from `hydra-vec4.js`.
-- [ ] **Compatibility tracking:** record checked upstream revisions and update the documentation after each supported extension.
+- [x] **Compatibility tracking:** record checked upstream revisions and update the documentation after each supported extension.
   Example: move `hydra-glsl.js` from blocked to verified examples only after its helpers execute and compile.
 
 ### Native feature parity

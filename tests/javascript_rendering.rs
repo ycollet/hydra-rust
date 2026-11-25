@@ -285,6 +285,61 @@ fn native_rendering_uploads_callbacks_and_preserves_programs_after_compile_failu
             glow::PixelPackData::Slice(Some(&mut pixel)),
         );
         assert_eq!(&pixel[..3], &[0, 255, 0]);
+        let sampler = js.eval(
+            "setFunction({name:'_sample',type:'src',inputs:[{name:'_tex',type:'sampler2D',default:o1}],\
+             glsl:'return texture2D(_tex,_st);'});_sample().out();render(o0)"
+        ).unwrap();
+        assert!(
+            renderer
+                .compile_buffers_atomic(&sampler.shaders, sampler.render_mode)
+                .is_empty()
+        );
+        render_multipass(
+            &gl,
+            &renderer.snapshot(),
+            renderer.ping(),
+            uniforms([0.0; 128]),
+        );
+        gl.read_pixels(
+            4,
+            4,
+            1,
+            1,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelPackData::Slice(Some(&mut pixel)),
+        );
+        assert_eq!(&pixel[..3], &[0, 255, 0]);
+        renderer.upload_source(
+            2,
+            &hydra_rust::source::SourceFrame {
+                pixels: [255, 0, 0].repeat(4),
+                width: 2,
+                height: 2,
+            },
+        );
+        let source = js.eval("_sample(s2).out()").unwrap();
+        assert!(
+            renderer
+                .compile_buffers_atomic(&source.shaders, source.render_mode)
+                .is_empty()
+        );
+        render_multipass(
+            &gl,
+            &renderer.snapshot(),
+            renderer.ping(),
+            uniforms([0.0; 128]),
+        );
+        gl.read_pixels(
+            4,
+            4,
+            1,
+            1,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelPackData::Slice(Some(&mut pixel)),
+        );
+        assert_eq!(&pixel[..3], &[255, 0, 0]);
         gl.bind_framebuffer(glow::FRAMEBUFFER, None);
         gl.delete_framebuffer(target);
         gl.delete_texture(texture);
@@ -304,6 +359,12 @@ fn native_rendering_uploads_callbacks_and_preserves_programs_after_compile_failu
     for code in [
         "osc(10).tileable(()=>0.15).out()",
         "strokeText('Hydra',{lineWidth:'3px'}).out()",
+        "setFunction({name:'_localCoord',type:'coord',glsl:'vec2 st = _st * 2.0; return st;'});osc(10)._localCoord().out()",
+        "setFunction({name:'_localColor',type:'color',glsl:'vec4 c0 = _c0 * 0.5; return c0;'});osc(10)._localColor().out()",
+        "setFunction({name:'_loopColor',type:'color',glsl:'for(int c0=0;c0<1;c0++) {} return c0;'});osc(10)._loopColor().out()",
+        "setFunction({name:'_unusedBroken',type:'src',glsl:'return invalid;'});osc(10).out()",
+        "setFunction({name:'_fields',type:'src',inputs:[{name:'_in',type:'float',default:0.25}],\
+         glsl:'struct Data { float _in; float time; }; Data data; data._in=0.4; data.time=0.1; return vec4(_in+data. /* field */ _in+data.time);'});_fields().out()",
     ] {
         let graph = JavascriptRuntime::new(root.clone())
             .unwrap()

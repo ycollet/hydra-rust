@@ -23,6 +23,7 @@ use crate::eval::{
 pub use crate::javascript_settings::JavascriptSettings;
 pub use crate::shader::NUM_JS_VALUES;
 
+mod functions;
 mod library;
 mod native;
 use library::Libraries;
@@ -133,7 +134,38 @@ struct Definition {
 #[serde(deny_unknown_fields)]
 struct Input {
     name: String,
-    default: f64,
+    #[serde(rename = "type")]
+    kind: InputKind,
+    default: InputDefault,
+}
+
+#[derive(Clone, Copy, PartialEq, Deserialize)]
+enum InputKind {
+    #[serde(rename = "float")]
+    Float,
+    #[serde(rename = "sampler2D")]
+    Sampler,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(untagged)]
+enum InputDefault {
+    Number(f64),
+    Texture(TextureRef),
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TextureRef {
+    kind: TextureKind,
+    index: usize,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum TextureKind {
+    Output,
+    Source,
 }
 
 #[derive(Deserialize)]
@@ -157,6 +189,8 @@ enum Value {
     Number(f64),
     #[serde(rename = "callback")]
     Callback(usize),
+    #[serde(rename = "texture")]
+    Texture(TextureRef),
 }
 
 fn js_error(ctx: &Ctx<'_>, error: rquickjs::Error) -> String {
@@ -349,6 +383,13 @@ impl JavascriptRuntime {
                 serde_json::to_string(&metadata).unwrap()
             ))
             .map_err(|e| js_error(&ctx, e))?;
+            ctx.eval::<(), _>(format!("globalThis.__functionLimits = {};",
+                serde_json::json!({
+                    "count":functions::MAX_FUNCTIONS,"bytes":functions::MAX_GLSL_BYTES,
+                    "body":functions::MAX_FUNCTION_BODY,"name":functions::MAX_NAME,
+                    "inputs":functions::MAX_INPUTS
+                })
+            )).map_err(|e| js_error(&ctx, e))?;
             ctx.eval::<(), _>(format!("globalThis.__features = {};", serde_json::json!({
                 "webcam": cfg!(feature = "webcam"), "image_url": cfg!(feature = "image_url"),
                 "video": cfg!(feature = "video"), "stream": cfg!(feature = "stream"),
@@ -670,100 +711,40 @@ fn kind_name(kind: OpKind) -> &'static str {
     }
 }
 
-fn identifier(name: &str) -> bool {
-    let mut chars = name.chars();
-    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic())
-        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
-        && !name.starts_with("gl_")
-}
-
-fn hydra_uniforms(body: &str, inputs: &[Input]) -> String {
-    let chars: Vec<_> = body.chars().collect();
-    let regions = crate::srcscan::classify(&chars);
-    let mut output = String::new();
-    let mut i = 0;
-    while i < chars.len() {
-        if regions[i] == crate::srcscan::Region::Code
-            && (chars[i].is_ascii_alphabetic() || chars[i] == '_')
-        {
-            let start = i;
-            while i < chars.len() && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
-                i += 1;
-            }
-            let word: String = chars[start..i].iter().collect();
-            let field = chars[..start].iter().rev().find(|c| !c.is_whitespace()) == Some(&'.');
-            let parameter = inputs.iter().any(|input| input.name == word);
-            output.push_str(match (word.as_str(), field || parameter) {
-                ("time", false) => "iTime",
-                ("resolution", false) => "iResolution",
-                _ => &word,
-            });
-        } else {
-            output.push(chars[i]);
-            i += 1;
-        }
-    }
-    output
-}
-
 fn compile_snapshot(snapshot: &Snapshot) -> Result<EvalResult, String> {
-    if snapshot.slots > NUM_JS_VALUES || snapshot.definitions.len() > 256 {
+    if snapshot.slots > NUM_JS_VALUES || snapshot.definitions.len() > functions::MAX_FUNCTIONS {
         return Err("JavaScript graph resource limit".into());
     }
-    let mut definitions: HashMap<String, (String, Vec<f64>, String)> = FUNCTIONS
+    let mut definitions: HashMap<String, (String, Vec<InputKind>, String)> = FUNCTIONS
         .iter()
         .map(|m| {
             (
                 m.name.to_string(),
-                (kind_name(m.kind).into(), m.defaults.to_vec(), m.name.into()),
+                (
+                    kind_name(m.kind).into(),
+                    vec![InputKind::Float; m.defaults.len()],
+                    m.name.into(),
+                ),
             )
         })
         .collect();
-    definitions.insert("src".into(), ("src".into(), vec![0.0], "src".into()));
+    definitions.insert(
+        "src".into(),
+        ("src".into(), vec![InputKind::Float], "src".into()),
+    );
     definitions.insert(
         "ext_src".into(),
-        ("src".into(), vec![0.0], "ext_src".into()),
+        ("src".into(), vec![InputKind::Float], "ext_src".into()),
     );
     definitions.insert("text_src".into(), ("src".into(), vec![], "text_src".into()));
-    let mut glsl = String::new();
-    for d in &snapshot.definitions {
-        if !identifier(&d.name) || d.inputs.len() > 32 || d.glsl.len() > 64 * 1024 {
-            return Err("invalid custom function name or size".into());
-        }
-        let (ret, fixed, aliases) = match d.kind.as_str() {
-            "src" => ("vec4", "vec2 st", "vec2 _st = st;"),
-            "coord" => ("vec2", "vec2 st", "vec2 _st = st;"),
-            "color" => ("vec4", "vec4 c0", "vec4 _c0 = c0;"),
-            "combine" => ("vec4", "vec4 c0, vec4 c1", "vec4 _c0 = c0; vec4 _c1 = c1;"),
-            "combineCoord" => ("vec2", "vec2 st, vec4 c0", "vec2 _st = st; vec4 _c0 = c0;"),
-            _ => return Err("unsupported custom function type".into()),
-        };
-        let mut names = std::collections::HashSet::new();
-        for input in &d.inputs {
-            if !identifier(&input.name)
-                || ["st", "c0", "c1"].contains(&input.name.as_str())
-                || !names.insert(&input.name)
-                || !input.default.is_finite()
-            {
-                return Err("invalid custom function input".into());
-            }
-        }
-        let extra = d
-            .inputs
-            .iter()
-            .map(|i| format!(", float {}", i.name))
-            .collect::<String>();
-        glsl.push_str(&format!(
-            "{ret} {}({fixed}{extra}) {{\n{aliases}\n{}\n}}\n",
-            format_args!("hydraJs_{}", d.name),
-            hydra_uniforms(&d.glsl, &d.inputs)
-        ));
+    functions::validate(&snapshot.definitions)?;
+    for (index, d) in snapshot.definitions.iter().enumerate() {
         definitions.insert(
             d.name.clone(),
             (
                 d.kind.clone(),
-                d.inputs.iter().map(|i| i.default).collect(),
-                format!("hydraJs_{}", d.name),
+                d.inputs.iter().map(|i| i.kind).collect(),
+                functions::shader_name(index),
             ),
         );
     }
@@ -771,16 +752,24 @@ fn compile_snapshot(snapshot: &Snapshot) -> Result<EvalResult, String> {
     let mut shaders = [None, None, None, None];
     for (i, graph) in snapshot.buffers.iter().enumerate() {
         if let Some(graph) = graph {
-            shaders[i] = Some(format!(
-                "{glsl}{}",
-                compile_node(&graph_node(
-                    graph,
-                    &definitions,
-                    snapshot.slots,
-                    0,
-                    &mut budget
-                )?)?
-            ));
+            let mut used = std::collections::HashSet::new();
+            let node = graph_node(
+                graph,
+                &definitions,
+                snapshot.slots,
+                0,
+                &mut budget,
+                &mut used,
+            )?;
+            let glsl = snapshot
+                .definitions
+                .iter()
+                .enumerate()
+                .filter(|(_, definition)| used.contains(&definition.name))
+                .map(|(index, definition)| functions::compile(definition, index))
+                .collect::<Result<Vec<_>, _>>()?
+                .join("\n");
+            shaders[i] = Some(format!("{glsl}{}", compile_node(&node)?));
         }
     }
     let mut filters = [None; 4];
@@ -850,10 +839,11 @@ fn compile_snapshot(snapshot: &Snapshot) -> Result<EvalResult, String> {
 
 fn graph_node(
     graph: &Graph,
-    definitions: &HashMap<String, (String, Vec<f64>, String)>,
+    definitions: &HashMap<String, (String, Vec<InputKind>, String)>,
     slots: usize,
     depth: usize,
     budget: &mut usize,
+    used: &mut std::collections::HashSet<String>,
 ) -> Result<Node, String> {
     if depth >= 16 || graph.ops.is_empty() || graph.ops.len() > *budget {
         return Err("JavaScript graph depth or operation limit".into());
@@ -876,6 +866,7 @@ fn graph_node(
                 slots,
                 depth + 1,
                 budget,
+                used,
             )?;
             ops.push(Op::Tileable { other, width });
             continue;
@@ -883,15 +874,33 @@ fn graph_node(
         let (kind, defaults, shader_name) = definitions
             .get(&operation.name)
             .ok_or("unknown graph function")?;
+        used.insert(operation.name.clone());
         if operation.args.len() != defaults.len() {
             return Err("invalid graph argument count".into());
         }
         let args = operation
             .args
             .iter()
-            .map(|v| match v {
-                Value::Number(n) if n.is_finite() && (*n as f32).is_finite() => Ok(Arg::Lit(*n)),
-                Value::Callback(i) if *i < slots => Ok(Arg::Expr(format!("iJsValues[{i}]"))),
+            .zip(defaults)
+            .map(|(v, kind)| match (v, kind) {
+                (Value::Number(n), InputKind::Float)
+                    if n.is_finite() && (*n as f32).is_finite() =>
+                {
+                    Ok(Arg::Lit(*n))
+                }
+                (Value::Callback(i), InputKind::Float) if *i < slots => {
+                    Ok(Arg::Expr(format!("iJsValues[{i}]")))
+                }
+                (Value::Texture(texture), InputKind::Sampler) if texture.index < 4 => {
+                    Ok(Arg::Expr(format!(
+                        "{}{}",
+                        match texture.kind {
+                            TextureKind::Output => "iBuffer",
+                            TextureKind::Source => "iSource",
+                        },
+                        texture.index
+                    )))
+                }
                 _ => Err("invalid graph argument".to_string()),
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -899,7 +908,7 @@ fn graph_node(
         let other = operation
             .other
             .as_ref()
-            .map(|g| graph_node(g, definitions, slots, depth + 1, budget))
+            .map(|g| graph_node(g, definitions, slots, depth + 1, budget, used))
             .transpose()?;
         let op = match (kind.as_str(), other) {
             ("src", None) => Op::Source { func, args },

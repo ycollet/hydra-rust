@@ -482,16 +482,135 @@ fn custom_functions_cover_aliases_and_many_defaults() {
     "#).unwrap();
     let shader = result.shaders[0].as_ref().unwrap();
     for alias in [
-        "vec2 _st = st",
-        "vec4 _c0 = c0",
-        "vec4 _c1 = c1",
-        "float p6",
+        "vec2 st = _st",
+        "vec4 c0 = _c0",
+        "vec4 c1 = _c1",
+        "float hydraJsInput6",
     ] {
         assert!(shader.contains(alias), "{shader}");
     }
     assert!(shader.contains("0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0"));
     assert!(shader.contains("_st / iResolution"));
-    assert!(shader.contains("st.x+p6+iTime"));
+    assert!(shader.contains("st.x+hydraJsInput6+iTime"));
+}
+
+#[test]
+fn underscore_names_use_safe_shader_identifiers_and_local_parameter_aliases() {
+    let mut js = runtime();
+    let graph = js.eval(
+        "setFunction({name:'_glsl_ext_NODE_0',type:'src',inputs:[{name:'__value',type:'float',default:0.25}],\
+         glsl:'/* vec2 st; */ vec2 uv = _st, st = uv * 2.0; return vec4(st,__value,1.0);'});\
+         _glsl_ext_NODE_0().out()"
+    ).unwrap();
+    let shader = graph.shaders[0].as_ref().unwrap();
+    assert!(shader.contains("hydraJsFunction0"));
+    assert!(shader.contains("hydraJsInput0"));
+    assert!(!shader.contains("vec2 st = _st"));
+    assert!(!shader.contains("__value"));
+    for name in ["gl_bad", "bad-name", "1bad"] {
+        assert!(
+            js.eval(&format!(
+                "setFunction({{name:{},type:'src',glsl:'return vec4(1.0);'}})",
+                serde_json::to_string(name).unwrap()
+            ))
+            .is_err()
+        );
+    }
+}
+
+#[test]
+fn large_registries_emit_only_functions_used_by_each_output() {
+    let mut js = runtime();
+    let graph = js.eval(
+        "for(var i=0;i<600;i++)setFunction({name:'_entry'+i,type:'color',glsl:'return _c0 * '+i+'.0;'});\
+         setFunction({name:'unusedBroken',type:'src',glsl:'return invalid;'});\
+         osc(10)._entry599().out(o0);solid(1)._entry1().out(o1)"
+    ).unwrap();
+    let first = graph.shaders[0].as_ref().unwrap();
+    let second = graph.shaders[1].as_ref().unwrap();
+    assert!(first.contains("hydraJsFunction599("));
+    assert!(!first.contains("hydraJsFunction1("));
+    assert!(second.contains("hydraJsFunction1("));
+    assert!(!second.contains("hydraJsFunction599("));
+    assert!(!first.contains("invalid"));
+    assert!(
+        js.eval("unusedBroken().out(o2)").unwrap().shaders[2]
+            .as_ref()
+            .unwrap()
+            .contains("invalid")
+    );
+    js.rollback_last_eval().unwrap();
+    assert_eq!(js.eval("").unwrap().shaders, graph.shaders);
+    let error = js.eval("for(var i=600;i<4097;i++)setFunction({name:'_entry'+i,type:'color',glsl:'return _c0;'});")
+        .err().unwrap();
+    assert!(error.contains("custom function limit"), "{error}");
+    assert_eq!(js.eval("").unwrap().shaders, graph.shaders);
+}
+
+#[test]
+fn sampler_defaults_and_explicit_native_buffers_remain_type_checked() {
+    let mut js = runtime();
+    let graph = js.eval(
+        "setFunction({name:'_sample',type:'src',inputs:[{name:'_tex',type:'sampler2D',default:o2}],\
+         glsl:'return texture2D(_tex,_st);'});\
+         _sample().out(o0);_sample(s3).out(o1)"
+    ).unwrap();
+    assert!(
+        graph.shaders[0]
+            .as_ref()
+            .unwrap()
+            .contains("hydraJsFunction0(st, iBuffer2)")
+    );
+    assert!(
+        graph.shaders[1]
+            .as_ref()
+            .unwrap()
+            .contains("hydraJsFunction0(st, iSource3)")
+    );
+    assert!(
+        graph.shaders[0]
+            .as_ref()
+            .unwrap()
+            .contains("texture(hydraJsInput0,_st)")
+    );
+    for code in [
+        "_sample(1).out()",
+        "_sample(()=>o0).out()",
+        "_sample(osc(1)).out()",
+        "setFunction({name:'badSampler',type:'src',inputs:[{name:'tex',type:'sampler2D',default:1}],glsl:'return vec4(1.0);'})",
+    ] {
+        assert!(js.eval(code).is_err(), "{code}");
+    }
+    assert_eq!(js.eval("").unwrap().shaders, graph.shaders);
+}
+
+#[test]
+fn transforms_metadata_can_be_copied_and_edited_without_changing_the_original_graph() {
+    let mut js = runtime();
+    let graph = js.eval(
+        "var original=osc(10).rotate(0.2);\
+         var copy=Object.assign({},original);Object.setPrototypeOf(copy,Object.getPrototypeOf(original));\
+         copy.transforms=Array.from(original.transforms);\
+         copy.transforms[0]={...copy.transforms[0],userArgs:[7,0.1,0]};\
+         if(original.transforms[0].transform.name!=='osc')throw Error('metadata');\
+         if(original.transforms[0].userArgs[0]!==10)throw Error('copy changed original');\
+         var pattern=[10,20];var patterned=osc(pattern);\
+         if(patterned.transforms[0].userArgs[0]!==pattern)throw Error('pattern metadata');\
+         patterned.out(o2);\
+         original.out(o0);copy.brightness(0.5).out(o1)"
+    ).unwrap();
+    assert_eq!(
+        graph.shaders[0],
+        hydra_rust::eval("osc(10).rotate(0.2).out()")
+            .unwrap()
+            .shaders[0]
+    );
+    assert_eq!(
+        graph.shaders[1],
+        hydra_rust::eval("osc(7).rotate(0.2).brightness(0.5).out(o1)")
+            .unwrap()
+            .shaders[1]
+    );
 }
 
 #[test]
@@ -506,8 +625,8 @@ fn custom_functions_can_replace_native_functions_and_rollback_restores_them() {
         )
         .unwrap();
     let shader = replaced.shaders[0].as_ref().unwrap();
-    assert!(shader.contains("vec4 hydraJs_osc("));
-    assert!(shader.contains("hydraJs_osc(st, 0.25)"));
+    assert!(shader.contains("vec4 hydraJsFunction0("));
+    assert!(shader.contains("hydraJsFunction0(st, 0.25)"));
     js.rollback_last_eval().unwrap();
     assert_eq!(js.eval("").unwrap().shaders[0], original.shaders[0]);
     let restored = js.eval("osc(8,0.1,0).out()").unwrap();
@@ -515,7 +634,7 @@ fn custom_functions_can_replace_native_functions_and_rollback_restores_them() {
         !restored.shaders[0]
             .as_ref()
             .unwrap()
-            .contains("hydraJs_osc")
+            .contains("hydraJsFunction")
     );
     assert!(
         js.eval(
@@ -533,7 +652,12 @@ fn library_extensions_mutate_array_and_node_prototypes() {
     let mut js = JavascriptRuntime::new(root.clone()).unwrap();
     let script = std::fs::read_to_string(root.join("live.js")).unwrap();
     let graph = js.eval(&script).unwrap();
-    assert!(graph.shaders[0].as_ref().unwrap().contains("diagonalBands"));
+    assert!(
+        graph.shaders[0]
+            .as_ref()
+            .unwrap()
+            .contains("sin((_st.x + _st.y) * hydraJsInput0)")
+    );
     let first = js
         .frame(JavascriptFrame {
             time: 0.0,

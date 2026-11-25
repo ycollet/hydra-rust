@@ -1,7 +1,11 @@
 (() => {
   "use strict";
   const metadata = new Map(__metadata.map(m => [m.name, m]));
+  for (const spec of metadata.values()) spec.inputs = spec.defaults.map((value,index)=>
+    ({name:`i${index}`,type:"float",default:value}));
   delete globalThis.__metadata;
+  const functionLimits = __functionLimits;
+  delete globalThis.__functionLimits;
   const features = __features;
   delete globalThis.__features;
   const consoleLog = __consoleLog;
@@ -12,9 +16,11 @@
     ])
   ));
   let callbacks = [], committedCallbacks = [], definitions = new Map(), buffers = [null,null,null,null];
+  let definitionBytes = 0;
   let saved, committedUpdate = null, audioRead = false, running = false;
   let activeSlots = new Set(), pendingActiveSlots = new Set();
   const callbackFunctions = new WeakMap();
+  const arrayCallbacks = new WeakMap(), callbackArrays = new WeakMap();
   let renderBuffer = null, all = false, resolution = null, filters = [null,null,null,null], capture = false;
   let textRequest = null, clear = [false,false,false,false];
   let commands = [], midiBindings = new Map(), envelopes = new Map(), oscBindings = new Map();
@@ -62,27 +68,75 @@
     if (typeof v === "function") return slot(v);
     if (Array.isArray(v)) {
       if (!v.length) throw new Error("empty pattern");
-      return slot(() => {
-        const speed = v._speed ?? 1, offset = v._offset ?? 0;
-        const position = time * tempo / 60 * speed + offset;
-        const index = ((Math.floor(position) % v.length) + v.length) % v.length;
-        return v[index];
-      });
+      if (!arrayCallbacks.has(v)) {
+        const callback = () => {
+          const speed = v._speed ?? 1, offset = v._offset ?? 0;
+          const position = time * tempo / 60 * speed + offset;
+          const index = ((Math.floor(position) % v.length) + v.length) % v.length;
+          return v[index];
+        };
+        arrayCallbacks.set(v,callback);
+        callbackArrays.set(callback,v);
+      }
+      return slot(arrayCallbacks.get(v));
     }
     if (typeof v !== "number" || !Number.isFinite(v)) throw new Error("shader arguments require finite numbers or callbacks");
     return {type:"number",value:v};
   };
-  class Node {
-    constructor(ops) { this.ops = ops; }
-    tileable(width = 0.15) {
-      editing();
-      return new Node([{name:"tileable",args:[value(width)],other:this}]);
-    }
+  class OutputNode {
     out(buffer = o0) {
       editing();
       const index = outputIndex(buffer);
       buffers[index] = this;
       return this;
+    }
+  }
+  const decode = arg => {
+    if (arg.type === "number") return arg.value;
+    if (arg.type === "callback" && callbackFunctions.has(arg)) {
+      const callback = callbackFunctions.get(arg);
+      return callbackArrays.get(callback) ?? callback;
+    }
+    if (arg.type === "texture") return arg.value.kind === "output" ? outputs[arg.value.index] : sources[arg.value.index];
+    throw new Error("Invalid encoded graph argument");
+  };
+  class Node extends OutputNode {
+    constructor(ops) {
+      super();
+      this.transforms = ops.map(op => {
+        let name = op.name;
+        let userArgs = op.args.map(decode);
+        if (name === "src" || name === "ext_src") {
+          userArgs = [name === "src" ? outputs[userArgs[0]] : sources[userArgs[0]]];
+          name = "src";
+        } else if (op.other) userArgs.unshift(op.other);
+        const spec = definitions.get(name) ?? metadata.get(name);
+        return {name,transform:{name,type:spec?.kind ?? "src",inputs:spec?.inputs ?? []},userArgs};
+      });
+    }
+    get ops() {
+      if (!Array.isArray(this.transforms) || this.transforms.length > 4096) throw new Error("Invalid graph transforms");
+      return this.transforms.map(transform => {
+        if (!transform?.transform || !Array.isArray(transform.userArgs)) throw new Error("Invalid graph transform");
+        const name = transform.transform.name;
+        const args = transform.userArgs.slice();
+        if (name === "src") {
+          const reference = textureRef(args[0]);
+          return {name:reference.kind === "output" ? "src" : "ext_src",args:[value(reference.index)],other:null};
+        }
+        if (name === "text_src") return {name,args:[],other:null};
+        if (name === "tileable") {
+          if (!(args[0] instanceof Node)) throw new Error("Invalid tileable graph");
+          return {name,args:[value(args[1])],other:args[0]};
+        }
+        const spec = definitions.get(name) ?? metadata.get(name);
+        if (!spec) throw new Error(`Unknown graph function ${name}`);
+        return operation(spec,args);
+      });
+    }
+    tileable(width = 0.15) {
+      editing();
+      return new Node([{name:"tileable",args:[value(width)],other:this}]);
     }
   }
   const outputIndex = buffer => {
@@ -125,16 +179,26 @@
     if (typeof v === "number") return solid(v,v,v,1);
     throw new Error("expected a texture node");
   }
+  const textureRef = texture => {
+    if (outputs.includes(texture)) return {kind:"output",index:texture.index};
+    if (sources.includes(texture)) return {kind:"source",index:texture.index};
+    throw new Error("Sampler inputs require a native output or source buffer");
+  };
+  function operation(m, supplied) {
+    editing();
+    let other = null;
+    if (m.kind === "combine" || m.kind === "combineCoord") other = texture(supplied.shift());
+    const inputs = m.inputs ?? m.defaults.map(defaultValue=>({type:"float",default:defaultValue}));
+    if (supplied.length > inputs.length) throw new Error(`too many arguments for ${m.name}`);
+    const args = inputs.map((input,index)=>{
+      if (input.type === "sampler2D") return {type:"texture",value:
+        supplied[index] === undefined ? input.default : textureRef(supplied[index])};
+      return value(supplied[index] === undefined ? input.default : supplied[index]);
+    });
+    return {name:m.name,args,other};
+  }
   function install(m) {
-    const call = (node, supplied) => {
-      editing();
-      let other = null;
-      if (m.kind === "combine" || m.kind === "combineCoord") other = texture(supplied.shift());
-      if (supplied.length > m.defaults.length) throw new Error(`too many arguments for ${m.name}`);
-      const args = m.defaults.map((d,i) => value(supplied[i] === undefined ? d : supplied[i]));
-      const op = {name:m.name,args,other};
-      return new Node(node ? [...node.ops,op] : [op]);
-    };
+    const call = (node, supplied) => new Node(node ? [...node.ops,operation(m,supplied)] : [operation(m,supplied)]);
     if (m.kind === "src") {
       delete Node.prototype[m.name];
       globalThis[m.name] = (...args) => call(null,args);
@@ -148,16 +212,27 @@
     editing();
     if (!def || typeof def.name !== "string" || typeof def.glsl !== "string") throw new Error("invalid setFunction definition");
     if (!["src","coord","color","combine","combineCoord"].includes(def.type)) throw new Error("unsupported setFunction type");
+    const identifier = name => typeof name === "string" && name.length <= functionLimits.name &&
+      /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) && !name.startsWith("gl_");
+    if (!identifier(def.name) || def.glsl.length > functionLimits.body) throw new Error("Invalid custom function name or size");
+    if (!Array.isArray(def.inputs ?? []) || (def.inputs ?? []).length > functionLimits.inputs) throw new Error("Invalid custom function inputs");
+    const names = new Set();
     const inputs = (def.inputs ?? []).map(i => {
-      if (i.type !== "float") throw new Error("only float shader inputs are supported");
+      if (!identifier(i.name) || ["st","c0","c1","_st","_c0","_c1"].includes(i.name) || names.has(i.name)) throw new Error("Invalid custom function input name");
+      names.add(i.name);
+      if (i.type === "sampler2D") return {name:i.name,type:i.type,default:textureRef(i.default ?? o0)};
+      if (i.type !== "float") throw new Error("Only float and sampler2D shader inputs are supported");
       const d = i.default ?? 0;
-      if (typeof d !== "number" || !Number.isFinite(d)) throw new Error("invalid input default");
-      return {name:i.name,default:d};
+      finite(d);
+      return {name:i.name,type:i.type,default:d};
     });
-    if (["src","ext_src","text_src","tileable","text","strokeText","fillStrokeText","strokeFillText","out","constructor"].includes(def.name)) throw new Error("cannot replace graph infrastructure");
-    if (!definitions.has(def.name) && definitions.size >= 256) throw new Error("custom function limit");
+    if (["src","ext_src","text_src","tileable","text","strokeText","fillStrokeText","strokeFillText","out","constructor","ops","transforms"].includes(def.name)) throw new Error("cannot replace graph infrastructure");
+    if (!definitions.has(def.name) && definitions.size >= functionLimits.count) throw new Error("custom function limit");
+    const bytes = definitionBytes - (definitions.get(def.name)?.glsl.length ?? 0) + def.glsl.length;
+    if (bytes > functionLimits.bytes) throw new Error("Custom shader registry byte limit exceeded");
+    definitionBytes=bytes;
     definitions.set(def.name,{name:def.name,kind:def.type,inputs,glsl:def.glsl});
-    install({name:def.name,kind:def.type,defaults:inputs.map(i=>i.default)});
+    install(definitions.get(def.name));
   }
   function src(buffer) {
     if (outputs.includes(buffer)) return new Node([{name:"src",args:[value(buffer.index)],other:null}]);
@@ -346,7 +421,7 @@
   };
   globalThis.__bridge = Object.freeze({
     begin() {
-      saved={callbacks:callbacks.slice(),buffers:buffers.slice(),definitions:new Map(definitions),
+      saved={callbacks:callbacks.slice(),buffers:buffers.slice(),definitions:new Map(definitions),definitionBytes,
         renderBuffer,all,resolution,filters:filters.slice(),capture,audioRead,
         committedCallbacks:committedCallbacks.slice(),committedUpdate,activeSlots,savedUpdate:update,textRequest,clear:clear.slice(),
         commands:commands.slice(),midiBindings:new Map(midiBindings),envelopes:new Map(envelopes),oscBindings:new Map(oscBindings),
@@ -358,7 +433,7 @@
     },
     rollback() {
       const oldDefinitions = definitions;
-      ({callbacks,buffers,definitions,renderBuffer,all,resolution,filters,capture,audioRead,committedCallbacks,committedUpdate,activeSlots,textRequest,clear,commands,midiBindings,envelopes,oscBindings,audioSettings}=saved);
+      ({callbacks,buffers,definitions,definitionBytes,renderBuffer,all,resolution,filters,capture,audioRead,committedCallbacks,committedUpdate,activeSlots,textRequest,clear,commands,midiBindings,envelopes,oscBindings,audioSettings}=saved);
       globalThis.update=saved.savedUpdate;
       for (const [name,def] of oldDefinitions) {
         if (!definitions.has(name)) {
@@ -367,7 +442,7 @@
           else delete Node.prototype[name];
         }
       }
-      for (const def of definitions.values()) install({name:def.name,kind:def.kind,defaults:def.inputs.map(i=>i.default)});
+      for (const def of definitions.values()) install(def);
     },
     commit() {
       if (typeof update !== "function") throw new Error("update must be a function");

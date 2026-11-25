@@ -438,7 +438,7 @@ For example, use **Reset JavaScript interpreter** after heap exhaustion, then ev
 
 This table describes local loading in the standalone application's JavaScript backend.
 The plugin's Rhai backend does not execute these JavaScript files.
-The source review uses upstream revision [e48aacb](https://github.com/geikha/hyper-hydra/tree/e48aacbe775cd6731c50cc327ed86cd7e7beab6c).
+Source reviews and execution checks use revision [e48aacb](https://github.com/geikha/hyper-hydra/tree/e48aacbe775cd6731c50cc327ed86cd7e7beab6c).
 Future upstream changes can affect compatibility.
 
 **Verified examples** means representative scripts executed and produced valid shaders, not every exported function.
@@ -449,27 +449,27 @@ Loading a file successfully does not prove that its functions work.
 
 | Extension | Status | Evidence or blocker |
 |-----------|--------|---------------------|
-| `hydra-abbreviations.js` | Candidate | Adds aliases for chain methods. Only aliases targeting available methods can work. |
-| `hydra-arithmetics.js` | Needs bridge changes | Generated function names and inputs start with `_`, which the current validator rejects. |
+| `hydra-abbreviations.js` | Verified examples | `bright`, `rot`, and chained `o()` aliases execute and compile. |
+| `hydra-arithmetics.js` | Verified examples | Scalar addition, trigonometric functions, ranges, and texture comparisons execute and compile. |
 | `hydra-arrays.js` | Verified examples | Array extensions work, including arithmetic and arrays used as animated shader arguments. |
-| `hydra-blend.js` | Needs shader changes | The generated `phoenix` shader assigns a vector expression to scalar color channels. |
+| `hydra-blend.js` | Verified examples with a known failure | `screen` compiles without unused shaders. `phoenix` still fails because its scalar assignments contain vectors. |
 | `hydra-canvas.js` | Unsupported browser APIs | Changes browser canvas styles and parent-element layout. |
-| `hydra-colorspaces.js` | Needs bridge changes | Uses underscore-prefixed inputs and browser Hydra's `transforms` representation. |
-| `hydra-convolutions.js` | Needs bridge changes | Requires `sampler2D` inputs. Custom functions currently accept only float inputs. |
+| `hydra-colorspaces.js` | Verified examples | Hue offsets, color-space multipliers, and `hWith` graph copies execute and compile. |
+| `hydra-convolutions.js` | Verified examples | `sharpen` and `sharpenLuma` compile with native output and source samplers. |
 | `hydra-debug.js` | Unsupported browser APIs | Creates browser interface elements and loads remote dependencies. |
 | `hydra-fractals.js` | Verified examples | Mirror and inversion shaders work through dynamic registration. |
 | `hydra-gif.js` | Unsupported browser APIs | Requires browser image decoding, canvases, timers, and source internals. |
-| `hydra-glsl.js` | Needs bridge changes | Generated names start with `_`. Shader snippets redeclare native parameters `st`, `c0`, or `c1`. |
+| `hydra-glsl.js` | Verified examples | Source, coordinate, color, hue/saturation/value, combination, and modulation snippets execute and compile. |
 | `hydra-gradientmap.js` | Unsupported browser APIs | Requires `sampler2D` inputs, browser canvases, and browser Hydra source objects. |
 | `hydra-mouse.js` | Unsupported browser APIs | Attaches browser pointer listeners and reads canvas dimensions. Native `mouse` remains available. |
 | `hydra-outputs.js` | Unsupported graphics internals | Directly manipulates `regl` textures, framebuffers, and browser Hydra output objects. |
 | `hydra-pip.js` | Unsupported browser APIs | Requires canvas video capture and browser picture-in-picture support. |
 | `hydra-pixels.js` | Unsupported graphics internals | Reads pixels through `regl` and browser Hydra framebuffer objects. |
 | `hydra-src.js` | Partial candidate | Buffer masking helpers appear suitable. Dimension-aware helpers require browser canvas and source metadata. |
-| `hydra-swizzle.js` | Needs bridge changes | Generated names start with `_`. Registration also exceeds the 256-definition limit. |
+| `hydra-swizzle.js` | Verified examples | The complete registry loads. Chained `bgra` and `r` properties execute and compile. |
 | `hydra-tap.js` | Unsupported browser APIs | Requires browser keyboard listeners and timers. |
 | `hydra-text.js` | Unsupported browser APIs | Draws through browser canvases and creates browser Hydra source objects. |
-| `hydra-vec4.js` | Candidate | Builds vectors and calls `solid()`. No browser drawing dependencies appear in these helpers. |
+| `hydra-vec4.js` | Verified examples | Nested `vec2`, `vec3`, and `vec4` helpers generate valid solid-color shaders. |
 | `hydra-wrap.js` | Unsupported graphics internals | Recreates `regl` framebuffers and modifies browser Hydra output objects. |
 
 `regl` is Hydra's browser graphics library.
@@ -480,6 +480,25 @@ For example, native `o0.setNearest()` does not provide the framebuffer internals
 Keep local copies inside the configured library root.
 For example, `loadScript("hydra-fractals.js")` loads the local file without `await`.
 Remote URLs remain unsupported.
+
+#### Reproducing compatibility checks
+
+The optional upstream checks require Git, a local checkout, and `glslangValidator`.
+They do not download libraries during execution.
+They verify the checkout revision and reject tracked source changes.
+Each example executes the unchanged library and validates its complete generated fragment shader.
+The blend check also confirms the known `phoenix` failure.
+
+```bash
+git clone https://github.com/geikha/hyper-hydra libraries/hyper-hydra
+git -C libraries/hyper-hydra checkout e48aacbe775cd6731c50cc327ed86cd7e7beab6c
+HYDRA_HYPER_HYDRA_ROOT="$PWD/libraries/hyper-hydra" \
+  cargo test --no-default-features --features javascript \
+  --test hyper_hydra -- --ignored
+```
+
+Native rendering checks also exercise actual output and source sampler bindings.
+For example, a custom sampler reads an existing green output and an uploaded red source.
 
 ### Live JavaScript callbacks
 
@@ -615,6 +634,9 @@ Libraries can call `setFunction()` at runtime to add chain operations and source
 Hydra's `_st`, `_c0`, and `_c1` shader argument names are supported.
 The native `st`, `c0`, and `c1` names also remain available.
 Custom definitions can replace built-in shader functions.
+Names beginning with underscores work.
+The bridge maps function and input names to safe internal shader identifiers.
+Snippets can declare local `st`, `c0`, and `c1` without duplicating native aliases.
 
 ```javascript
 setFunction({
@@ -624,6 +646,57 @@ setFunction({
   glsl: "return vec4(vec3(sin((_st.x + _st.y) * frequency)), 1.0);"
 });
 diagonal(20).out();
+```
+
+Only custom functions used by an output graph enter that output's shader.
+Unused invalid shader bodies no longer block unrelated functions.
+Using an invalid shader still reports an error and preserves the previous output.
+For example, `hydra-blend.js`'s `screen` works even though its unused `phoenix` shader remains invalid.
+Internal shader names are not a public library interface.
+Compose registered operations through graph chains instead of calling their internal shader names.
+
+| Shader registry limit | Maximum |
+|-----------------------|---------|
+| Registered functions | 4,096 |
+| Combined shader-body text | 4 mebibytes |
+| One shader body | 64 kibibytes |
+| Inputs per function | 32 |
+| Function or input name | 128 characters |
+
+These bounds supplement the configured heap, execution, and serialized-graph limits.
+For example, loading swizzle definitions does not remove memory protection.
+GLSL is OpenGL's shader language.
+`texture2D` calls map to the native GLSL `texture` function.
+Custom inputs accept `float` or `sampler2D`.
+Samplers require native outputs `o0` through `o3`, or sources `s0` through `s3`.
+Texture callbacks, arbitrary graph nodes, and browser texture objects remain unsupported as sampler inputs.
+
+```javascript
+setFunction({
+  name: "_sample",
+  type: "src",
+  inputs: [{ name: "_tex", type: "sampler2D", default: o0 }],
+  glsl: "return texture2D(_tex, _st);"
+});
+_sample(o1).out();
+```
+
+Direct samplers use raw native texture coordinates.
+Use `src(s0)` when a graph needs the usual native source orientation.
+
+#### Graph metadata
+
+Nodes expose `transforms` records containing function metadata and original arguments.
+Extensions can copy those arrays and reuse the graph prototype.
+This adapter supports Hyper-Hydra's colorspace cloning helpers.
+It does not provide browser source, canvas, or framebuffer objects.
+
+```javascript
+var original = osc(10);
+var copy = Object.assign({}, original);
+Object.setPrototypeOf(copy, Object.getPrototypeOf(original));
+copy.transforms = Array.from(original.transforms);
+copy.invert().out();
 ```
 
 ### Scope and limitations
