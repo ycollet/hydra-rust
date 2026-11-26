@@ -1,7 +1,7 @@
 #![cfg(all(feature = "javascript", target_os = "macos"))]
 
 use std::cell::RefCell;
-use std::ffi::{CString, c_void};
+use std::ffi::c_void;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -9,24 +9,13 @@ use glow::HasContext;
 use hydra_rust::javascript::{JavascriptFrame, JavascriptRuntime, JavascriptSettings};
 use hydra_rust::renderer::{RenderUniforms, ShaderRenderer, render_multipass};
 
-#[link(name = "OpenGL", kind = "framework")]
-unsafe extern "C" {
-    fn CGLChoosePixelFormat(
-        attributes: *const i32,
-        format: *mut *mut c_void,
-        count: *mut i32,
-    ) -> i32;
-    fn CGLDestroyPixelFormat(format: *mut c_void) -> i32;
-    fn CGLCreateContext(format: *mut c_void, share: *mut c_void, context: *mut *mut c_void) -> i32;
-    fn CGLSetCurrentContext(context: *mut c_void) -> i32;
-    fn CGLDestroyContext(context: *mut c_void) -> i32;
-}
+#[path = "support/native_gl.rs"]
+mod native_gl;
+use native_gl::NativeContext;
 
 unsafe extern "C" {
     fn dlsym(handle: *mut c_void, name: *const std::ffi::c_char) -> *mut c_void;
 }
-
-struct NativeContext(*mut c_void);
 
 #[derive(Default, Clone)]
 struct GlCalls {
@@ -74,51 +63,15 @@ unsafe extern "C" fn counted_read_pixels(
 }
 
 impl NativeContext {
-    fn new() -> Self {
-        const OPENGL_PROFILE: i32 = 99;
-        const CORE_PROFILE: i32 = 0x3200;
-        let attributes = [OPENGL_PROFILE, CORE_PROFILE, 0];
-        let mut format = std::ptr::null_mut();
-        let mut count = 0;
-        let mut context = std::ptr::null_mut();
-        unsafe {
-            assert_eq!(
-                CGLChoosePixelFormat(attributes.as_ptr(), &mut format, &mut count),
-                0
-            );
-            assert!(!format.is_null());
-            let result = CGLCreateContext(format, std::ptr::null_mut(), &mut context);
-            CGLDestroyPixelFormat(format);
-            assert_eq!(result, 0);
-            assert_eq!(CGLSetCurrentContext(context), 0);
-        }
-        Self(context)
-    }
-
     fn gl(&self) -> Arc<glow::Context> {
-        Arc::new(unsafe {
-            glow::Context::from_loader_function(|symbol| {
-                match symbol {
-                    "glCreateProgram" => {
-                        return counted_create_program as *const () as *const c_void;
-                    }
-                    "glGenTextures" => return counted_gen_textures as *const () as *const c_void,
-                    "glReadPixels" => return counted_read_pixels as *const () as *const c_void,
-                    _ => {}
-                }
-                let name = CString::new(symbol).unwrap();
-                dlsym((-2_isize) as *mut c_void, name.as_ptr()).cast_const()
+        self.gl_with_loader(|symbol| {
+            Some(match symbol {
+                "glCreateProgram" => counted_create_program as *const () as *const c_void,
+                "glGenTextures" => counted_gen_textures as *const () as *const c_void,
+                "glReadPixels" => counted_read_pixels as *const () as *const c_void,
+                _ => return None,
             })
         })
-    }
-}
-
-impl Drop for NativeContext {
-    fn drop(&mut self) {
-        unsafe {
-            CGLSetCurrentContext(std::ptr::null_mut());
-            CGLDestroyContext(self.0);
-        }
     }
 }
 
@@ -148,7 +101,7 @@ fn uniforms(values: [f32; 128]) -> RenderUniforms {
 
 #[test]
 fn graph_replacement_reuses_programs_and_targets_and_discards_only_failed_staging() {
-    let context = NativeContext::new();
+    let context = NativeContext::new().unwrap();
     let gl = context.gl();
     let mut renderer = ShaderRenderer::new(gl.clone());
     renderer.ensure_resolution_checked(8, 8).unwrap();
@@ -192,7 +145,7 @@ fn graph_replacement_reuses_programs_and_targets_and_discards_only_failed_stagin
 
 #[test]
 fn extension_examples_compile_in_both_scripting_languages() {
-    let context = NativeContext::new();
+    let context = NativeContext::new().unwrap();
     let gl = context.gl();
     let mut renderer = ShaderRenderer::new(gl);
     renderer.ensure_resolution_checked(8, 8).unwrap();
@@ -233,7 +186,7 @@ fn extension_examples_compile_in_both_scripting_languages() {
 
 #[test]
 fn extended_gpu_passes_history_and_region_readback() {
-    let context = NativeContext::new();
+    let context = NativeContext::new().unwrap();
     let gl = context.gl();
     let mut renderer = ShaderRenderer::new(gl.clone());
     renderer.ensure_resolution_checked(8, 8).unwrap();
@@ -439,7 +392,7 @@ fn extended_gpu_passes_history_and_region_readback() {
 
 #[test]
 fn native_rendering_uploads_callbacks_and_preserves_programs_after_compile_failure() {
-    let context = NativeContext::new();
+    let context = NativeContext::new().unwrap();
     let gl = context.gl();
     let mut renderer = ShaderRenderer::new(gl.clone());
     renderer.ensure_resolution(8, 8);

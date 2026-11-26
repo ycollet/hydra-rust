@@ -71,12 +71,17 @@ See [runtime and resource limits](DOCUMENTATION.md#runtime-and-resource-limits) 
 
 ### Performance measurements
 
-- [ ] **Repeatable benchmarks:** record release-build timings and allocations for evaluation, graph replacement, analysis, and readback.
+- [x] **Repeatable benchmarks:** record release-build timings and allocations for evaluation, graph replacement, analysis, and readback.
   Separate processor timings, forced graphics completion, and real application frame rates.
   Example: compare unchanged graph replacement with a change affecting only one intermediate pass.
+  Run `cargo run --release --no-default-features --features fft,midi,javascript --example performance -- --gpu`.
+  The graphics workloads currently require macOS; omit `--gpu` for portable processor measurements.
 - [ ] **Representative hardware profiling:** measure plugin audio deadlines, interface stalls, camera capture, and simultaneous viewers.
   Include Linux display systems and real digital audio workstation hosts.
   Example: resize the plugin while processing audio and check for callback overruns.
+  The profiling procedure is ready, but live host, camera, viewer, and Linux measurements remain pending.
+
+See [performance measurements](DOCUMENTATION.md#performance-measurements) for commands, methodology, initial results, and the hardware checklist.
 
 ## Additional ideas
 

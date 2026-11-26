@@ -33,6 +33,7 @@ chains implicitly write to `o0`; an explicit `.out()` is also valid.
 - [Text rendering](#text-rendering)
 - [Pattern easing](#pattern-easing)
 - [Runtime and resource limits](#runtime-and-resource-limits)
+- [Performance measurements](#performance-measurements)
 - [Current limitations](#current-limitations)
 - [Testing against a real-world sketch corpus](#testing-against-a-real-world-sketch-corpus)
 - [How chains work](#how-chains-work)
@@ -1061,6 +1062,171 @@ Cancellation checks run between download reads and GIF frames.
 A running native decoder may finish before noticing cancellation.
 For example, evaluating `s0.initImage("https://example.com/new.png")` cancels an older pending load for `s0`.
 Requests use a 20-second timeout and a two-second socket-read timeout.
+
+## Performance measurements
+
+### Repeatable release benchmarks
+
+The `performance` example measures scripting, analysis, graph replacement, rendering, and readback.
+It never starts microphones, cameras, system MIDI ports, network sessions, or audio hosts.
+Processor workloads run without a window.
+The optional offscreen graphics workloads currently require macOS.
+
+- Run commands from the repository root.
+- Use a release build, consistent power settings, and the same compiler and features.
+- Avoid simultaneous builds, profilers, and other heavy workloads.
+- Save reports under `target/` to keep generated results outside version control.
+- Repeat each run before drawing conclusions.
+
+For example, record processor timings and Rust allocations:
+
+```bash
+cargo run --release --no-default-features --features fft,midi,javascript \
+  --example performance -- --output target/performance-cpu.json --label baseline
+```
+
+On macOS, include offscreen graphics measurements:
+
+```bash
+cargo run --release --no-default-features --features fft,midi,javascript \
+  --example performance -- --gpu --samples 15 --iterations 20 \
+  --output target/performance-gpu.json --label baseline
+```
+
+Omitted features appear in the report's `skipped` list.
+For example, removing `javascript` skips callback workloads without silently reporting zero time.
+Invalid arguments, unsupported graphics platforms, and workload failures exit unsuccessfully.
+Debug builds refuse measurement.
+For example, `--samples 0` reports an error.
+
+Reports include the base revision, source changes, compiler, processor, enabled workload features, and graphics device.
+Keep the matching source changes when measuring an uncommitted build.
+For example, compare `graph/unchanged_blur` with `graph/change_one_pass` in reports from the same machine.
+
+### Interpreting results
+
+Each workload warms up with three operations.
+The default run measures fifteen batches of twenty operations.
+Times include operation cleanup.
+The report records the nearest-rank median and 95th percentile of batch means.
+These are not individual-operation tail latencies or confidence intervals.
+For example, one slow operation can disappear inside a twenty-operation average.
+
+Allocation counts use a separate measurement pass.
+They count successful Rust allocation and reallocation calls on the benchmark thread.
+Requested bytes sum allocation sizes, including full reallocation requests.
+They exclude interpreter-native, graphics-driver, and other-thread allocations.
+They do not measure retained or peak memory.
+The counting allocator remains installed during timings, with counting disabled.
+For example, zero reported Rust allocations does not prove a graphics operation allocates no driver memory.
+
+| Timing kind | Meaning | Example |
+|---|---|---|
+| `cpu_wall` | Calling-thread elapsed time, including operating-system scheduling | Rhai evaluation |
+| `gpu_forced_completion_wall` | Submission and completion, including processor work and driver waits | Rendering followed by `glFinish()` |
+| Application frame rate | Not measured by this harness | A live window with vertical synchronization |
+
+Graphics workloads render at 1280 by 720 pixels.
+Region workloads include rendering and synchronous readback for one or sixteen regions.
+Capture workloads include rendering and a 640-by-360 pixel transfer.
+For example, compare `readback/render_16_regions` with `render/noise`, not with a live application's frame rate.
+
+Graph workloads exclude scripting and alternate between two prebuilt graphs.
+The changed-graph workload modifies one intermediate pass.
+Driver shader caches remain warm.
+For example, these results do not predict first-launch shader compilation.
+
+Audio producer measurements deliberately fill the bounded queue before timing.
+Normal analysis measurements push 800 samples and poll the analyzer.
+For example, `audio/push_512_full_queue` measures overflow replacement, not an entire host audio callback.
+MIDI workloads poll sixty-four wildcard bindings across one or eight synthetic inputs.
+JavaScript workloads retain either zero or 128 reachable callbacks.
+
+### Initial local measurements
+
+This run used Apple M4 Max, macOS 27.2.1, and Rust 1.100.0.
+The date was November 26, 2026.
+The base revision was `12cd0cb`, with the new benchmark harness and documentation changes.
+The command above used `--gpu`, fifteen samples, and twenty iterations.
+These illustrative results are not performance guarantees or automatic regression thresholds.
+
+| Workload | Median microseconds | 95th-percentile batch mean | Rust allocation calls per operation |
+|---|---:|---:|---:|
+| Simple Rhai evaluation | 151.50 | 267.53 | 3303 |
+| Preprocessing, 22,814 bytes | 2960.31 | 3088.74 | 80673 |
+| Push 512 samples into a full queue | 1.77 | 2.35 | 0 |
+| Idle audio poll | 2.81 | 3.20 | 3 |
+| Push and analyze 800 samples | 16.56 | 20.06 | 6.2 |
+| MIDI, sixty-four bindings, one input | 60.79 | 63.92 | 0 |
+| MIDI, sixty-four bindings, eight inputs | 533.06 | 600.02 | 0 |
+| JavaScript, zero callbacks | 15.53 | 16.81 | 14 |
+| JavaScript, 128 callbacks | 85.82 | 90.74 | 14 |
+| Render noise | 158.74 | 416.93 | 0 |
+| Render one blur | 196.96 | 201.75 | 0 |
+| Render four blurs | 446.44 | 719.47 | 0 |
+| Render two nested tileable operations | 697.47 | 947.49 | 0 |
+| Replace an unchanged graph | 0.28 | 0.36 | 6 |
+| Replace one changed pass | 5068.30 | 5197.14 | 167 |
+| Render and sample one region | 189.63 | 398.70 | 0 |
+| Render and sample sixteen regions | 604.41 | 699.71 | 0 |
+| Render and capture 640 by 360 pixels | 456.46 | 551.90 | 1 |
+
+Fractional allocation counts represent calls averaged across a batch.
+For example, rhythm-analysis steps can allocate in some operations but not others.
+
+### Representative hardware profiling
+
+These live checks remain pending.
+Synthetic benchmarks cannot establish audio deadlines, camera throughput, network behavior, or interface responsiveness.
+Do not open hardware devices or network listeners on shared machines without permission.
+
+- Record the revision, operating system, processor, graphics driver, display scale, power mode, and build command.
+- Record the host name and version, plugin format, audio interface, sample rate, and block size.
+- Use the same sketch, window size, and test duration for baseline and candidate builds.
+- Warm up for thirty seconds, then record at least sixty seconds.
+- Repeat three times and save raw profiler data alongside the results.
+
+For example, compare the same 1280-by-720 sketch before and after a change, using identical host settings.
+
+| Scenario | Procedure | Required measurements |
+|---|---|---|
+| Plugin audio | Feed audio and MIDI while resizing, maximizing, and reloading sketches | Callback duration distribution, maximum duration, missed deadlines, host underruns |
+| Interface stalls | Type, evaluate, resize, and recover from invalid scripts | Main-thread stalls, event-to-paint delay, frame intervals |
+| Camera capture | Use one camera, then multiple supported source slots | Delivered and uploaded frames, frame age, processor use, memory growth |
+| Broadcast viewers | Compare zero, one, and four permitted local-network viewers | Capture rate, delivered frame rate, encoder use, memory, slow-viewer effects |
+| Linux display systems | Repeat window and plugin checks under X11 and Wayland where supported | Window behavior, frame intervals, driver details, host differences |
+
+For audio, calculate the callback deadline as block frames divided by sample rate.
+For example, 128 frames at 48,000 samples per second allow approximately 2.67 milliseconds.
+Measure the entire host callback, not just queue publication.
+Record host underruns separately from audio-analysis queue overruns.
+
+Use the host's deadline monitor or external profiling tools without logging or allocating inside the audio callback.
+For example, use Instruments on macOS or `perf` on Linux to identify blocking call stacks.
+Statistical sampling alone cannot prove that every callback met its deadline.
+If the host lacks callback-duration tracing, report that field as unavailable.
+
+Use a presentation-aware trace for live frame rates.
+For example, a sixty-frame-per-second display has approximately 16.67 milliseconds between presentations.
+Do not derive live frame rates by inverting the offscreen benchmark times.
+
+Use an externally visible clock to measure camera frame age.
+For example, film a running millisecond counter and compare capture with displayed output.
+Record camera permissions and requested format before testing.
+
+Use the existing stream examples for permitted viewer tests:
+
+```bash
+cargo run --release --features stream --bin hydra -- examples/stream_broadcast.hydra
+cargo run --release --features stream --bin hydra -- examples/stream_basic.hydra
+```
+
+Verify matching addresses and ports before connecting viewers.
+For example, compare zero viewers against four viewers on the same permitted local network.
+Confirm that the broadcaster stops capturing when the final viewer disconnects.
+
+Mark hardware profiling complete only after saving results from real audio hosts, cameras, viewers, and Linux display sessions.
+For example, an offscreen macOS run cannot satisfy the Linux profiling task.
 
 ## Current limitations
 
