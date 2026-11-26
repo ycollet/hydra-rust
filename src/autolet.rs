@@ -33,7 +33,7 @@ pub fn insert_missing_let(src: &str) -> String {
     let mask = mask_strings_and_comments(&chars);
     let n = chars.len();
     let mut out = String::with_capacity(src.len() + 16);
-    let mut known: HashSet<String> = BUILTIN_NAMES.iter().map(|s| s.to_string()).collect();
+    let mut known: HashSet<&[char]> = HashSet::new();
     // Only `(` / `[` depth: `let` is a valid statement inside a `{ ... }`
     // block (e.g. a block-bodied arrow), but never inside a plain
     // parenthesized argument list or array literal - JS allows assignment
@@ -51,16 +51,22 @@ pub fn insert_missing_let(src: &str) -> String {
         }
         if !mask[i] && is_ident_start(chars[i]) && !preceded_by_ident_or_dot(&chars, i) {
             let end = ident_end(&chars, i);
-            let ident: String = chars[i..end].iter().collect();
+            let ident = &chars[i..end];
 
             let mut p = end;
             skip_ws(&chars, &mask, &mut p);
             if is_plain_assignment(&chars, &mask, p) {
-                if depth == 0 && !known.contains(&ident) && !preceded_by_decl_keyword(&chars, i) {
+                if depth == 0
+                    && !known.contains(ident)
+                    && !BUILTIN_NAMES
+                        .iter()
+                        .any(|name| ident.iter().copied().eq(name.chars()))
+                    && !preceded_by_decl_keyword(&chars, i)
+                {
                     out.push_str("let ");
-                    known.insert(ident.clone());
+                    known.insert(ident);
                 }
-                out.push_str(&ident);
+                out.extend(ident);
                 i = end;
                 continue;
             }
@@ -86,10 +92,9 @@ fn preceded_by_decl_keyword(chars: &[char], ident_start: usize) -> bool {
         p -= 1;
     }
     for kw in ["let", "const"] {
-        let kw_chars: Vec<char> = kw.chars().collect();
-        let len = kw_chars.len();
+        let len = kw.len();
         if p >= len
-            && chars[p - len..p] == kw_chars[..]
+            && chars[p - len..p].iter().copied().eq(kw.chars())
             && (p == len || !is_ident_char(chars[p - len - 1]))
         {
             return true;

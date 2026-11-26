@@ -23,7 +23,7 @@ const DEFAULT_FG: Color32 = Color32::from_rgb(171, 178, 191);
 
 pub struct HydraHighlighter {
     regex: Regex,
-    group_categories: Vec<usize>,
+    group_categories: Vec<(String, usize)>,
 }
 
 impl HydraHighlighter {
@@ -63,8 +63,9 @@ impl HydraHighlighter {
         let mut parts = Vec::new();
         let mut categories = Vec::new();
         for (i, (pattern, cat)) in rules.iter().enumerate() {
-            parts.push(format!("(?P<g{i}>{pattern})"));
-            categories.push(*cat);
+            let name = format!("g{i}");
+            parts.push(format!("(?P<{name}>{pattern})"));
+            categories.push((name, *cat));
         }
 
         let regex = Regex::new(&parts.join("|")).expect("valid syntax regex");
@@ -76,8 +77,8 @@ impl HydraHighlighter {
 
     fn tokenize<'a>(&'a self, text: &'a str) -> impl Iterator<Item = (Range<usize>, usize)> + 'a {
         self.regex.captures_iter(text).filter_map(|caps| {
-            for (i, cat) in self.group_categories.iter().enumerate() {
-                if let Some(m) = caps.name(&format!("g{i}")) {
+            for (name, cat) in &self.group_categories {
+                if let Some(m) = caps.name(name) {
                     return Some((m.start()..m.end(), *cat));
                 }
             }
@@ -138,5 +139,36 @@ impl HydraHighlighter {
         }
 
         job
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cached_group_names_preserve_categories_after_nested_captures() {
+        let highlighter = HydraHighlighter::new();
+        let text = "osc(1.25).color(1,0,0) // noise(3)\nlet café = solid(0)";
+        let tokens: Vec<_> = highlighter
+            .tokenize(text)
+            .filter(|(_, category)| *category != 9)
+            .map(|(range, category)| (&text[range], category))
+            .collect();
+        assert_eq!(
+            tokens,
+            [
+                ("osc", 1),
+                ("1.25", 3),
+                ("color", 6),
+                ("1", 3),
+                ("0", 3),
+                ("0", 3),
+                ("// noise(3)", 5),
+                ("let", 7),
+                ("solid", 1),
+                ("0", 3),
+            ]
+        );
     }
 }

@@ -53,21 +53,21 @@ See [runtime and resource limits](DOCUMENTATION.md#runtime-and-resource-limits) 
 
 ### Smaller optimizations
 
-- [ ] **Audio analysis buffers:** reuse frequency-analysis workspace and buffers for converting samples into intensity values.
+- [x] **Audio analysis buffers:** reuse frequency-analysis workspace and buffers for converting samples into intensity values.
   Reuse unchanged analysis results while preserving smoothing, settings changes, and sample-based beat timing.
   Example: polling an idle audio buffer should not allocate temporary analysis arrays.
-- [ ] **Filtered MIDI polling:** cache stable Musical Instrument Digital Interface (MIDI) binding matches instead of repeatedly scanning every channel.
+- [x] **Filtered MIDI polling:** cache stable Musical Instrument Digital Interface (MIDI) binding matches instead of repeatedly scanning every channel.
   Invalidate cached matches when bindings or input metadata change.
   Example: compare polling costs for sixty-four wildcard bindings across one and eight inputs.
-- [ ] **Rhai preprocessing:** add fast paths for unchanged syntax and reduce temporary strings.
+- [x] **Rhai preprocessing:** add fast paths for unchanged syntax and reduce temporary strings.
   Example: preprocess a 22-kilobyte sketch without creating thousands of short-lived string copies.
-- [ ] **Animated frame handoff:** avoid cloning full decoded Graphics Interchange Format (GIF) frames whenever the animation advances.
+- [x] **Animated frame handoff:** avoid cloning full decoded Graphics Interchange Format (GIF) frames whenever the animation advances.
   Keep existing source-loading interfaces and upload only changed frames.
   Example: reuse decoded pixel storage when uploading the next full-resolution animation frame.
-- [ ] **JavaScript frame bridge:** reduce temporary strings and arrays exchanged with the interpreter.
+- [x] **JavaScript frame bridge:** reduce temporary strings and arrays exchanged with the interpreter.
   Preserve callback errors, value validation, and existing frame behavior.
   Example: process 128 callbacks without repeatedly allocating serialization buffers.
-- [ ] **Syntax highlighting:** reuse regular-expression group names instead of creating strings for every token.
+- [x] **Syntax highlighting:** reuse regular-expression group names instead of creating strings for every token.
   Example: highlighting a thousand-line sketch should not rebuild the same group names for each match.
 
 ### Performance measurements

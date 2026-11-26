@@ -1224,6 +1224,41 @@ fn interrupts_and_callback_limits_preserve_previous_graph() {
 }
 
 #[test]
+fn frame_bridge_preserves_number_rounding_and_finishes_jobs_before_overflow_errors() {
+    let mut js = runtime();
+    js.eval("osc(()=>time===0.1?1:0,()=>-0).out()").unwrap();
+    let values = js
+        .frame(JavascriptFrame {
+            time: 0.1,
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(values[0], 1.0);
+    assert_eq!(values[1].to_bits(), 0.0_f32.to_bits());
+    assert_eq!(
+        js.frame(JavascriptFrame {
+            time: 1200.25,
+            ..Default::default()
+        })
+        .unwrap()[0],
+        0.0
+    );
+
+    js.eval(
+        "var frameJobs=0;update=()=>{Promise.resolve().then(()=>frameJobs++)};osc(()=>1e39).out()",
+    )
+    .unwrap();
+    assert!(
+        js.frame(JavascriptFrame::default())
+            .unwrap_err()
+            .contains("finite")
+    );
+    let graph = js.eval("osc(()=>frameJobs).out()").unwrap();
+    let slot = callback_slot(graph.shaders[0].as_ref().unwrap());
+    assert_eq!(js.frame(JavascriptFrame::default()).unwrap()[slot], 1.0);
+}
+
+#[test]
 fn frame_inputs_audio_errors_and_explicit_unsupported_methods() {
     let mut js = runtime();
     js.eval("osc(()=>a.fft[2]+a.onset+a.beat+a.bpm+mouse.x+width+beat+phase).out()")

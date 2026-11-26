@@ -2417,29 +2417,55 @@ fn register_patterns(engine: &mut Engine) {
 /// given sketch looks like right before it's handed to Rhai's parser.
 #[doc(hidden)]
 pub fn preprocess(code: &str) -> String {
-    let code = &whitespace::normalize_whitespace(code);
-    let code = &quotes::rewrite_single_quoted_strings(code);
-    let code = &numlit::insert_leading_zero(code);
-    let code = &jskeywords::rewrite_keywords(code);
-    let code = &kwargs::strip_named_args(code);
-    let code = &jsfunctions::rewrite_function_decls(code);
-    let code = &iife::unwrap_iife(code);
-    let code = &increment::rewrite_increment_decrement(code);
-    let code = &forloop::rewrite_for_loops(code);
-    let code = &autolet::insert_missing_let(code);
-    let code = &mathjs::rewrite_math(code);
-    let code = &argtrunc::truncate_extra_args(code);
-    let code = &patcall::rewrite_pattern_calls(code);
-    let code = &arrow::strip_zero_arg_arrows(code);
-    let code = &closurefn::rewrite_argument_position_closures(code);
-    let code = &objlit::rewrite_object_literals(code);
-    let code = &ternary::rewrite_ternaries(code);
-    let code = &commastmt::rewrite_top_level_comma_statements(code);
-    let code = &ifstmt::brace_bare_if_bodies(code);
-    let code = &asi::insert_missing_semicolons(code);
-    let code = &destructure::rewrite_destructuring_declarations(code);
-    let code = &arrowfn::rewrite_named_arrows(code);
-    commaexpr::rewrite_comma_expressions(code)
+    let code = if code.is_ascii() && !code.contains(['\x0B', '\x0C']) {
+        Cow::Borrowed(code)
+    } else {
+        Cow::Owned(whitespace::normalize_whitespace(code))
+    };
+    let code = rewrite_marked(code, &["'"], quotes::rewrite_single_quoted_strings);
+    let code = rewrite_marked(code, &["."], numlit::insert_leading_zero);
+    let code = rewrite_marked(
+        code,
+        &[
+            "var", "null", "new", "await", "async", "import", "===", "!==",
+        ],
+        jskeywords::rewrite_keywords,
+    );
+    let code = rewrite_marked(code, &["="], kwargs::strip_named_args);
+    let code = rewrite_marked(code, &["function"], jsfunctions::rewrite_function_decls);
+    let code = rewrite_marked(code, &["=>", "function"], iife::unwrap_iife);
+    let code = rewrite_marked(code, &["++", "--"], increment::rewrite_increment_decrement);
+    let code = rewrite_marked(code, &["for"], forloop::rewrite_for_loops);
+    let code = rewrite_marked(code, &["="], autolet::insert_missing_let);
+    let code = rewrite_marked(code, &["Math."], mathjs::rewrite_math);
+    let code = Cow::Owned(argtrunc::truncate_extra_args(&code));
+    let code = rewrite_marked(code, &["=>"], patcall::rewrite_pattern_calls);
+    let code = rewrite_marked(code, &["=>"], arrow::strip_zero_arg_arrows);
+    let code = rewrite_marked(code, &["=>"], closurefn::rewrite_argument_position_closures);
+    let code = rewrite_marked(code, &["{"], objlit::rewrite_object_literals);
+    let code = rewrite_marked(code, &["?"], ternary::rewrite_ternaries);
+    let code = rewrite_marked(code, &[","], commastmt::rewrite_top_level_comma_statements);
+    let code = rewrite_marked(code, &["if"], ifstmt::brace_bare_if_bodies);
+    let code = Cow::Owned(asi::insert_missing_semicolons(&code));
+    let code = rewrite_marked(
+        code,
+        &["{", "["],
+        destructure::rewrite_destructuring_declarations,
+    );
+    let code = rewrite_marked(code, &["=>", "function"], arrowfn::rewrite_named_arrows);
+    rewrite_marked(code, &[","], commaexpr::rewrite_comma_expressions).into_owned()
+}
+
+fn rewrite_marked<'a>(
+    code: Cow<'a, str>,
+    markers: &[&str],
+    rewrite: fn(&str) -> String,
+) -> Cow<'a, str> {
+    if markers.iter().any(|marker| code.contains(marker)) {
+        Cow::Owned(rewrite(&code))
+    } else {
+        code
+    }
 }
 
 pub fn eval(code: &str) -> Result<EvalResult, String> {
@@ -4030,6 +4056,58 @@ fn register_modulate(engine: &mut Engine, meta: &FnMeta) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preprocessing_fast_paths_match_the_unconditional_pipeline() {
+        let passes: &[fn(&str) -> String] = &[
+            whitespace::normalize_whitespace,
+            quotes::rewrite_single_quoted_strings,
+            numlit::insert_leading_zero,
+            jskeywords::rewrite_keywords,
+            kwargs::strip_named_args,
+            jsfunctions::rewrite_function_decls,
+            iife::unwrap_iife,
+            increment::rewrite_increment_decrement,
+            forloop::rewrite_for_loops,
+            autolet::insert_missing_let,
+            mathjs::rewrite_math,
+            argtrunc::truncate_extra_args,
+            patcall::rewrite_pattern_calls,
+            arrow::strip_zero_arg_arrows,
+            closurefn::rewrite_argument_position_closures,
+            objlit::rewrite_object_literals,
+            ternary::rewrite_ternaries,
+            commastmt::rewrite_top_level_comma_statements,
+            ifstmt::brace_bare_if_bodies,
+            asi::insert_missing_semicolons,
+            destructure::rewrite_destructuring_declarations,
+            arrowfn::rewrite_named_arrows,
+            commaexpr::rewrite_comma_expressions,
+        ];
+        for source in [
+            "",
+            "osc(10).out()",
+            "let value = 1 + 2;\nosc(value).out();",
+            "osc\u{000B}(10)\u{000C}.out()",
+            "let\u{00A0}café = .5\nsolid(café).out()",
+            "text('Math.PI => var ++').out() // ignored syntax",
+            "var speed=.5; noise(scale=2).rotate(()=>Math.sin(time)*speed).out()",
+            "function double(x=2){return x*2}\nsolid(double()).out()",
+            "(function(){solid(1).out()})()",
+            "(()=>{let pat=()=>osc(3);pat().out()})()",
+            "for(let i=0;i<3;i++){if(i===1) solid(1).out();else solid(0).out()}",
+            "let values=[0,1].map((x,i)=>x+i);solid(values[0]).out()",
+            "const {a,b}=value;let fn=(x)=>x?{value:1}:{value:2}",
+            "let data={default:2};solid(data.default).out(),src(o0).out(o1)",
+            "solid((1,2),1,0,1).polar(2).out()",
+            "foo(/* comment */);osc(10 /* comment */).out()",
+        ] {
+            let expected = passes
+                .iter()
+                .fold(source.to_owned(), |code, pass| pass(&code));
+            assert_eq!(preprocess(source), expected, "{source:?}");
+        }
+    }
 
     #[test]
     fn named_easing_curves_match_upstream_samples_and_enable_smoothing() {

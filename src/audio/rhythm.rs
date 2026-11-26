@@ -71,6 +71,7 @@ impl RhythmDetector {
         samples: &[f32],
         fft: &dyn rustfft::Fft<f32>,
         scratch: &mut [Complex<f32>],
+        fft_workspace: &mut [Complex<f32>],
         hann: &[f32; SIZE],
     ) {
         let decay = (-1.0 / (0.12 * self.sample_rate as f32)).exp();
@@ -83,7 +84,7 @@ impl RhythmDetector {
                 for ((slot, &value), &weight) in scratch.iter_mut().zip(&self.window).zip(hann) {
                     *slot = Complex::new(value * weight, 0.0);
                 }
-                fft.process(scratch);
+                fft.process_with_scratch(scratch, fft_workspace);
                 self.analyze(&scratch[..SIZE / 2]);
                 self.window.copy_within(HOP.., 0);
                 self.filled = SIZE - HOP;

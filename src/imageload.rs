@@ -2,6 +2,7 @@
 
 #[cfg(feature = "image_url")]
 mod imp {
+    use std::borrow::Cow;
     use std::io::Read;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
@@ -325,6 +326,19 @@ mod imp {
         /// enough real time has elapsed - `None` otherwise, so callers
         /// don't needlessly re-upload an unchanged frame every render frame.
         pub fn poll(&mut self, slot: usize) -> Option<SourceFrame> {
+            self.poll_frame(slot).map(Cow::into_owned)
+        }
+
+        /// Borrows newly ready frames to avoid copying decoded animation pixels.
+        pub fn poll_with<T>(
+            &mut self,
+            slot: usize,
+            consume: impl FnOnce(&SourceFrame) -> T,
+        ) -> Option<T> {
+            self.poll_frame(slot).map(|frame| consume(&frame))
+        }
+
+        fn poll_frame(&mut self, slot: usize) -> Option<Cow<'_, SourceFrame>> {
             if let Some(pending) = self.pending.get(slot).and_then(Option::as_ref) {
                 let result = match pending.receiver.try_recv() {
                     Ok(result) => Some(result),
@@ -347,11 +361,10 @@ mod imp {
                     return match media {
                         DecodedMedia::Static(frame) => {
                             self.animated[slot] = None;
-                            Some(frame)
+                            Some(Cow::Owned(frame))
                         }
                         DecodedMedia::Animated(frames) => {
                             let total = frames.iter().map(|(_, d)| *d as u64).sum::<u64>().max(1);
-                            let first = frames[0].0.clone();
                             self.animated[slot] = Some(AnimatedState {
                                 frames,
                                 total_duration_ms: total,
@@ -359,7 +372,9 @@ mod imp {
                                 last_index: 0,
                                 _reservation: reservation,
                             });
-                            Some(first)
+                            Some(Cow::Borrowed(
+                                &self.animated[slot].as_ref().unwrap().frames[0].0,
+                            ))
                         }
                     };
                 }
@@ -375,7 +390,7 @@ mod imp {
                 return None;
             }
             state.last_index = idx;
-            Some(state.frames[idx].0.clone())
+            Some(Cow::Borrowed(&state.frames[idx].0))
         }
     }
 
@@ -755,6 +770,80 @@ mod imp {
             assert!(manager.pending[0].is_none());
             assert_eq!(manager.take_error().as_deref(), Some("Oversized media"));
             assert!(manager.take_error().is_none());
+        }
+
+        #[test]
+        fn borrowed_animation_frames_reuse_pixels_and_skip_unchanged_uploads() {
+            let mut manager = ImageManager::new();
+            let frames = vec![
+                (solid_frame(2, 2, 1), 3_600_000),
+                (solid_frame(2, 2, 2), 3_600_000),
+            ];
+            let first = frames[0].0.pixels.as_ptr();
+            let second = frames[1].0.pixels.as_ptr();
+            let mut reservation = Reservation::new(manager.budget.clone());
+            reservation.grow(24, MAX_MEDIA_BYTES).unwrap();
+            let (sender, receiver) = mpsc::sync_channel(1);
+            manager.pending[0] = Some(PendingLoad {
+                receiver,
+                cancelled: Arc::new(AtomicBool::new(false)),
+            });
+            sender
+                .send(Ok(LoadedMedia {
+                    media: DecodedMedia::Animated(frames),
+                    reservation,
+                }))
+                .ok()
+                .unwrap();
+            assert_eq!(
+                manager.poll_with(0, |frame| frame.pixels.as_ptr()),
+                Some(first)
+            );
+            assert!(
+                manager
+                    .poll_with(0, |_| panic!("unchanged frame uploaded"))
+                    .is_none()
+            );
+            manager.animated[0].as_mut().unwrap().started_at =
+                Instant::now() - Duration::from_secs(3601);
+            assert_eq!(
+                manager.poll_with(0, |frame| frame.pixels.as_ptr()),
+                Some(second)
+            );
+            assert!(
+                manager
+                    .poll_with(0, |_| panic!("unchanged frame uploaded"))
+                    .is_none()
+            );
+            manager.animated[0].as_mut().unwrap().started_at =
+                Instant::now() - Duration::from_secs(7201);
+            assert_eq!(
+                manager.poll_with(0, |frame| frame.pixels.as_ptr()),
+                Some(first)
+            );
+            assert_eq!(manager.budget.used.load(Ordering::Acquire), 24);
+        }
+
+        #[test]
+        fn owned_static_frames_move_without_copying_pixels() {
+            let mut manager = ImageManager::new();
+            let frame = solid_frame(2, 2, 1);
+            let pixels = frame.pixels.as_ptr();
+            let (sender, receiver) = mpsc::sync_channel(1);
+            manager.pending[0] = Some(PendingLoad {
+                receiver,
+                cancelled: Arc::new(AtomicBool::new(false)),
+            });
+            sender
+                .send(Ok(LoadedMedia {
+                    media: DecodedMedia::Static(frame),
+                    reservation: Reservation::new(manager.budget.clone()),
+                }))
+                .ok()
+                .unwrap();
+            let frame = manager.poll(0).unwrap();
+            assert_eq!(frame.pixels.as_ptr(), pixels);
+            assert!(manager.poll(0).is_none());
         }
 
         fn solid_frame(w: u32, h: u32, v: u8) -> SourceFrame {

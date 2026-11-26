@@ -7,6 +7,10 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
+#[cfg(feature = "gui")]
+#[path = "../src/bin/hydra/highlight.rs"]
+mod highlight;
+
 #[cfg(target_os = "macos")]
 #[path = "performance/gpu.rs"]
 mod gpu;
@@ -293,13 +297,24 @@ fn cpu(
                 },
             )?;
         }
-        let mut poller = MidiPoller::new(bridge);
+        let mut poller = MidiPoller::new(bridge.clone());
         measure(
             results,
             options,
             &format!("midi/64_wildcards_{inputs}_inputs"),
             "cpu_wall",
             || {
+                black_box(poller.poll());
+                Ok(())
+            },
+        )?;
+        measure(
+            results,
+            options,
+            &format!("midi/64_wildcards_{inputs}_inputs_with_events"),
+            "cpu_wall",
+            || {
+                bridge.control_change_from(inputs - 1, 0, 1, 0.75);
                 black_box(poller.poll());
                 Ok(())
             },
@@ -331,6 +346,24 @@ fn cpu(
     }
     #[cfg(not(feature = "javascript"))]
     skipped.push("JavaScript: enable the javascript feature".into());
+    #[cfg(feature = "gui")]
+    {
+        let highlighter = highlight::HydraHighlighter::new();
+        let text = "osc(10).rotate(0.1).color(1,0.5,0.2).out()\n".repeat(1000);
+        let font = eframe::egui::FontId::monospace(14.0);
+        measure(
+            results,
+            options,
+            "editor/highlight_1000_lines",
+            "cpu_wall",
+            || {
+                black_box(highlighter.layout_job(&text, &font, eframe::egui::Color32::BLACK));
+                Ok(())
+            },
+        )?;
+    }
+    #[cfg(not(feature = "gui"))]
+    skipped.push("syntax highlighting: enable the gui feature".into());
     // Keep the parameter used when every optional workload is enabled.
     let _ = skipped;
     Ok(())
@@ -398,7 +431,7 @@ fn run() -> Result<(), String> {
             "os": std::env::consts::OS,
             "architecture": std::env::consts::ARCH,
             "processor": processor,
-            "features": {"fft": cfg!(feature="fft"), "midi": cfg!(feature="midi"), "javascript": cfg!(feature="javascript")},
+            "features": {"fft": cfg!(feature="fft"), "midi": cfg!(feature="midi"), "javascript": cfg!(feature="javascript"), "gui": cfg!(feature="gui")},
             "graphics": graphics,
             "profile": "release",
         },
@@ -489,6 +522,35 @@ mod tests {
         assert_eq!(percentile(&[1., 2., 3., 4.], 95), 4.);
     }
 
+    #[cfg(feature = "fft")]
+    #[test]
+    fn warmed_audio_polling_reuses_storage_for_idle_and_active_samples() {
+        use hydra_rust::audio::{AudioAnalyzer, AudioBuffer};
+        let buffer = AudioBuffer::new();
+        let mut analyzer = AudioAnalyzer::new();
+        let samples = [0.25; 800];
+        buffer.push(&samples, 1);
+        analyzer.poll(&buffer);
+        let scope = CountScope::start();
+        for _ in 0..8 {
+            black_box(analyzer.poll(&buffer));
+            buffer.push(&samples, 1);
+            black_box(analyzer.poll(&buffer));
+        }
+        let counts = scope.finish();
+        assert_eq!(counts.calls, 0);
+    }
+
+    #[test]
+    fn large_plain_sketch_preprocessing_does_not_allocate_per_identifier() {
+        let large = format!("{}osc(10).out();", "let value = 1 + 2;\n".repeat(1200));
+        let scope = CountScope::start();
+        let processed = hydra_rust::preprocess(&large);
+        let counts = scope.finish();
+        assert!(processed.contains("osc(10).out()"));
+        assert!(counts.calls < 100, "{} allocations", counts.calls);
+    }
+
     #[cfg(feature = "javascript")]
     #[test]
     fn callback_workload_keeps_all_128_callbacks_reachable() {
@@ -509,6 +571,18 @@ mod tests {
             .unwrap();
         for (index, value) in values.iter().enumerate() {
             assert_eq!(*value, index as f32 + 1.0);
+        }
+        let scope = CountScope::start();
+        let values = runtime
+            .frame(JavascriptFrame {
+                time: 2.0,
+                ..Default::default()
+            })
+            .unwrap();
+        let counts = scope.finish();
+        assert_eq!(counts.calls, 0);
+        for (index, value) in values.iter().enumerate() {
+            assert_eq!(*value, index as f32 + 2.0);
         }
     }
 }

@@ -60,14 +60,17 @@ pub fn rewrite_keywords(src: &str) -> String {
         }
         if !mask[i] && is_ident_start(chars[i]) && !preceded_by_ident(&chars, i) {
             let end = ident_end(&chars, i);
-            let word: String = chars[i..end].iter().collect();
+            let word = &chars[i..end];
 
-            if let Some((_, replacement)) = REPLACE.iter().find(|(w, _)| *w == word) {
+            if let Some((_, replacement)) = REPLACE
+                .iter()
+                .find(|(w, _)| word.iter().copied().eq(w.chars()))
+            {
                 out.push_str(replacement);
                 i = end;
                 continue;
             }
-            if REMOVE.contains(&word.as_str()) {
+            if REMOVE.iter().any(|w| word.iter().copied().eq(w.chars())) {
                 // also skip one following space/tab so e.g. "new P5()"
                 // doesn't leave "P5()" (nicer output; functionally
                 // harmless to Rhai either way).
@@ -78,7 +81,7 @@ pub fn rewrite_keywords(src: &str) -> String {
                 continue;
             }
 
-            out.push_str(&word);
+            out.extend(word);
             i = end;
             continue;
         }

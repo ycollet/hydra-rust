@@ -1044,6 +1044,31 @@ For example, newer controller changes still reach `midiCC(1)` after an overrun.
 Overruns produce warnings in the application logs.
 These queues avoid renderer-lock stalls but do not guarantee a fixed maximum callback duration.
 
+### Reused analysis and scripting buffers
+
+Frequency analysis reuses its workspace, spectrum arrays, and reduced bins.
+An unchanged shared audio window reuses its spectrum.
+Smoothing still advances on every poll, and rhythm timing still follows audio samples.
+For example, repeated polls without new samples still move smoothed bins toward their current targets.
+
+MIDI polling caches matching ports and channels, plus the latest event for each wildcard value.
+New events, input metadata, and changed bindings invalidate cached results.
+Envelopes and smoothing continue advancing between events.
+For example, renaming a port updates bindings that select its old or new name.
+
+Preprocessing skips passes when their required syntax markers are absent.
+Identifier checks compare existing character slices instead of allocating temporary strings.
+Pass ordering and string/comment handling stay unchanged.
+For example, a plain sketch without `Math.` skips the mathematics rewrite.
+
+JavaScript frames reuse their Rust serialization buffer and return callback arrays directly.
+Input number rounding, callback validation, promise jobs, and error recovery retain their previous behavior.
+For example, the 128-callback benchmark no longer allocates Rust buffers after warm-up.
+Interpreter-native allocations remain outside that measurement.
+
+Syntax highlighting caches regular-expression group names when constructing the highlighter.
+For example, highlighting one thousand lines does not recreate group-name strings for every token.
+
 ### Rendering and capture
 
 Reevaluation reuses unchanged shader programs and compatible intermediate textures.
@@ -1146,6 +1171,17 @@ A running native decoder may finish before noticing cancellation.
 For example, evaluating `s0.initImage("https://example.com/new.png")` cancels an older pending load for `s0`.
 Requests use a 20-second timeout and a two-second socket-read timeout.
 
+Standalone animation uploads borrow decoded pixels instead of cloning whole frames.
+Unchanged frames still produce no upload.
+Embedding hosts can use `ImageManager::poll_with` for the same borrowed handoff.
+`poll` retains its existing owned-frame interface.
+Static images still move into owned results without copying their pixels.
+For example:
+
+```rust
+images.poll_with(0, |frame| renderer.upload_source(0, frame));
+```
+
 ## Performance measurements
 
 ### Repeatable release benchmarks
@@ -1223,7 +1259,11 @@ Audio producer measurements deliberately fill the bounded queue before timing.
 Normal analysis measurements push 800 samples and poll the analyzer.
 For example, `audio/push_512_full_queue` measures overflow replacement, not an entire host audio callback.
 MIDI workloads poll sixty-four wildcard bindings across one or eight synthetic inputs.
+Rows ending in `_with_events` publish one controller update before each poll.
+Other MIDI rows poll unchanged inputs.
 JavaScript workloads retain either zero or 128 reachable callbacks.
+Enabling `gui` adds a thousand-line highlighting workload without opening a window.
+For example, add `gui` to the processor benchmark's feature list.
 
 ### Initial local measurements
 
@@ -1262,6 +1302,38 @@ That run used five intermediate passes instead of eight.
 The earlier median was approximately 446 microseconds.
 For example, rerun `render/blur_4` before comparing other machines or graphics drivers.
 Scheduling differences affect these measurements; this comparison is not a guaranteed speedup.
+
+### Smaller-optimization follow-up
+
+Two consecutive processor runs used the same local hardware and compiler.
+The base revision was `633bf02`, with the smaller optimizations applied.
+Both runs used fifteen samples and twenty iterations.
+The table shows the second run.
+For example, reproduce these workloads with:
+
+```bash
+cargo run --release --no-default-features --features gui,fft,midi,javascript \
+  --example performance -- --output target/performance-smaller-optimizations.json --label smaller-optimizations
+```
+
+| Workload | Median microseconds | 95th-percentile batch mean | Rust allocation calls per operation |
+|---|---:|---:|---:|
+| Preprocessing, 22,814 bytes | 416.64 | 447.02 | 51 |
+| Idle audio poll | 0.01 | 0.01 | 0 |
+| Push and analyze 800 samples | 17.57 | 19.74 | 0 |
+| MIDI, sixty-four bindings, one unchanged input | 0.23 | 0.25 | 0 |
+| MIDI, sixty-four bindings, eight unchanged inputs | 0.22 | 0.24 | 0 |
+| MIDI, one input with a new event | 1.08 | 1.68 | 0 |
+| MIDI, eight inputs with a new event | 6.30 | 8.65 | 0 |
+| JavaScript, zero callbacks | 9.13 | 11.31 | 0 |
+| JavaScript, 128 callbacks | 66.85 | 76.69 | 0 |
+| Highlight one thousand lines | 5373.35 | 5470.95 | 22030 |
+
+Preprocessing previously required 80,673 Rust allocation calls for the same input.
+Unchanged MIDI targets now avoid repeated history scans.
+New-event workloads still refresh targets and preserve the latest matching event.
+Highlighting still allocates capture results and layout storage.
+For example, zero Rust bridge allocations does not imply zero JavaScript-engine allocations.
 
 ### Representative hardware profiling
 

@@ -186,8 +186,11 @@ mod imp {
     #[derive(Clone)]
     struct ChannelState {
         velocity: [StampedValue; NUM_MIDI_NOTES],
+        latest_velocity: StampedValue,
         cc: [StampedValue; NUM_MIDI_CC],
+        latest_cc: StampedValue,
         aftertouch: [StampedValue; NUM_MIDI_NOTES],
+        latest_aftertouch: StampedValue,
         channel_aftertouch: StampedValue,
     }
 
@@ -195,8 +198,11 @@ mod imp {
         fn default() -> Self {
             Self {
                 velocity: [StampedValue::default(); NUM_MIDI_NOTES],
+                latest_velocity: StampedValue::default(),
                 cc: [StampedValue::default(); NUM_MIDI_CC],
+                latest_cc: StampedValue::default(),
                 aftertouch: [StampedValue::default(); NUM_MIDI_NOTES],
+                latest_aftertouch: StampedValue::default(),
                 channel_aftertouch: StampedValue::default(),
             }
         }
@@ -228,6 +234,7 @@ mod imp {
         channel_aftertouch: f32,
         slots: [Option<EnvelopeSlot>; NUM_MIDI_ENVELOPES],
         inputs: Vec<InputState>,
+        input_version: u64,
         serial: u64,
         bindings: [Option<MidiBinding>; NUM_MIDI_VALUES],
         binding_versions: [u64; NUM_MIDI_VALUES],
@@ -243,6 +250,7 @@ mod imp {
                 channel_aftertouch: 0.0,
                 slots: std::array::from_fn(|_| None),
                 inputs: vec![InputState::new("host")],
+                input_version: 0,
                 serial: 0,
                 bindings: std::array::from_fn(|_| None),
                 binding_versions: [0; NUM_MIDI_VALUES],
@@ -267,6 +275,7 @@ mod imp {
             match kind {
                 MidiValueKind::Note | MidiValueKind::Velocity => {
                     history.velocity[index as usize] = stamped;
+                    history.latest_velocity = stamped;
                     self.note_velocity[index as usize] = value;
                     for slot in self.slots.iter_mut().flatten() {
                         if (slot.note < 0 || slot.note == index as i64)
@@ -282,10 +291,12 @@ mod imp {
                 }
                 MidiValueKind::Cc => {
                     history.cc[index as usize] = stamped;
+                    history.latest_cc = stamped;
                     self.cc_value[index as usize] = value;
                 }
                 MidiValueKind::Aftertouch => {
                     history.aftertouch[index as usize] = stamped;
+                    history.latest_aftertouch = stamped;
                     self.aftertouch[index as usize] = value;
                 }
                 MidiValueKind::ChannelAftertouch => {
@@ -295,38 +306,35 @@ mod imp {
             }
         }
 
-        fn value(&self, binding: &MidiBinding) -> f32 {
+        fn value(&self, binding: &MidiBinding, matches: &[(usize, usize)]) -> f32 {
             let mut latest = StampedValue::default();
-            for (input, source) in self.inputs.iter().enumerate() {
-                for (channel, history) in source.channels.iter().enumerate() {
-                    if !binding.filter.matches(input, &source.name, channel as u8) {
-                        continue;
+            for &(input, channel) in matches {
+                let history = &self.inputs[input].channels[channel];
+                let (values, recent) = match binding.kind {
+                    MidiValueKind::Note | MidiValueKind::Velocity => {
+                        (&history.velocity[..], history.latest_velocity)
                     }
-                    let values = match binding.kind {
-                        MidiValueKind::Note | MidiValueKind::Velocity => &history.velocity[..],
-                        MidiValueKind::Cc => &history.cc[..],
-                        MidiValueKind::Aftertouch => &history.aftertouch[..],
-                        MidiValueKind::ChannelAftertouch => {
-                            std::slice::from_ref(&history.channel_aftertouch)
-                        }
-                    };
-                    let mut selected = match binding.index {
-                        Some(index) => values.get(index as usize).copied().unwrap_or_default(),
-                        None => values
-                            .iter()
-                            .max_by_key(|value| value.serial)
-                            .copied()
-                            .unwrap_or_default(),
-                    };
-                    if binding.kind == MidiValueKind::Aftertouch
-                        && binding.index.is_none()
-                        && history.channel_aftertouch.serial > selected.serial
-                    {
-                        selected = history.channel_aftertouch;
+                    MidiValueKind::Cc => (&history.cc[..], history.latest_cc),
+                    MidiValueKind::Aftertouch => {
+                        (&history.aftertouch[..], history.latest_aftertouch)
                     }
-                    if selected.serial > latest.serial {
-                        latest = selected;
-                    }
+                    MidiValueKind::ChannelAftertouch => (
+                        std::slice::from_ref(&history.channel_aftertouch),
+                        history.channel_aftertouch,
+                    ),
+                };
+                let mut selected = match binding.index {
+                    Some(index) => values.get(index as usize).copied().unwrap_or_default(),
+                    None => recent,
+                };
+                if binding.kind == MidiValueKind::Aftertouch
+                    && binding.index.is_none()
+                    && history.channel_aftertouch.serial > selected.serial
+                {
+                    selected = history.channel_aftertouch;
+                }
+                if selected.serial > latest.serial {
+                    latest = selected;
                 }
             }
             if binding.kind == MidiValueKind::Note {
@@ -401,10 +409,12 @@ mod imp {
         fn drain(&self, state: &mut SharedState) {
             if self.2.swap(false, Ordering::AcqRel) {
                 log::warn!("MIDI queue overrun; resetting note states and releasing envelopes");
+                state.serial += 1;
                 state.note_velocity.fill(0.0);
                 for input in &mut state.inputs {
                     for channel in &mut input.channels {
                         channel.velocity.fill(StampedValue::default());
+                        channel.latest_velocity = StampedValue::default();
                     }
                 }
                 for slot in state.slots.iter_mut().flatten() {
@@ -456,10 +466,18 @@ mod imp {
         pub fn register_input(&self, index: usize, name: &str) {
             let mut state = self.0.lock().unwrap();
             self.drain(&mut state);
+            if state
+                .inputs
+                .get(index)
+                .is_some_and(|input| input.name == name)
+            {
+                return;
+            }
             while state.inputs.len() <= index {
                 state.inputs.push(InputState::new(""));
             }
             state.inputs[index].name = name.into();
+            state.input_version += 1;
         }
 
         pub fn note_on_from(&self, input: usize, channel: u8, note: u8, velocity: f32) {
@@ -603,6 +621,10 @@ mod imp {
         cc_smoothed_init: [bool; NUM_MIDI_CC],
         values: [f32; NUM_MIDI_VALUES],
         binding_versions: [u64; NUM_MIDI_VALUES],
+        matches: [Vec<(usize, usize)>; NUM_MIDI_VALUES],
+        targets: [f32; NUM_MIDI_VALUES],
+        input_version: u64,
+        serial: u64,
     }
 
     impl MidiPoller {
@@ -614,6 +636,10 @@ mod imp {
                 cc_smoothed_init: [false; NUM_MIDI_CC],
                 values: [0.0; NUM_MIDI_VALUES],
                 binding_versions: [0; NUM_MIDI_VALUES],
+                matches: std::array::from_fn(|_| Vec::new()),
+                targets: [0.0; NUM_MIDI_VALUES],
+                input_version: 0,
+                serial: 0,
             }
         }
 
@@ -640,8 +666,23 @@ mod imp {
             let elapsed_ms = self.start_time.elapsed().as_secs_f32() * 1000.0;
             for (i, binding) in state.bindings.iter().enumerate() {
                 if let Some(binding) = binding {
-                    let target = state.value(binding);
-                    if self.binding_versions[i] != state.binding_versions[i] {
+                    let rebound = self.binding_versions[i] != state.binding_versions[i];
+                    let inputs_changed = self.input_version != state.input_version;
+                    if rebound || inputs_changed {
+                        self.matches[i].clear();
+                        for (input, source) in state.inputs.iter().enumerate() {
+                            for channel in 0..source.channels.len() {
+                                if binding.filter.matches(input, &source.name, channel as u8) {
+                                    self.matches[i].push((input, channel));
+                                }
+                            }
+                        }
+                    }
+                    if rebound || inputs_changed || self.serial != state.serial {
+                        self.targets[i] = state.value(binding, &self.matches[i]);
+                    }
+                    let target = self.targets[i];
+                    if rebound {
                         self.values[i] = target;
                         self.binding_versions[i] = state.binding_versions[i];
                     } else if let Some(factor) = binding.smooth {
@@ -651,6 +692,8 @@ mod imp {
                     }
                 }
             }
+            self.input_version = state.input_version;
+            self.serial = state.serial;
             let mut envelope = [0.0; NUM_MIDI_ENVELOPES];
             for (i, slot) in state.slots.iter_mut().enumerate() {
                 if let Some(slot) = slot {
@@ -827,6 +870,62 @@ mod imp {
         }
 
         #[test]
+        fn cached_matches_follow_input_metadata_and_binding_changes() {
+            use super::super::InputFilter;
+            let bridge = MidiBridge::new();
+            bridge
+                .bind(
+                    0,
+                    binding(
+                        MidiValueKind::Velocity,
+                        InputFilter::Name("Keys".into()),
+                        Some(2),
+                    ),
+                )
+                .unwrap();
+            bridge
+                .bind(1, binding(MidiValueKind::Velocity, InputFilter::Any, None))
+                .unwrap();
+            let mut poller = MidiPoller::new(bridge.clone());
+            assert_eq!(poller.poll().values[0], 0.0);
+            bridge.register_input(0, "Keys");
+            bridge.note_on_from(0, 2, 60, 0.2);
+            bridge.note_on_from(0, 4, 60, 0.9);
+            let frame = poller.poll();
+            assert_eq!(&frame.values[..2], &[0.2, 0.9]);
+            bridge.register_input(0, "Pads");
+            let frame = poller.poll();
+            assert_eq!(&frame.values[..2], &[0.0, 0.9]);
+            bridge
+                .bind(
+                    0,
+                    binding(
+                        MidiValueKind::Velocity,
+                        InputFilter::Name("Pads".into()),
+                        Some(4),
+                    ),
+                )
+                .unwrap();
+            assert_eq!(poller.poll().values[0], 0.9);
+            bridge.register_input(1, "Keys");
+            bridge.note_on_from(1, 2, 60, 0.7);
+            assert_eq!(poller.poll().values[1], 0.7);
+            bridge
+                .bind(
+                    0,
+                    binding(
+                        MidiValueKind::Velocity,
+                        InputFilter::Name("Keys".into()),
+                        Some(2),
+                    ),
+                )
+                .unwrap();
+            assert_eq!(poller.poll().values[0], 0.7);
+            bridge.register_input(1, "Pads");
+            assert_eq!(poller.poll().values[0], 0.0);
+        }
+
+        #[test]
         fn filtering_applies_to_smoothing_aftertouch_and_envelopes() {
             use super::super::InputFilter;
             let bridge = MidiBridge::new();
@@ -858,6 +957,7 @@ mod imp {
             assert!((frame.values[0] - 0.4).abs() < 1e-6);
             assert_eq!(frame.values[1], 0.7);
             assert_eq!(frame.envelope[0], 0.8);
+            assert!((poller.poll().values[0] - 0.5).abs() < 1e-6);
             bridge.note_off_from(0, 1, 60);
             assert_eq!(poller.poll().envelope[0], 0.8);
             bridge.note_off_from(1, 1, 60);
@@ -880,6 +980,40 @@ mod imp {
             bridge.set_cc_smooth(1, 0.0);
             bridge.control_change(1, 1.0);
             assert_eq!(poller.poll().cc_smoothed[1], 0.0);
+        }
+
+        #[test]
+        fn cached_wildcards_keep_the_latest_event_instead_of_the_largest_value() {
+            use super::super::InputFilter;
+            let bridge = MidiBridge::new();
+            for (slot, kind) in [
+                MidiValueKind::Note,
+                MidiValueKind::Velocity,
+                MidiValueKind::Cc,
+                MidiValueKind::Aftertouch,
+                MidiValueKind::ChannelAftertouch,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let mut selected = binding(kind, InputFilter::Any, None);
+                selected.index = None;
+                bridge.bind(slot, selected).unwrap();
+            }
+            bridge.note_on(60, 0.9);
+            bridge.note_on(61, 0.3);
+            bridge.control_change(1, 0.9);
+            bridge.control_change(2, 0.2);
+            bridge.poly_pressure(60, 0.8);
+            bridge.poly_pressure(61, 0.2);
+            bridge.channel_pressure(0.6);
+            let mut poller = MidiPoller::new(bridge.clone());
+            assert_eq!(&poller.poll().values[..5], &[1.0, 0.3, 0.2, 0.6, 0.6]);
+            bridge.note_off(61);
+            bridge.poly_pressure(60, 0.4);
+            assert_eq!(&poller.poll().values[..5], &[0.0, 0.0, 0.2, 0.4, 0.6]);
+            bridge.channel_pressure(0.0);
+            assert_eq!(&poller.poll().values[..5], &[0.0, 0.0, 0.2, 0.0, 0.0]);
         }
 
         #[test]
@@ -922,6 +1056,25 @@ mod imp {
             assert_eq!(frame.cc[1], 0.5);
             bridge.note_on(61, 0.8);
             assert_eq!(poller.poll().velocity[61], 0.8);
+        }
+
+        #[test]
+        fn queue_overrun_invalidates_cached_targets_for_every_poller() {
+            use super::super::InputFilter;
+            let bridge = MidiBridge::new();
+            bridge
+                .bind(0, binding(MidiValueKind::Velocity, InputFilter::Any, None))
+                .unwrap();
+            let mut first = MidiPoller::new(bridge.clone());
+            let mut second = MidiPoller::new(bridge.clone());
+            bridge.note_on(60, 1.0);
+            assert_eq!(first.poll().values[0], 1.0);
+            assert_eq!(second.poll().values[0], 1.0);
+            for _ in 0..=EVENT_CAPACITY {
+                bridge.control_change_from(10, 0, 1, 0.5);
+            }
+            assert_eq!(first.poll().values[0], 0.0);
+            assert_eq!(second.poll().values[0], 0.0);
         }
 
         #[test]

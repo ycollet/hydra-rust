@@ -106,7 +106,7 @@ impl AudioSettings {
 mod analysis {
     use std::collections::VecDeque;
     use std::sync::atomic::Ordering;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, Weak};
 
     use rustfft::{Fft, FftPlanner, num_complex::Complex};
 
@@ -114,6 +114,11 @@ mod analysis {
     use super::{AudioFeatures, AudioSettings, BinProperty, NUM_FFT_BINS};
 
     pub(super) const FFT_SIZE: usize = 1024;
+
+    struct AudioWindow {
+        samples: VecDeque<f32>,
+        revision: u64,
+    }
 
     /// Shared ring buffer that a producer (this crate's own mic-capture
     /// thread, or - for the plugin build - the host's own `process()`
@@ -125,7 +130,7 @@ mod analysis {
     /// Overflow keeps the newest samples. Analyzers share the latest FFT window.
     #[derive(Clone)]
     pub struct AudioBuffer {
-        pub(super) samples: Arc<Mutex<VecDeque<f32>>>,
+        window: Arc<Mutex<AudioWindow>>,
         pending: Arc<PendingAudio>,
     }
 
@@ -138,7 +143,10 @@ mod analysis {
     impl AudioBuffer {
         pub fn new() -> Self {
             Self {
-                samples: Arc::new(Mutex::new(VecDeque::with_capacity(FFT_SIZE))),
+                window: Arc::new(Mutex::new(AudioWindow {
+                    samples: VecDeque::with_capacity(FFT_SIZE),
+                    revision: 0,
+                })),
                 pending: Arc::new(PendingAudio::new()),
             }
         }
@@ -189,6 +197,12 @@ mod analysis {
     pub struct AudioAnalyzer {
         fft: Arc<dyn Fft<f32>>,
         scratch: Vec<Complex<f32>>,
+        fft_workspace: Vec<Complex<f32>>,
+        magnitudes: [f32; FFT_SIZE / 2],
+        bins: [f32; NUM_FFT_BINS],
+        cached_bin_count: usize,
+        last_window: Weak<Mutex<AudioWindow>>,
+        last_revision: u64,
         /// Hann window, precomputed once - `FFT_SIZE` never changes, so
         /// recomputing `cos()` for all 1024 samples on every `poll()`
         /// call (once per rendered frame) would be pure waste.
@@ -208,10 +222,17 @@ mod analysis {
     impl AudioAnalyzer {
         pub fn new() -> Self {
             let fft = FftPlanner::<f32>::new().plan_fft_forward(FFT_SIZE);
+            let fft_workspace = vec![Complex::default(); fft.get_inplace_scratch_len()];
 
             Self {
                 fft,
                 scratch: vec![Complex { re: 0.0, im: 0.0 }; FFT_SIZE],
+                fft_workspace,
+                magnitudes: [0.0; FFT_SIZE / 2],
+                bins: [0.0; NUM_FFT_BINS],
+                cached_bin_count: 0,
+                last_window: Weak::new(),
+                last_revision: 0,
                 window: std::array::from_fn(|i| hann(i, FFT_SIZE)),
                 smoothed: [0.0; NUM_FFT_BINS],
                 settings: AudioSettings::default(),
@@ -259,7 +280,7 @@ mod analysis {
         pub fn poll(&mut self, buffer: &AudioBuffer) -> [f32; NUM_FFT_BINS] {
             self.pending_samples.clear();
             {
-                let mut buf = buffer.samples.lock().unwrap();
+                let mut window = buffer.window.lock().unwrap();
                 let pending = &buffer.pending;
                 let discontinuity = pending.discontinuity.swap(false, Ordering::AcqRel);
                 let sample_rate = pending.sample_rate.load(Ordering::Acquire);
@@ -277,49 +298,57 @@ mod analysis {
                     }
                 }
                 for &sample in self.pending_samples.iter().rev().take(FFT_SIZE).rev() {
-                    if buf.len() == FFT_SIZE {
-                        buf.pop_front();
+                    if window.samples.len() == FFT_SIZE {
+                        window.samples.pop_front();
                     }
-                    buf.push_back(sample);
+                    window.samples.push_back(sample);
+                }
+                if !self.pending_samples.is_empty() {
+                    window.revision = window.revision.wrapping_add(1);
                 }
             }
             self.rhythm.process(
                 &self.pending_samples,
                 self.fft.as_ref(),
                 &mut self.scratch,
+                &mut self.fft_workspace,
                 &self.window,
             );
-            {
-                let buf = buffer.samples.lock().unwrap();
-                let len = buf.len();
-                let offset = FFT_SIZE.saturating_sub(len);
-                for (i, slot) in self.scratch.iter_mut().enumerate() {
-                    let sample = if i < offset {
-                        0.0
-                    } else {
-                        *buf.get(i - offset).unwrap_or(&0.0)
-                    };
-                    *slot = Complex {
-                        re: sample * self.window[i],
-                        im: 0.0,
-                    };
+            let changed = {
+                let window = buffer.window.lock().unwrap();
+                let changed = self.last_window.as_ptr() != Arc::as_ptr(&buffer.window)
+                    || self.last_revision != window.revision;
+                if changed {
+                    let offset = FFT_SIZE.saturating_sub(window.samples.len());
+                    for (i, slot) in self.scratch.iter_mut().enumerate() {
+                        let sample = if i < offset {
+                            0.0
+                        } else {
+                            window.samples[i - offset]
+                        };
+                        *slot = Complex::new(sample * self.window[i], 0.0);
+                    }
+                    self.last_window = Arc::downgrade(&buffer.window);
+                    self.last_revision = window.revision;
+                }
+                changed
+            };
+            if changed {
+                self.fft
+                    .process_with_scratch(&mut self.scratch, &mut self.fft_workspace);
+                for (magnitude, value) in self.magnitudes.iter_mut().zip(&self.scratch) {
+                    *magnitude = value.norm() / FFT_SIZE as f32;
                 }
             }
-
-            self.fft.process(&mut self.scratch);
-
-            let usable = FFT_SIZE / 2;
-            let magnitudes: Vec<f32> = self.scratch[..usable]
-                .iter()
-                .map(|c| c.norm() / FFT_SIZE as f32)
-                .collect();
-
-            let bins = reduce_to_bins(&magnitudes, self.settings.bins);
+            if changed || self.cached_bin_count != self.settings.bins {
+                self.bins = reduce_to_bins(&self.magnitudes, self.settings.bins);
+                self.cached_bin_count = self.settings.bins;
+            }
 
             let mut out = [0.0f32; NUM_FFT_BINS];
             for i in 0..self.settings.bins {
                 let settings = self.settings.settings[i];
-                let raw = bins[i];
+                let raw = self.bins[i];
                 let gated = if raw < settings.cutoff {
                     0.0
                 } else {
@@ -344,11 +373,11 @@ mod analysis {
 
     /// Averages the magnitude spectrum into `num_bins` logarithmically-spaced buckets,
     /// since audio-reactive visuals care about relative octaves, not raw linear FFT bins.
-    fn reduce_to_bins(spectrum: &[f32], num_bins: usize) -> Vec<f32> {
+    fn reduce_to_bins(spectrum: &[f32], num_bins: usize) -> [f32; NUM_FFT_BINS] {
         let usable = spectrum.len();
         let log_max = (usable as f32).ln();
-        let mut bins = vec![0.0f32; num_bins];
-        for (b, out) in bins.iter_mut().enumerate() {
+        let mut bins = [0.0f32; NUM_FFT_BINS];
+        for (b, out) in bins[..num_bins].iter_mut().enumerate() {
             let start = (((b as f32) / num_bins as f32) * log_max).exp().max(1.0) as usize;
             let end = (((b + 1) as f32 / num_bins as f32) * log_max)
                 .exp()
@@ -511,15 +540,55 @@ mod analysis {
         }
 
         #[test]
+        fn cached_spectrum_preserves_idle_smoothing_and_bin_changes() {
+            let buffer = AudioBuffer::new();
+            buffer.push(&[0.5; FFT_SIZE], 1);
+            let mut reference = AudioAnalyzer::new();
+            reference.set_smooth(0.0);
+            let target = reference.poll(&buffer);
+            let mut analyzer = AudioAnalyzer::new();
+            let first = analyzer.poll(&buffer);
+            let second = analyzer.poll(&buffer);
+            for i in 0..4 {
+                assert_eq!(first[i], target[i] * 0.6);
+                assert_eq!(second[i], first[i] * 0.4 + target[i] * 0.6);
+            }
+            analyzer.set_bins(8);
+            analyzer.set_smooth(0.0);
+            reference.set_bins(8);
+            reference.set_smooth(0.0);
+            assert_eq!(analyzer.poll(&buffer), reference.poll(&buffer));
+        }
+
+        #[test]
+        fn cached_spectrum_tracks_buffer_switches_and_other_analyzers() {
+            let buffer = AudioBuffer::new();
+            let silent = AudioBuffer::new();
+            let mut analyzer = AudioAnalyzer::new();
+            analyzer.set_smooth(0.0);
+            buffer.push(&[0.5; FFT_SIZE], 1);
+            let baseline = analyzer.poll(&buffer);
+            silent.push(&[0.0; FFT_SIZE], 1);
+            let mut other = AudioAnalyzer::new();
+            other.poll(&silent);
+            assert_eq!(analyzer.poll(&silent), [0.0; NUM_FFT_BINS]);
+            assert_eq!(analyzer.poll(&buffer), baseline);
+            buffer.push(&[0.0; FFT_SIZE], 1);
+            other.poll(&buffer);
+            assert_eq!(analyzer.poll(&buffer), [0.0; NUM_FFT_BINS]);
+        }
+
+        #[test]
         fn pushes_keep_only_the_newest_samples_without_growing_the_buffer() {
             let buffer = AudioBuffer::new();
-            let capacity = buffer.samples.lock().unwrap().capacity();
+            let capacity = buffer.window.lock().unwrap().samples.capacity();
             let data: Vec<f32> = (0..FFT_SIZE * 3).map(|i| i as f32).collect();
             for chunk in data.chunks(512) {
                 buffer.push(chunk, 1);
             }
             AudioAnalyzer::new().poll(&buffer);
-            let samples = buffer.samples.lock().unwrap();
+            let window = buffer.window.lock().unwrap();
+            let samples = &window.samples;
             assert_eq!(samples.capacity(), capacity);
             assert_eq!(samples.len(), FFT_SIZE);
             assert!(
@@ -533,7 +602,7 @@ mod analysis {
         #[test]
         fn oversized_multichannel_push_preserves_downmix_and_partial_frames() {
             let buffer = AudioBuffer::new();
-            let capacity = buffer.samples.lock().unwrap().capacity();
+            let capacity = buffer.window.lock().unwrap().samples.capacity();
             let data: Vec<f32> = (0..FFT_SIZE * 6 + 1).map(|i| i as f32).collect();
             buffer.push(&data, 2);
             let expected: Vec<f32> = data
@@ -541,7 +610,8 @@ mod analysis {
                 .map(|frame| frame.iter().sum::<f32>() / 2.0)
                 .collect();
             AudioAnalyzer::new().poll(&buffer);
-            let samples = buffer.samples.lock().unwrap();
+            let window = buffer.window.lock().unwrap();
+            let samples = &window.samples;
             assert_eq!(samples.capacity(), capacity);
             assert_eq!(samples.len(), FFT_SIZE);
             assert!(
@@ -555,7 +625,7 @@ mod analysis {
         #[test]
         fn producer_does_not_wait_for_fft_snapshots_and_analyzers_share_the_latest_window() {
             let buffer = AudioBuffer::new();
-            let guard = buffer.samples.lock().unwrap();
+            let guard = buffer.window.lock().unwrap();
             let producer = buffer.clone();
             let (done, received) = std::sync::mpsc::channel();
             let worker = std::thread::spawn(move || {
@@ -591,7 +661,8 @@ mod analysis {
             buffer.push(&[], 0);
             buffer.push(&[1.0, -0.0, 3.0], 0);
             AudioAnalyzer::new().poll(&buffer);
-            let samples = buffer.samples.lock().unwrap();
+            let window = buffer.window.lock().unwrap();
+            let samples = &window.samples;
             assert_eq!(
                 samples.iter().copied().collect::<Vec<_>>(),
                 vec![1.0, -0.0, 3.0]

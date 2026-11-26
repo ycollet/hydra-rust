@@ -49,9 +49,11 @@ pub fn rewrite_math(src: &str) -> String {
         if !mask[i] && matches_at(&chars, &mask, i, PREFIX) && !preceded_by_ident(&chars, i) {
             let ident_start = i + PREFIX.chars().count();
             let ident_end = ident_end(&chars, ident_start);
-            let ident: String = chars[ident_start..ident_end].iter().collect();
+            let ident = &chars[ident_start..ident_end];
 
-            if let Some((_, literal)) = CONST_MAP.iter().find(|(js, _)| *js == ident)
+            if let Some((_, literal)) = CONST_MAP
+                .iter()
+                .find(|(js, _)| ident.iter().copied().eq(js.chars()))
                 && !is_ident_char(chars.get(ident_end).copied())
             {
                 out.push_str(literal);
@@ -59,7 +61,9 @@ pub fn rewrite_math(src: &str) -> String {
                 continue;
             }
 
-            if let Some((_, glsl_name)) = METHOD_MAP.iter().find(|(js, _)| *js == ident)
+            if let Some((_, glsl_name)) = METHOD_MAP
+                .iter()
+                .find(|(js, _)| ident.iter().copied().eq(js.chars()))
                 && next_significant_is_paren(&chars, &mask, ident_end)
             {
                 out.push_str(glsl_name);
@@ -75,11 +79,10 @@ pub fn rewrite_math(src: &str) -> String {
 }
 
 fn matches_at(chars: &[char], mask: &[bool], i: usize, prefix: &str) -> bool {
-    let prefix: Vec<char> = prefix.chars().collect();
-    if i + prefix.len() > chars.len() {
-        return false;
-    }
-    (0..prefix.len()).all(|k| !mask[i + k] && chars[i + k] == prefix[k])
+    prefix
+        .chars()
+        .enumerate()
+        .all(|(k, c)| chars.get(i + k) == Some(&c) && !mask[i + k])
 }
 
 fn preceded_by_ident(chars: &[char], i: usize) -> bool {

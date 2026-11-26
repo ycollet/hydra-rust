@@ -117,22 +117,22 @@ fn process(chars: &[char], mask: &[bool]) -> String {
     while i < n {
         if !mask[i] && is_ident_char(chars[i]) && !preceded_by_ident(chars, i) {
             let ident_end = ident_end(chars, i);
-            let ident: String = chars[i..ident_end].iter().collect();
-
-            if let Some(&(_, max_args)) = MAX_ARGS.iter().find(|(name, _)| *name == ident) {
-                let mut p = ident_end;
-                skip_ws(chars, mask, &mut p);
-                if chars.get(p) == Some(&'(')
-                    && let Some(close) = matching_paren(chars, mask, p)
-                {
-                    out.push_str(&ident);
-                    out.extend(&chars[ident_end..p]);
-                    out.push('(');
-                    out.push_str(&truncate_arg_list(chars, mask, p + 1, close, max_args));
-                    out.push(')');
-                    i = close + 1;
-                    continue;
-                }
+            let ident = &chars[i..ident_end];
+            let mut p = ident_end;
+            skip_ws(chars, mask, &mut p);
+            if chars.get(p) == Some(&'(')
+                && let Some(&(_, max_args)) = MAX_ARGS
+                    .iter()
+                    .find(|(name, _)| ident.iter().copied().eq(name.chars()))
+                && let Some(close) = matching_paren(chars, mask, p)
+            {
+                out.extend(ident);
+                out.extend(&chars[ident_end..p]);
+                out.push('(');
+                out.push_str(&truncate_arg_list(chars, mask, p + 1, close, max_args));
+                out.push(')');
+                i = close + 1;
+                continue;
             }
         }
         out.push(chars[i]);

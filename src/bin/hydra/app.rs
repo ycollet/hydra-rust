@@ -1205,9 +1205,8 @@ impl HydraApp {
         }
         #[cfg(feature = "image_url")]
         for slot in 0..NUM_SOURCES {
-            if let Some(frame) = self.image_manager.poll(slot) {
-                renderer.upload_source(slot, &frame);
-            }
+            self.image_manager
+                .poll_with(slot, |frame| renderer.upload_source(slot, frame));
         }
         #[cfg(feature = "image_url")]
         if let Some(error) = self.image_manager.take_error() {

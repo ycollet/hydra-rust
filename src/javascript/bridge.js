@@ -1,5 +1,6 @@
 (() => {
   "use strict";
+  const parseFrame = JSON.parse;
   const metadata = new Map(__metadata.map(m => [m.name, m]));
   for (const spec of metadata.values()) spec.inputs = spec.defaults.map((value,index)=>
     ({name:`i${index}`,type:"float",default:value}));
@@ -528,7 +529,8 @@
     audio() { return audioRead; },
     setAudioSettings(settings) { editing(); requireFeature("fft"); audioSettings=settings; },
     finishFrame() { running=false; },
-    frame(input) {
+    frame(encoded) {
+      const input=parseFrame(encoded);
       Object.assign(globalThis,{time:input.time,beat:input.beat,tempo:input.tempo,bpm:input.tempo,
         phase:input.phase,width:input.resolution[0],height:input.resolution[1],
         innerWidth:input.resolution[0],innerHeight:input.resolution[1]});
@@ -547,7 +549,7 @@
         if (typeof v !== "number" || !Number.isFinite(v)) throw new Error(`callback ${i} must return a finite number`);
         values[i]=v;
       });
-      return JSON.stringify(values);
+      return values;
     }
   });
 })();

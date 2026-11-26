@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use rquickjs::context::EvalOptions;
-use rquickjs::{Context, Ctx, Exception, Function, Module, Object, Persistent, Runtime};
+use rquickjs::{Array, Context, Ctx, Exception, Function, Module, Object, Persistent, Runtime};
 use serde::{Deserialize, Serialize};
 
 use crate::eval::{Arg, BufferFilter, EvalResult, FUNCTIONS, Node, Op, OpKind, RenderMode};
@@ -94,6 +94,7 @@ pub struct JavascriptRuntime {
     library_root: PathBuf,
     settings: JavascriptSettings,
     evaluations: u64,
+    frame_input: Vec<u8>,
 }
 
 #[derive(Deserialize)]
@@ -429,6 +430,7 @@ impl JavascriptRuntime {
             library_root: root,
             settings,
             evaluations: 0,
+            frame_input: Vec::new(),
         })
     }
 
@@ -650,20 +652,36 @@ impl JavascriptRuntime {
         }
         self.start();
         let result = (|| {
-            let input = serde_json::to_string(&input).map_err(|e| e.to_string())?;
-            let output = self.context.with(|ctx| {
-                let call = || -> rquickjs::Result<String> {
-                    let bridge: Object = ctx.globals().get("__bridge")?;
-                    let frame: Function = bridge.get("frame")?;
-                    let input = ctx.json_parse(input)?;
-                    frame.call((input,))
-                };
-                call().map_err(|e| js_error(&ctx, e))
-            })?;
+            self.frame_input.clear();
+            serde_json::to_writer(&mut self.frame_input, &input).map_err(|e| e.to_string())?;
+            let input = std::str::from_utf8(&self.frame_input).map_err(|e| e.to_string())?;
+            let mut values = self
+                .context
+                .with(|ctx| -> Result<[f32; NUM_JS_VALUES], String> {
+                    let call = || -> rquickjs::Result<Array<'_>> {
+                        let bridge: Object = ctx.globals().get("__bridge")?;
+                        let frame: Function = bridge.get("frame")?;
+                        frame.call((input,))
+                    };
+                    let output = call().map_err(|e| js_error(&ctx, e))?;
+                    if output.len() != NUM_JS_VALUES {
+                        return Err("invalid callback value count".into());
+                    }
+                    let mut values = [0.0_f32; NUM_JS_VALUES];
+                    for (i, value) in values.iter_mut().enumerate() {
+                        *value = output.get(i).map_err(|e| js_error(&ctx, e))?;
+                    }
+                    Ok(values)
+                })?;
             self.jobs()?;
-            let values: Vec<f32> = serde_json::from_str(&output).map_err(|e| e.to_string())?;
-            if values.len() != NUM_JS_VALUES || values.iter().any(|v| !v.is_finite()) {
-                return Err("JavaScript callback must return a finite float".into());
+            for value in &mut values {
+                if !value.is_finite() {
+                    return Err("JavaScript callback must return a finite float".into());
+                }
+                // JSON encoded negative zero as zero before the typed return path.
+                if *value == 0.0 {
+                    *value = 0.0;
+                }
             }
             self.uses_audio |= self.context.with(|ctx| {
                 let call = || -> rquickjs::Result<bool> {
@@ -673,16 +691,21 @@ impl JavascriptRuntime {
                 };
                 call().map_err(|e| js_error(&ctx, e))
             })?;
-            values
-                .try_into()
-                .map_err(|_| "invalid callback value count".into())
+            Ok(values)
         })();
         if result.is_err() {
             self.cancel_jobs();
             self.jobs_blocked = self.runtime.is_job_pending();
         }
         self.start();
-        self.run("__bridge.finishFrame(); ''")?;
+        self.context.with(|ctx| {
+            let call = || -> rquickjs::Result<()> {
+                let bridge: Object = ctx.globals().get("__bridge")?;
+                let finish: Function = bridge.get("finishFrame")?;
+                finish.call(())
+            };
+            call().map_err(|e| js_error(&ctx, e))
+        })?;
         result
     }
 
