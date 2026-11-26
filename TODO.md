@@ -31,22 +31,23 @@ See [runtime and resource limits](DOCUMENTATION.md#runtime-and-resource-limits) 
 
 ### Higher-priority improvements
 
-- [ ] **Shader work budgets:** estimate repeated shader work and reject excessive nesting before graphics compilation.
-  Investigate intermediate textures for expensive chains, with explicit precision tradeoffs.
+- [x] **Shader work budgets:** estimate repeated shader work and reject excessive nesting before graphics compilation.
+  Limit each pass to 256 estimated source evaluations without introducing precision-changing intermediate textures.
   Example: bound the cost of `noise(2).tileable(0.15).tileable(0.15).out()`.
-- [ ] **Background evaluation:** move processor-side script evaluation and preprocessing off the interface thread.
+- [x] **Background evaluation:** move processor-side script evaluation and preprocessing off the interface thread.
   Cancel superseded requests, reject stale results, and keep graphics operations on a valid context.
   Example: editing a slow sketch should not block keyboard input or replace a newer successful graph.
-- [ ] **Broadcast workers:** isolate blocking encoder writes and connection handshakes from asynchronous runtime workers.
-  Add bounded delivery queues for viewers, with explicit overflow and recovery behavior.
+- [x] **Broadcast workers:** isolate blocking encoder writes and connection handshakes from asynchronous runtime workers.
+  Bound each viewer queue to 256 packets and disconnect slow viewers instead of dropping encoded packets.
+  Limit handshakes to four concurrent workers with ten-second deadlines.
   Example: a slow viewer should not delay other viewers or new connections.
-- [ ] **Asynchronous region readback:** investigate queued graphics readbacks that avoid waiting for current rendering.
-  Bound pending buffers and keep controls based on completed frames.
-  Document any added control latency.
-  Example: sample sixteen regions without blocking the interface until the graphics card finishes.
-- [ ] **Region sampling frequency:** make sampling frequency configurable independently of rendering and Open Sound Control transmission.
-  Example: sample brightness ten times per second while rendering sixty frames per second.
-- [ ] **Effect pass compaction:** remove copy-only passes between consecutive effects.
+- [x] **Asynchronous region readback:** queue graphics readbacks without explicit completion waits.
+  Three pending buffers bound work, and controls retain the latest completed sample.
+  Asynchronous mode remains opt-in because it adds frame latency.
+  Example: `setRegionSampling(0,true)` samples every frame without waiting for unfinished transfers.
+- [x] **Region sampling frequency:** configure sampling independently of rendering and Open Sound Control transmission.
+  Example: `setRegionSampling(10,false)` samples ten times per second while rendering continues.
+- [x] **Effect pass compaction:** remove copy-only passes between consecutive effects.
   Preserve existing color rounding, feedback, and output ordering.
   Example: four chained `.blur(1)` calls should avoid copying each intermediate result into another identical texture.
 

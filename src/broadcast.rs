@@ -32,12 +32,15 @@
 
 #[cfg(feature = "stream")]
 mod imp {
-    use std::io::{BufRead, BufReader, Write};
-    use std::net::{TcpListener, TcpStream, UdpSocket};
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::future::{Future, poll_fn};
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::{Shutdown, TcpListener, TcpStream, UdpSocket};
+    use std::pin::pin;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex, mpsc};
+    use std::task::Poll;
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use bytes::BytesMut;
     use ffmpeg_sidecar::command::FfmpegCommand;
@@ -53,7 +56,7 @@ mod imp {
         PeerConnection, PeerConnectionBuilder, PeerConnectionEventHandler, RTCIceGatheringState,
         RTCPeerConnectionState,
     };
-    use webrtc::runtime::{AsyncUdpSocket, Runtime, Sender, channel};
+    use webrtc::runtime::{JoinHandle, Receiver, Runtime, Sender, channel, timeout};
 
     use crate::stream::{VP8_CLOCK_RATE, VP8_PAYLOAD_TYPE, ice_config, vp8_media_engine};
 
@@ -180,6 +183,7 @@ mod imp {
     struct Handler {
         gather_complete_tx: Sender<()>,
         connected_tx: Sender<()>,
+        cancelled: Arc<AtomicBool>,
     }
 
     #[async_trait::async_trait]
@@ -193,35 +197,263 @@ mod imp {
             log::info!("broadcastStream: connection state {state}");
             if state == RTCPeerConnectionState::Connected {
                 let _ = self.connected_tx.try_send(());
+            } else if matches!(
+                state,
+                RTCPeerConnectionState::Failed
+                    | RTCPeerConnectionState::Closed
+                    | RTCPeerConnectionState::Disconnected
+            ) {
+                self.cancelled.store(true, Ordering::Release);
             }
         }
     }
 
-    /// One connected viewer - its own `RTCPeerConnection` (stored as
-    /// `Arc<dyn PeerConnection>`, per `PeerConnectionBuilder::build`'s own
-    /// documented pattern for sharing a connection across tasks/state) so
-    /// `stop()` can close it, plus the `TrackLocalStaticRTP` the shared
-    /// `ffmpeg` encode is fanned out to.
+    const VIEWER_QUEUE_CAPACITY: usize = 256;
+    const MAX_HANDSHAKES: usize = 4;
+    static ACTIVE_HANDSHAKES: AtomicUsize = AtomicUsize::new(0);
+    const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+    const ENCODER_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+    const POLL_INTERVAL: Duration = Duration::from_millis(20);
+    const CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
+    const MAX_SDP_BYTES: u64 = 1024 * 1024;
+
+    type Packet = rtc::rtp::packet::Packet;
+
+    /// Full queues disconnect viewers instead of corrupting encoded frames.
+    struct Delivery<T> {
+        packets: Sender<T>,
+        cancelled: Arc<AtomicBool>,
+    }
+
+    impl<T> Delivery<T> {
+        fn enqueue(&self, packet: T) {
+            if self.cancelled.load(Ordering::Acquire) {
+                return;
+            }
+            if let Err(error) = self.packets.try_send(packet) {
+                self.cancelled.store(true, Ordering::Release);
+                match error {
+                    webrtc::runtime::TrySendError::Full(_) => {
+                        log::warn!("broadcastStream: disconnecting slow viewer: RTP queue is full");
+                    }
+                    webrtc::runtime::TrySendError::Disconnected(_) => {
+                        log::debug!("broadcastStream: viewer delivery queue closed");
+                    }
+                }
+            }
+        }
+    }
+
     struct Viewer {
-        peer_connection: Arc<dyn PeerConnection>,
-        track: Arc<TrackLocalStaticRTP>,
+        delivery: Delivery<Packet>,
+        task: Box<dyn JoinHandle>,
     }
     type Viewers = Mutex<Vec<Viewer>>;
 
-    /// Given each currently-registered viewer's `write_rtp` outcome (in
-    /// registry order), returns which indices failed (disconnected),
-    /// **descending** so the caller can repeatedly `Vec::remove` them
-    /// without earlier removals invalidating later indices. A free
-    /// function purely so this bit of indexing logic is testable without a
-    /// real WebRTC track.
-    fn indices_to_prune(write_results: &[Result<(), ()>]) -> Vec<usize> {
-        write_results
-            .iter()
-            .enumerate()
-            .filter(|(_, r)| r.is_err())
-            .map(|(i, _)| i)
-            .rev()
-            .collect()
+    async fn race_cancellation<T>(
+        operation: impl Future<Output = T>,
+        cancellation: impl Future<Output = &'static str>,
+    ) -> Result<T, &'static str> {
+        let mut operation = pin!(operation);
+        let mut cancellation = pin!(cancellation);
+        poll_fn(|cx| {
+            if let Poll::Ready(reason) = cancellation.as_mut().poll(cx) {
+                return Poll::Ready(Err(reason));
+            }
+            operation.as_mut().poll(cx).map(Ok)
+        })
+        .await
+    }
+
+    async fn cancellable<T>(
+        runtime: &dyn Runtime,
+        stopped: &AtomicBool,
+        cancelled: &AtomicBool,
+        deadline: Option<Instant>,
+        operation: impl Future<Output = T>,
+    ) -> Result<T, &'static str> {
+        race_cancellation(operation, async {
+            loop {
+                if stopped.load(Ordering::Acquire) || cancelled.load(Ordering::Acquire) {
+                    return "cancelled";
+                }
+                if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                    return "timed out";
+                }
+                runtime.sleep(POLL_INTERVAL).await;
+            }
+        })
+        .await
+    }
+
+    async fn close_peer(runtime: &dyn Runtime, peer: &dyn PeerConnection) {
+        match timeout(runtime, CLOSE_TIMEOUT, peer.close()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => log::warn!("broadcastStream: closing viewer failed: {error}"),
+            Err(error) => log::warn!("broadcastStream: closing viewer timed out: {error}"),
+        }
+    }
+
+    struct EncoderProcess {
+        child: std::process::Child,
+        killed: bool,
+        writing_since: Option<Instant>,
+    }
+
+    // Supervision needs the process handle while its worker blocks on stdin.
+    type EncoderSlot = Arc<Mutex<Option<EncoderProcess>>>;
+
+    fn kill_encoder(process: &EncoderSlot) {
+        if let Some(process) = process.lock().unwrap().as_mut()
+            && !process.killed
+        {
+            if let Err(error) = process.child.kill() {
+                log::warn!("broadcastStream: killing encoder failed: {error}");
+            }
+            process.killed = true;
+        }
+    }
+
+    fn reap_encoder(process: &EncoderSlot) {
+        let child = process.lock().unwrap().take();
+        if let Some(mut process) = child {
+            if !process.killed
+                && let Err(error) = process.child.kill()
+            {
+                log::warn!("broadcastStream: killing encoder failed: {error}");
+            }
+            if let Err(error) = process.child.wait() {
+                log::warn!("broadcastStream: reaping encoder failed: {error}");
+            }
+        }
+    }
+
+    struct HandshakeWorker {
+        _permit: HandshakePermit<'static>,
+        socket: TcpStream,
+        cancelled: Arc<AtomicBool>,
+        deadline: Instant,
+        thread: thread::JoinHandle<()>,
+        task: Box<dyn JoinHandle>,
+    }
+
+    struct HandshakePermit<'a>(&'a AtomicUsize);
+
+    impl Drop for HandshakePermit<'_> {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+
+    fn reserve_handshake(active: &AtomicUsize) -> Option<HandshakePermit<'_>> {
+        let mut count = active.load(Ordering::Acquire);
+        while count < MAX_HANDSHAKES {
+            match active.compare_exchange_weak(
+                count,
+                count + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Some(HandshakePermit(active)),
+                Err(current) => count = current,
+            }
+        }
+        None
+    }
+
+    impl HandshakeWorker {
+        fn cancel(&self) {
+            self.cancelled.store(true, Ordering::Release);
+            if let Err(error) = self.socket.shutdown(Shutdown::Both)
+                && error.kind() != std::io::ErrorKind::NotConnected
+            {
+                log::warn!("broadcastStream: cancelling handshake socket failed: {error}");
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct Workers {
+        encoder: Option<thread::JoinHandle<()>>,
+        process: EncoderSlot,
+        handshakes: Vec<HandshakeWorker>,
+        viewers: Arc<Viewers>,
+        fanout: Option<Box<dyn JoinHandle>>,
+    }
+
+    impl Workers {
+        fn reap_handshakes(&mut self) {
+            let mut index = 0;
+            while index < self.handshakes.len() {
+                let worker = &self.handshakes[index];
+                if Instant::now() >= worker.deadline {
+                    worker.cancel();
+                }
+                if worker.thread.is_finished() && worker.task.is_finished() {
+                    let worker = self.handshakes.swap_remove(index);
+                    if worker.thread.join().is_err() {
+                        log::error!("broadcastStream: handshake worker panicked");
+                    }
+                } else {
+                    index += 1;
+                }
+            }
+        }
+
+        async fn stop(&self, runtime: &dyn Runtime) {
+            kill_encoder(&self.process);
+            for worker in &self.handshakes {
+                worker.cancel();
+            }
+            for viewer in self.viewers.lock().unwrap().iter() {
+                viewer.delivery.cancelled.store(true, Ordering::Release);
+            }
+            let deadline = Instant::now() + CLOSE_TIMEOUT + Duration::from_secs(1);
+            loop {
+                let finished = self
+                    .handshakes
+                    .iter()
+                    .all(|worker| worker.task.is_finished())
+                    && self
+                        .viewers
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .all(|v| v.task.is_finished())
+                    && self.fanout.as_ref().is_none_or(|task| task.is_finished());
+                if finished {
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    log::warn!("broadcastStream: aborting unfinished session tasks");
+                    for worker in &self.handshakes {
+                        worker.task.abort();
+                    }
+                    for viewer in self.viewers.lock().unwrap().iter() {
+                        viewer.task.abort();
+                    }
+                    if let Some(task) = &self.fanout {
+                        task.abort();
+                    }
+                    break;
+                }
+                runtime.sleep(POLL_INTERVAL).await;
+            }
+        }
+
+        fn join(self) {
+            if let Some(encoder) = self.encoder
+                && encoder.join().is_err()
+            {
+                log::error!("broadcastStream: encoder worker panicked");
+            }
+            reap_encoder(&self.process);
+            for worker in self.handshakes {
+                if worker.thread.join().is_err() {
+                    log::error!("broadcastStream: handshake worker panicked");
+                }
+            }
+        }
     }
 
     /// Runs on its own dedicated OS thread for as long as the broadcast is
@@ -238,20 +470,25 @@ mod imp {
         };
         let runtime_for_session = runtime.clone();
         let demand_for_session = capture_demand.clone();
-        runtime.block_on(Box::pin(async move {
+        let mut workers = Workers::default();
+        runtime.block_on(Box::pin(async {
             if let Err(e) = broadcast_session(
                 port,
                 latest_frame,
-                stopped,
+                stopped.clone(),
                 demand_for_session,
-                runtime_for_session,
+                runtime_for_session.clone(),
+                &mut workers,
             )
             .await
             {
                 log::warn!("broadcastStream: session ended: {e}");
             }
+            stopped.store(true, Ordering::Release);
+            capture_demand.store(false, Ordering::Release);
+            workers.stop(runtime_for_session.as_ref()).await;
         }));
-        capture_demand.store(false, Ordering::Release);
+        workers.join();
     }
 
     async fn broadcast_session(
@@ -260,6 +497,7 @@ mod imp {
         stopped: Arc<AtomicBool>,
         capture_demand: Arc<AtomicBool>,
         runtime: Arc<dyn Runtime>,
+        workers: &mut Workers,
     ) -> Result<(), String> {
         let listener =
             TcpListener::bind(("0.0.0.0", port)).map_err(|e| format!("bind {port}: {e}"))?;
@@ -271,34 +509,42 @@ mod imp {
             .map_err(|e| format!("set nonblocking: {e}"))?;
         log::info!("broadcastStream: listening on 0.0.0.0:{port}");
 
-        let viewers: Arc<Viewers> = Arc::new(Mutex::new(Vec::new()));
+        let viewers = workers.viewers.clone();
         let ssrc = std::process::id().wrapping_mul(2_654_435_761);
 
         // Bind the socket ffmpeg will send its encoded RTP to - fixed for
         // the life of the broadcast even though ffmpeg itself gets
         // started/stopped repeatedly below (viewers coming and going,
         // window resizes).
-        let rtp_port = UdpSocket::bind("127.0.0.1:0")
-            .and_then(|s| s.local_addr())
-            .map(|a| a.port())
-            .map_err(|e| e.to_string())?;
-        let std_sock = UdpSocket::bind(("127.0.0.1", rtp_port)).map_err(|e| e.to_string())?;
-        let sock: Arc<dyn AsyncUdpSocket> = runtime
+        let std_sock = UdpSocket::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
+        let rtp_port = std_sock.local_addr().map_err(|e| e.to_string())?.port();
+        let sock = runtime
             .wrap_udp_socket(std_sock)
             .map_err(|e| e.to_string())?;
 
-        // Fans ffmpeg's encoded RTP out to every currently-connected
-        // viewer, pruning any whose write failed (disconnected) - runs on
-        // webrtc-rs's own shared reactor pool for as long as the process
-        // lives, same as stream.rs's on_track forward task; it naturally
-        // goes idle (never a busy loop) once nothing is sending it packets
-        // (no viewers -> no ffmpeg -> nothing arrives here).
+        // Each viewer drains its own queue, so one stalled transport cannot block fanout.
         let viewers_for_fanout = viewers.clone();
-        runtime.spawn(Box::pin(async move {
+        let stopped_for_fanout = stopped.clone();
+        let runtime_for_fanout = runtime.clone();
+        workers.fanout = Some(runtime.spawn(Box::pin(async move {
             let mut buf = vec![0u8; 1500];
             loop {
-                let Ok((n, _)) = sock.recv_from(&mut buf).await else {
-                    break;
+                let result = cancellable(
+                    runtime_for_fanout.as_ref(),
+                    &stopped_for_fanout,
+                    &stopped_for_fanout,
+                    None,
+                    sock.recv_from(&mut buf),
+                )
+                .await;
+                let n = match result {
+                    Ok(Ok((n, _))) => n,
+                    Ok(Err(error)) => {
+                        log::warn!("broadcastStream: RTP receive failed: {error}");
+                        stopped_for_fanout.store(true, Ordering::Release);
+                        break;
+                    }
+                    Err(_) => break,
                 };
                 let mut bytes = BytesMut::from(&buf[..n]);
                 let Ok(mut packet) = rtc::rtp::packet::Packet::unmarshal(&mut bytes) else {
@@ -306,94 +552,133 @@ mod imp {
                 };
                 packet.header.ssrc = ssrc;
 
-                let current: Vec<Arc<TrackLocalStaticRTP>> = viewers_for_fanout
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .map(|v| v.track.clone())
-                    .collect();
-                let mut results = Vec::with_capacity(current.len());
-                for track in &current {
-                    results.push(track.write_rtp(packet.clone()).await.map_err(|_| ()));
-                }
-                let dead = indices_to_prune(&results);
-                if !dead.is_empty() {
-                    let mut guard = viewers_for_fanout.lock().unwrap();
-                    for i in dead {
-                        if i < guard.len() {
-                            guard.remove(i);
-                        }
-                    }
+                for viewer in viewers_for_fanout.lock().unwrap().iter() {
+                    viewer.delivery.enqueue(packet.clone());
                 }
             }
-        }));
+        })));
 
         // Spawns/kills `ffmpeg` as the viewer count transitions to/from
         // zero, and feeds it captured frames only while at least one
         // viewer is actually watching - no point paying VP8's real CPU
         // cost (see MAX_BROADCAST_WIDTH) encoding for an empty room.
-        let viewers_for_feed = viewers.clone();
         let latest_frame_for_feed = latest_frame.clone();
         let stopped_for_feed = stopped.clone();
-        let runtime_for_feed = runtime.clone();
-        runtime.spawn(Box::pin(async move {
-            let mut current_dims: Option<(u32, u32)> = None;
-            let mut ffmpeg: Option<(ffmpeg_sidecar::child::FfmpegChild, std::process::ChildStdin)> =
-                None;
+        let demand_for_feed = capture_demand.clone();
+        let process = workers.process.clone();
+        workers.encoder = Some(
+            thread::Builder::new()
+                .name("hydra-broadcast-encoder".into())
+                .spawn(move || {
+                    let mut current_dims: Option<(u32, u32)> = None;
+                    let mut stdin: Option<std::process::ChildStdin> = None;
 
-            while !stopped_for_feed.load(Ordering::Relaxed) {
-                runtime_for_feed.sleep(Duration::from_millis(20)).await;
+                    while !stopped_for_feed.load(Ordering::Relaxed) {
+                        thread::sleep(POLL_INTERVAL);
 
-                let watching = !viewers_for_feed.lock().unwrap().is_empty();
-                capture_demand.store(watching, Ordering::Release);
-                if !watching {
-                    if let Some((mut child, _)) = ffmpeg.take() {
-                        let _ = child.kill();
-                    }
-                    current_dims = None;
-                    latest_frame_for_feed.lock().unwrap().take();
-                    continue;
-                }
-
-                let Some((w, h, pixels)) = latest_frame_for_feed.lock().unwrap().take() else {
-                    continue;
-                };
-
-                if current_dims != Some((w, h)) {
-                    if let Some((mut child, _)) = ffmpeg.take() {
-                        let _ = child.kill();
-                    }
-                    match spawn_encoder(w, h, rtp_port) {
-                        Ok(pair) => {
-                            current_dims = Some((w, h));
-                            ffmpeg = Some(pair);
-                        }
-                        Err(e) => {
-                            log::warn!("broadcastStream: failed to start ffmpeg encoder: {e}");
+                        let killed = process.lock().unwrap().as_ref().is_some_and(|p| p.killed);
+                        if !demand_for_feed.load(Ordering::Acquire) || killed {
+                            stdin = None;
+                            reap_encoder(&process);
                             current_dims = None;
+                            latest_frame_for_feed.lock().unwrap().take();
                             continue;
                         }
+
+                        let Some((w, h, pixels)) = latest_frame_for_feed.lock().unwrap().take()
+                        else {
+                            continue;
+                        };
+
+                        if current_dims != Some((w, h)) {
+                            stdin = None;
+                            reap_encoder(&process);
+                            match spawn_encoder(w, h, rtp_port) {
+                                Ok((child, input)) => {
+                                    {
+                                        let mut guard = process.lock().unwrap();
+                                        *guard = Some(EncoderProcess {
+                                            child,
+                                            killed: false,
+                                            writing_since: None,
+                                        });
+                                    }
+                                    if stopped_for_feed.load(Ordering::Acquire)
+                                        || !demand_for_feed.load(Ordering::Acquire)
+                                    {
+                                        reap_encoder(&process);
+                                        continue;
+                                    }
+                                    current_dims = Some((w, h));
+                                    stdin = Some(input);
+                                }
+                                Err(e) => {
+                                    log::warn!(
+                                        "broadcastStream: failed to start ffmpeg encoder: {e}"
+                                    );
+                                    current_dims = None;
+                                    continue;
+                                }
+                            }
+                        }
+
+                        if let Some(input) = &mut stdin {
+                            if let Some(process) = process.lock().unwrap().as_mut() {
+                                process.writing_since = Some(Instant::now());
+                            }
+                            let result = input.write_all(&pixels);
+                            if let Some(process) = process.lock().unwrap().as_mut() {
+                                process.writing_since = None;
+                            }
+                            if let Err(error) = result {
+                                if !stopped_for_feed.load(Ordering::Acquire)
+                                    && demand_for_feed.load(Ordering::Acquire)
+                                {
+                                    log::warn!(
+                                        "broadcastStream: writing encoder frame failed: {error}"
+                                    );
+                                }
+                                stdin = None;
+                                reap_encoder(&process);
+                                current_dims = None;
+                            }
+                        }
                     }
-                }
 
-                if let Some((_, stdin)) = &mut ffmpeg
-                    && stdin.write_all(&pixels).is_err()
-                {
-                    // ffmpeg died - drop it, a fresh one starts on the next frame.
-                    ffmpeg = None;
-                    current_dims = None;
-                }
-            }
+                    drop(stdin);
+                    reap_encoder(&process);
+                })
+                .map_err(|error| format!("spawn encoder worker: {error}"))?,
+        );
 
-            if let Some((mut child, _)) = ffmpeg.take() {
-                let _ = child.kill();
-            }
-        }));
-
-        // Accept loop, on this dedicated thread: a real connection is
-        // handed off to its own spawned handshake task immediately, so one
-        // slow/stuck negotiation can never block admitting the next viewer.
+        // Keep supervision responsive even when encoder or handshake I/O stalls.
         while !stopped.load(Ordering::Relaxed) {
+            workers.reap_handshakes();
+            let watching = {
+                let mut viewers = viewers.lock().unwrap();
+                viewers.retain(|viewer| !viewer.task.is_finished());
+                viewers
+                    .iter()
+                    .any(|viewer| !viewer.delivery.cancelled.load(Ordering::Acquire))
+            };
+            capture_demand.store(watching, Ordering::Release);
+            let stalled = workers
+                .process
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|process| {
+                    !process.killed
+                        && process
+                            .writing_since
+                            .is_some_and(|start| start.elapsed() >= ENCODER_WRITE_TIMEOUT)
+                });
+            if stalled {
+                log::warn!("broadcastStream: encoder pipe stalled; restarting encoder");
+            }
+            if !watching || stalled {
+                kill_encoder(&workers.process);
+            }
             match listener.accept() {
                 Ok((tcp, peer_addr)) => {
                     log::info!("broadcastStream: viewer connecting from {peer_addr}");
@@ -409,16 +694,21 @@ mod imp {
                         log::warn!("broadcastStream: failed to set viewer socket blocking: {e}");
                         continue;
                     }
-                    let viewers2 = viewers.clone();
-                    let runtime2 = runtime.clone();
-                    runtime.spawn(Box::pin(async move {
-                        if let Err(e) = handshake_viewer(tcp, runtime2, viewers2, ssrc).await {
-                            log::warn!("broadcastStream: viewer handshake failed: {e}");
+                    match start_handshake(
+                        tcp,
+                        runtime.clone(),
+                        viewers.clone(),
+                        stopped.clone(),
+                        ssrc,
+                    ) {
+                        Ok(worker) => workers.handshakes.push(worker),
+                        Err(error) => {
+                            log::warn!("broadcastStream: starting handshake failed: {error}")
                         }
-                    }));
+                    }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    runtime.sleep(Duration::from_millis(100)).await;
+                    runtime.sleep(POLL_INTERVAL).await;
                 }
                 Err(e) => {
                     log::warn!("broadcastStream: accept error: {e}");
@@ -427,31 +717,110 @@ mod imp {
             }
         }
 
-        let closers: Vec<Arc<dyn PeerConnection>> = {
-            let mut guard = viewers.lock().unwrap();
-            guard.drain(..).map(|v| v.peer_connection).collect()
-        };
-        for pc in closers {
-            let _ = pc.close().await;
-        }
         Ok(())
     }
 
-    /// Negotiates one viewer's own `RTCPeerConnection` over its own TCP
-    /// connection (a single SDP offer/answer exchange, same non-trickle
-    /// ICE flow the original single-viewer code used) and, once connected,
-    /// registers it in the shared `viewers` list. Runs as its own spawned
-    /// task per accepted connection - a failure here only affects this one
-    /// viewer, never the accept loop or any other viewer.
-    async fn handshake_viewer(
+    fn start_handshake(
         tcp: TcpStream,
         runtime: Arc<dyn Runtime>,
         viewers: Arc<Viewers>,
+        stopped: Arc<AtomicBool>,
+        ssrc: u32,
+    ) -> Result<HandshakeWorker, String> {
+        let permit = reserve_handshake(&ACTIVE_HANDSHAKES).ok_or("handshake limit reached")?;
+        tcp.set_read_timeout(Some(HANDSHAKE_TIMEOUT))
+            .map_err(|e| e.to_string())?;
+        tcp.set_write_timeout(Some(HANDSHAKE_TIMEOUT))
+            .map_err(|e| e.to_string())?;
+        let socket = tcp.try_clone().map_err(|e| e.to_string())?;
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
+        let (offer_tx, offer_rx) = mpsc::sync_channel::<String>(1);
+        let (answer_tx, answer_rx) = channel::<Result<RTCSessionDescription, String>>(1);
+        let stopped_for_io = stopped.clone();
+        let cancelled_for_io = cancelled.clone();
+        let thread = thread::Builder::new()
+            .name("hydra-broadcast-handshake".into())
+            .spawn(move || {
+                let result = (|| {
+                    let offer = loop {
+                        if stopped_for_io.load(Ordering::Acquire)
+                            || cancelled_for_io.load(Ordering::Acquire)
+                            || Instant::now() >= deadline
+                        {
+                            return Err("handshake I/O cancelled or timed out".to_string());
+                        }
+                        match offer_rx.recv_timeout(POLL_INTERVAL) {
+                            Ok(offer) => break offer,
+                            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                                return Err("offer channel closed".to_string());
+                            }
+                        }
+                    };
+                    writeln!(&tcp, "{offer}").map_err(|e| format!("write offer: {e}"))?;
+                    let mut answer = String::new();
+                    BufReader::new((&tcp).take(MAX_SDP_BYTES + 1))
+                        .read_line(&mut answer)
+                        .map_err(|e| format!("read answer: {e}"))?;
+                    if answer.len() as u64 > MAX_SDP_BYTES || !answer.ends_with('\n') {
+                        return Err("answer is oversized or incomplete".to_string());
+                    }
+                    serde_json::from_str(answer.trim()).map_err(|e| format!("decode answer: {e}"))
+                })();
+                if let Err(error) = &result {
+                    log::warn!("broadcastStream: handshake I/O failed: {error}");
+                }
+                let _ = answer_tx.try_send(result);
+                if let Err(error) = tcp.shutdown(Shutdown::Both)
+                    && error.kind() != std::io::ErrorKind::NotConnected
+                {
+                    log::warn!("broadcastStream: closing handshake socket failed: {error}");
+                }
+            })
+            .map_err(|e| format!("spawn handshake worker: {e}"))?;
+
+        let cancelled_for_task = cancelled.clone();
+        let runtime_for_task = runtime.clone();
+        let task = runtime.spawn(Box::pin(async move {
+            if let Err(error) = handshake_viewer(
+                offer_tx,
+                answer_rx,
+                runtime_for_task,
+                viewers,
+                stopped,
+                cancelled_for_task.clone(),
+                deadline,
+                ssrc,
+            )
+            .await
+            {
+                cancelled_for_task.store(true, Ordering::Release);
+                log::warn!("broadcastStream: viewer handshake failed: {error}");
+            }
+        }));
+        Ok(HandshakeWorker {
+            _permit: permit,
+            socket,
+            cancelled,
+            deadline,
+            thread,
+            task,
+        })
+    }
+
+    /// Only the dedicated handshake worker touches the blocking TCP socket.
+    #[allow(clippy::too_many_arguments)]
+    async fn handshake_viewer(
+        offer_tx: mpsc::SyncSender<String>,
+        mut answer_rx: Receiver<Result<RTCSessionDescription, String>>,
+        runtime: Arc<dyn Runtime>,
+        viewers: Arc<Viewers>,
+        stopped: Arc<AtomicBool>,
+        cancelled: Arc<AtomicBool>,
+        deadline: Instant,
         ssrc: u32,
     ) -> Result<(), String> {
-        let mut reader = BufReader::new(tcp.try_clone().map_err(|e| e.to_string())?);
-        let mut writer = tcp;
-
         let (media_engine, registry) = vp8_media_engine()?;
         let config = ice_config().build();
         let (gather_complete_tx, mut gather_complete_rx) = channel::<()>(1);
@@ -459,6 +828,7 @@ mod imp {
         let handler = Arc::new(Handler {
             gather_complete_tx,
             connected_tx,
+            cancelled: cancelled.clone(),
         });
 
         let video_codec = RTCRtpCodec {
@@ -485,60 +855,105 @@ mod imp {
             )));
 
         let peer_connection: Arc<dyn PeerConnection> = Arc::new(
-            PeerConnectionBuilder::new()
-                .with_configuration(config)
-                .with_media_engine(media_engine)
-                .with_interceptor_registry(registry)
-                .with_handler(Arc::clone(&handler) as Arc<dyn PeerConnectionEventHandler>)
-                .with_runtime(runtime.clone())
-                .with_udp_addrs(vec!["0.0.0.0:0".to_string()])
-                .build()
-                .await
-                .map_err(|e| format!("build peer connection: {e}"))?,
+            cancellable(
+                runtime.as_ref(),
+                &stopped,
+                &cancelled,
+                Some(deadline),
+                PeerConnectionBuilder::new()
+                    .with_configuration(config)
+                    .with_media_engine(media_engine)
+                    .with_interceptor_registry(registry)
+                    .with_handler(Arc::clone(&handler) as Arc<dyn PeerConnectionEventHandler>)
+                    .with_runtime(runtime.clone())
+                    .with_dedicated_reactor_pool_size(1)
+                    .with_udp_addrs(vec!["0.0.0.0:0".to_string()])
+                    .build(),
+            )
+            .await
+            .map_err(str::to_string)?
+            .map_err(|e| format!("build peer connection: {e}"))?,
         );
 
-        peer_connection
-            .add_track(Arc::clone(&track) as Arc<dyn TrackLocal>)
-            .await
-            .map_err(|e| format!("add track: {e}"))?;
+        let result = cancellable(
+            runtime.as_ref(),
+            &stopped,
+            &cancelled,
+            Some(deadline),
+            async {
+                peer_connection
+                    .add_track(Arc::clone(&track) as Arc<dyn TrackLocal>)
+                    .await
+                    .map_err(|e| format!("add track: {e}"))?;
 
-        let offer = peer_connection
-            .create_offer(None)
-            .await
-            .map_err(|e| e.to_string())?;
-        peer_connection
-            .set_local_description(offer)
-            .await
-            .map_err(|e| e.to_string())?;
-        let _ = gather_complete_rx.recv().await;
-        let local_desc = peer_connection
-            .local_description()
-            .await
-            .ok_or("no local description after ICE gathering")?;
-        writeln!(
-            writer,
-            "{}",
-            serde_json::to_string(&local_desc).map_err(|e| e.to_string())?
+                let offer = peer_connection
+                    .create_offer(None)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                peer_connection
+                    .set_local_description(offer)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                gather_complete_rx
+                    .recv()
+                    .await
+                    .ok_or("ICE gathering channel closed")?;
+                let local_desc = peer_connection
+                    .local_description()
+                    .await
+                    .ok_or("no local description after ICE gathering")?;
+                offer_tx
+                    .try_send(serde_json::to_string(&local_desc).map_err(|e| e.to_string())?)
+                    .map_err(|e| format!("send offer to handshake worker: {e}"))?;
+
+                let answer = answer_rx.recv().await.ok_or("answer channel closed")??;
+                peer_connection
+                    .set_remote_description(answer)
+                    .await
+                    .map_err(|e| e.to_string())?;
+
+                connected_rx
+                    .recv()
+                    .await
+                    .ok_or("connection channel closed")?;
+                Ok::<(), String>(())
+            },
         )
-        .map_err(|e| e.to_string())?;
-
-        let mut answer_line = String::new();
-        reader
-            .read_line(&mut answer_line)
-            .map_err(|e| e.to_string())?;
-        let answer: RTCSessionDescription =
-            serde_json::from_str(answer_line.trim()).map_err(|e| e.to_string())?;
-        peer_connection
-            .set_remote_description(answer)
-            .await
-            .map_err(|e| e.to_string())?;
-
-        let _ = connected_rx.recv().await;
+        .await
+        .map_err(str::to_string)
+        .and_then(|result| result);
+        if let Err(error) = result {
+            close_peer(runtime.as_ref(), peer_connection.as_ref()).await;
+            return Err(error);
+        }
         log::info!("broadcastStream: viewer negotiated and connected");
 
+        let (packets, mut packet_rx) = channel::<Packet>(VIEWER_QUEUE_CAPACITY);
+        let cancelled_for_delivery = cancelled.clone();
+        let runtime_for_delivery = runtime.clone();
+        let task = runtime.spawn(Box::pin(async move {
+            let result = cancellable(
+                runtime_for_delivery.as_ref(),
+                &stopped,
+                &cancelled_for_delivery,
+                None,
+                async {
+                    while let Some(packet) = packet_rx.recv().await {
+                        track.write_rtp(packet).await.map_err(|e| e.to_string())?;
+                    }
+                    Ok::<(), String>(())
+                },
+            )
+            .await;
+            if let Ok(Err(error)) = result {
+                log::warn!("broadcastStream: viewer RTP write failed: {error}");
+            }
+            cancelled_for_delivery.store(true, Ordering::Release);
+            close_peer(runtime_for_delivery.as_ref(), peer_connection.as_ref()).await;
+        }));
         viewers.lock().unwrap().push(Viewer {
-            peer_connection,
-            track,
+            delivery: Delivery { packets, cancelled },
+            task,
         });
         Ok(())
     }
@@ -565,10 +980,14 @@ mod imp {
         width: u32,
         height: u32,
         rtp_port: u16,
-    ) -> Result<(ffmpeg_sidecar::child::FfmpegChild, std::process::ChildStdin), String> {
+    ) -> Result<(std::process::Child, std::process::ChildStdin), String> {
         let mut command = FfmpegCommand::new();
         command
             .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-nostats",
                 "-f",
                 "rawvideo",
                 "-pix_fmt",
@@ -600,8 +1019,21 @@ mod imp {
             .args(["-payload_type", &VP8_PAYLOAD_TYPE.to_string()])
             .output(format!("udp://127.0.0.1:{rtp_port}"));
 
-        let mut child = command.spawn().map_err(|e| format!("spawn ffmpeg: {e}"))?;
-        let stdin = child.take_stdin().ok_or("ffmpeg stdin was not piped")?;
+        let mut child = command
+            .as_inner_mut()
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::inherit())
+            .spawn()
+            .map_err(|e| format!("spawn ffmpeg: {e}"))?;
+        let Some(stdin) = child.stdin.take() else {
+            if let Err(error) = child.kill() {
+                log::warn!("broadcastStream: killing unpiped encoder failed: {error}");
+            }
+            if let Err(error) = child.wait() {
+                log::warn!("broadcastStream: reaping unpiped encoder failed: {error}");
+            }
+            return Err("ffmpeg stdin was not piped".into());
+        };
         Ok((child, stdin))
     }
 
@@ -649,35 +1081,131 @@ mod imp {
         }
 
         #[test]
-        fn indices_to_prune_finds_only_failed_writes_in_descending_order() {
-            let results: Vec<Result<(), ()>> = vec![Ok(()), Err(()), Ok(()), Err(()), Err(())];
-            assert_eq!(indices_to_prune(&results), vec![4, 3, 1]);
-        }
-
-        #[test]
-        fn indices_to_prune_is_empty_when_everything_succeeded() {
-            let results: Vec<Result<(), ()>> = vec![Ok(()), Ok(()), Ok(())];
-            assert!(indices_to_prune(&results).is_empty());
-        }
-
-        #[test]
-        fn indices_to_prune_removal_order_never_invalidates_earlier_indices() {
-            let results: Vec<Result<(), ()>> = vec![Err(()), Ok(()), Err(()), Ok(()), Err(())];
-            let mut v = vec!["a", "b", "c", "d", "e"];
-            for i in indices_to_prune(&results) {
-                v.remove(i);
+        fn full_viewer_queue_disconnects_without_dropping_queued_packets() {
+            let (packets, mut received) = channel(VIEWER_QUEUE_CAPACITY);
+            let delivery = Delivery {
+                packets,
+                cancelled: Arc::new(AtomicBool::new(false)),
+            };
+            for packet in 0..VIEWER_QUEUE_CAPACITY {
+                delivery.enqueue(packet);
             }
-            assert_eq!(v, vec!["b", "d"]);
+            assert!(!delivery.cancelled.load(Ordering::Acquire));
+            delivery.enqueue(VIEWER_QUEUE_CAPACITY);
+            assert!(delivery.cancelled.load(Ordering::Acquire));
+            delivery.enqueue(VIEWER_QUEUE_CAPACITY + 1);
+            for packet in 0..VIEWER_QUEUE_CAPACITY {
+                assert_eq!(received.try_recv().unwrap(), packet);
+            }
+            assert!(matches!(
+                received.try_recv(),
+                Err(webrtc::runtime::TryRecvError::Empty)
+            ));
         }
 
         #[test]
-        fn start_on_a_bad_port_does_not_panic() {
-            let mut mgr = BroadcastManager::new();
-            // Port 1 is reserved/unlikely to be bindable without privilege -
-            // the background thread's bind should just fail and log.
-            mgr.start(1);
-            assert!(mgr.is_active());
-            std::thread::sleep(Duration::from_millis(100));
+        fn slow_viewer_does_not_block_another_viewers_delivery() {
+            let (slow_tx, _slow_rx) = channel(VIEWER_QUEUE_CAPACITY);
+            let (fast_tx, mut fast_rx) = channel(VIEWER_QUEUE_CAPACITY);
+            let slow = Delivery {
+                packets: slow_tx,
+                cancelled: Arc::new(AtomicBool::new(false)),
+            };
+            let fast = Delivery {
+                packets: fast_tx,
+                cancelled: Arc::new(AtomicBool::new(false)),
+            };
+            for packet in 0..VIEWER_QUEUE_CAPACITY * 2 {
+                slow.enqueue(packet);
+                fast.enqueue(packet);
+                assert_eq!(fast_rx.try_recv().unwrap(), packet);
+            }
+            assert!(slow.cancelled.load(Ordering::Acquire));
+            assert!(!fast.cancelled.load(Ordering::Acquire));
+        }
+
+        #[test]
+        fn closed_viewer_queue_cancels_the_viewer() {
+            let (packets, received) = channel::<u8>(VIEWER_QUEUE_CAPACITY);
+            let delivery = Delivery {
+                packets,
+                cancelled: Arc::new(AtomicBool::new(false)),
+            };
+            drop(received);
+            delivery.enqueue(1);
+            assert!(delivery.cancelled.load(Ordering::Acquire));
+        }
+
+        #[test]
+        fn handshake_admission_rejects_a_fifth_active_worker() {
+            let active = AtomicUsize::new(0);
+            let mut workers = Vec::new();
+            for _ in 0..4 {
+                workers.push(reserve_handshake(&active).unwrap());
+            }
+            assert!(reserve_handshake(&active).is_none());
+            drop(workers.pop());
+            workers.push(reserve_handshake(&active).unwrap());
+            assert!(reserve_handshake(&active).is_none());
+            drop(workers);
+            assert_eq!(active.load(Ordering::Acquire), 0);
+        }
+
+        #[test]
+        fn cancellation_drops_pending_work_and_wins_over_ready_work() {
+            struct PendingWork(Arc<AtomicBool>);
+            impl Future for PendingWork {
+                type Output = ();
+                fn poll(
+                    self: std::pin::Pin<&mut Self>,
+                    _: &mut std::task::Context<'_>,
+                ) -> Poll<()> {
+                    Poll::Pending
+                }
+            }
+            impl Drop for PendingWork {
+                fn drop(&mut self) {
+                    self.0.store(true, Ordering::Release);
+                }
+            }
+            let dropped = Arc::new(AtomicBool::new(false));
+            let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+            {
+                let future = race_cancellation(PendingWork(dropped.clone()), async { "stopped" });
+                let mut future = pin!(future);
+                assert_eq!(
+                    future.as_mut().poll(&mut context),
+                    Poll::Ready(Err("stopped"))
+                );
+            }
+            assert!(dropped.load(Ordering::Acquire));
+            let mut future = pin!(race_cancellation(async { 42 }, async { "timed out" }));
+            assert_eq!(
+                future.as_mut().poll(&mut context),
+                Poll::Ready(Err("timed out"))
+            );
+        }
+
+        #[test]
+        fn cancellation_checks_session_viewer_and_handshake_deadline() {
+            let runtime = webrtc::runtime::default_runtime().unwrap();
+            let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+            for (stopped, cancelled, deadline, reason) in [
+                (true, false, None, "cancelled"),
+                (false, true, None, "cancelled"),
+                (false, false, Some(Instant::now()), "timed out"),
+            ] {
+                let stopped = AtomicBool::new(stopped);
+                let cancelled = AtomicBool::new(cancelled);
+                let mut future = pin!(cancellable(
+                    runtime.as_ref(),
+                    &stopped,
+                    &cancelled,
+                    deadline,
+                    std::future::pending::<()>(),
+                ));
+                assert_eq!(future.as_mut().poll(&mut context), Poll::Ready(Err(reason)));
+            }
         }
 
         #[test]
@@ -696,8 +1224,13 @@ mod imp {
 
         #[test]
         fn starting_twice_is_idempotent() {
-            let mut mgr = BroadcastManager::new();
-            mgr.start(2);
+            let mut mgr = BroadcastManager {
+                state: Some(BroadcastState {
+                    stopped: Arc::new(AtomicBool::new(false)),
+                    latest_frame: Arc::new(Mutex::new(None)),
+                    capture_demand: Arc::new(AtomicBool::new(false)),
+                }),
+            };
             let sink1 = mgr.frame_sink();
             mgr.start(3); // should be ignored - already active
             let sink2 = mgr.frame_sink();

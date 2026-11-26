@@ -29,6 +29,28 @@ fn persistent_context_and_native_emitter() {
 }
 
 #[test]
+fn region_sampling_and_shader_budgets_are_validated_and_rolled_back() {
+    let mut js = runtime();
+    let original = js
+        .eval("setRegionSampling(10,true);noise(2).blur().blur().blur().blur().out()")
+        .unwrap();
+    assert_eq!(original.render_plan.passes.len(), 5);
+    assert_eq!(original.region_sampling.rate, 10.0);
+    assert!(original.region_sampling.asynchronous);
+    for code in [
+        "setRegionSampling(-1,true)",
+        "setRegionSampling(10,'yes')",
+        "setRegionSampling(20,false);noise(2).tileable().tileable().tileable().tileable().tileable().out()",
+    ] {
+        assert!(js.eval(code).is_err());
+        let current = js.eval("").unwrap();
+        assert_eq!(current.region_sampling.rate, 10.0);
+        assert!(current.region_sampling.asynchronous);
+        assert_eq!(current.shaders, original.shaders);
+    }
+}
+
+#[test]
 fn opt_in_pixel_parameters_and_effect_passes_share_native_codegen() {
     for (javascript, rhai) in [
         ("osc(noise(2).mul(40)).out()", "osc(noise(2) * 40).out()"),
@@ -155,11 +177,11 @@ fn history_limit_is_configurable_and_rolls_back_with_the_graph() {
 fn automatic_pass_limit_spans_all_outputs() {
     let mut js = runtime();
     let valid = js
-        .eval("for(var i=0;i<4;i++)osc(10).blur().blur().blur().blur().out([o0,o1,o2,o3][i])")
+        .eval("for(var i=0;i<4;i++){var n=osc(10);for(var j=0;j<7;j++)n=n.blur();n.out([o0,o1,o2,o3][i])}")
         .unwrap();
     assert_eq!(valid.render_plan.passes.len(), 32);
     let error = js
-        .eval("osc(10).blur().blur().blur().blur().blur().out()")
+        .eval("osc(10).blur().blur().blur().blur().blur().blur().blur().blur().out()")
         .err()
         .unwrap();
     assert!(error.contains("pass limit"), "{error}");

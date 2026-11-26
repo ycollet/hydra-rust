@@ -1000,6 +1000,29 @@ log a warning and leave the pattern unchanged.
 
 ## Runtime and resource limits
 
+### Background script execution
+
+Each host uses a dedicated worker for script evaluation and preprocessing.
+The standalone application also runs JavaScript frame callbacks on its worker.
+The application renders the last completed callback values while new work runs.
+This can add callback latency and coalesce updates during slow execution.
+
+Bounded slots retain the latest pending request instead of accumulating edits.
+Each worker holds one pending command, one pending frame, and one completion slot for each kind.
+New evaluations cancel superseded interpreter work and discard stale results.
+Cancellation remains cooperative; preprocessing and native calls can finish before noticing it.
+Graphics compilation and resource changes stay on the rendering context.
+Only successful compilation applies device actions and buffer clearing.
+Rejected evaluations preserve the previous graph and restore its callbacks.
+Existing JavaScript global-variable rollback limitations still apply.
+For example, submitting a corrected sketch supersedes an older request without replacing the graph with stale code.
+
+Runtime resets also run on the worker and preserve rendering until reevaluation succeeds.
+Successful resets clear interpreter state and suspend callbacks until evaluation.
+Failed resets preserve the interpreter and its settings.
+Shutdown cancels interpreter work but can wait for an unfinished native call.
+For example, closing the application during a native library read can wait for that read.
+
 ### Rhai execution
 
 Rhai evaluation stops after 1,000,000 operations or 200 milliseconds of interpreter execution.
@@ -1027,15 +1050,75 @@ Reevaluation reuses unchanged shader programs and compatible intermediate textur
 For example, changing the source color in `solid(0.2,0.3,0.4,1).blur(1).out()` recompiles only the affected pass.
 Failed compilation preserves the previous graph and its feedback history.
 
+Shader generation allows at most 256 estimated source evaluations per pass.
+Each `.tileable()` multiplies its input's estimate by four.
+Blend inputs and texture-driven parameters also contribute.
+For example, four nested `.tileable(0.15)` calls around `noise(2)` reach the limit.
+A fifth call reports an error before graphics compilation.
+This estimate does not bound arbitrary loops inside custom shader functions.
+No automatic tileable texture conversion changes accepted sketches' precision.
+
+Adjacent neighborhood effects reuse the previous effect's rounded texture.
+For example, four chained `.blur(1)` calls now require five intermediate passes instead of eight.
+Intervening operations still receive their own pass.
+For example, `.blur(1).invert().blur(1)` keeps the pass containing `invert()`.
+
 Region controls collect their samples into one small texture before reading it.
 Each region still uses an eight-by-eight sample grid.
-All regions share one graphics readback per frame.
+All sampled regions share one graphics readback.
 For example, sixteen `region(o0,0,0,1,1,0)` controls require one readback instead of sixteen.
+
+### Region sampling frequency and latency
+
+`setRegionSampling(rate, asynchronous)` configures standalone region sampling in either scripting language.
+The rate accepts zero or values from one to 240 samples per second.
+Zero samples every rendered frame.
+JavaScript defaults the second argument to `false`; Rhai requires both arguments.
+The default remains `setRegionSampling(0, false)`.
+For example, `setRegionSampling(10, false)` samples ten times per second while rendering continues normally.
+
+Sampling and Open Sound Control transmission use separate rate limits.
+Controls hold the latest completed value between samples.
+For example, `setRegionSampling(10, false)` can feed a sender configured for thirty messages per second.
+Actual sampling cannot exceed the rendered frame rate.
+
+Set the second argument to `true` to request asynchronous readback.
+For example, `setRegionSampling(10, true)` requests ten nonblocking readbacks per second.
+Three graphics transfer buffers bound pending work.
+The renderer checks completion without waiting and never reads an unfinished transfer buffer.
+It skips new requests when all buffers remain busy and logs a warning.
+Graphics drivers can still introduce internal submission stalls.
+This mode avoids explicit completion waits, not every possible driver stall.
+
+Asynchronous samples arrive in later render callbacks.
+Compared with synchronous sampling, controls normally gain at least one additional rendered frame of latency.
+Heavy graphics work can delay them longer.
+For example, use the default synchronous mode when exact previous-frame control timing matters.
+Reevaluation, resizing, and buffer clearing discard queued samples from the old rendering state.
+The plugin still rejects region controls, as documented above.
+
+### Broadcast capture
 
 Broadcast capture starts only when viewers connect.
 Frames wider than 1280 pixels shrink on the graphics card before transfer to the processor.
 For example, a 1920-by-1080 broadcast transfers a 1280-by-720 frame.
 Screenshots retain the full window resolution.
+
+Blocking encoder writes and connection exchanges use dedicated workers instead of asynchronous runtime workers.
+At most four handshakes run simultaneously.
+Each handshake has a ten-second deadline, including connection negotiation.
+For example, a stalled connection cannot occupy every asynchronous network worker.
+
+Each connected viewer has a queue holding at most 256 encoded video packets.
+A full queue disconnects that viewer and produces a warning.
+Other viewers continue independently.
+For example, one slow receiver cannot hold up delivery to three faster receivers.
+The broadcaster disconnects instead of dropping arbitrary packets from encoded frames.
+
+An encoder pipe stalled for ten seconds triggers a logged restart.
+Stopping broadcasting or losing every viewer terminates the encoder.
+For example, closing the final receiving window stops both capture demand and encoding.
+Shutdown cancels asynchronous work, but operating-system thread cleanup has no strict real-time duration guarantee.
 
 ### Images and animated GIFs
 
@@ -1173,6 +1256,12 @@ These illustrative results are not performance guarantees or automatic regressio
 
 Fractional allocation counts represent calls averaged across a batch.
 For example, rhythm-analysis steps can allocate in some operations but not others.
+
+After effect-pass compaction, the same local setup measured four blurs at approximately 277 microseconds.
+That run used five intermediate passes instead of eight.
+The earlier median was approximately 446 microseconds.
+For example, rerun `render/blur_4` before comparing other machines or graphics drivers.
+Scheduling differences affect these measurements; this comparison is not a guaranteed speedup.
 
 ### Representative hardware profiling
 

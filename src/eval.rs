@@ -184,6 +184,7 @@ pub struct EvalResult {
     pub render_plan: crate::extended::RenderPlan,
     pub regions: Vec<crate::extended::Region>,
     pub region_outputs: Vec<crate::extended::RegionOutput>,
+    pub region_sampling: crate::extended::RegionSampling,
     #[cfg(any(
         feature = "webcam",
         feature = "image_url",
@@ -1970,6 +1971,7 @@ impl Emitter {
 }
 
 pub(crate) fn compile_node(node: &Node) -> Result<String, String> {
+    crate::extended::validate_shader_work(node)?;
     let mut emitter = Emitter::new();
     let final_var = emitter.compile_node(node)?;
     let body = emitter.lines.join("\n");
@@ -2049,6 +2051,7 @@ struct PatchState {
     screencap: bool,
     regions: Vec<crate::extended::Region>,
     region_outputs: Vec<crate::extended::RegionOutput>,
+    region_sampling: crate::extended::RegionSampling,
     render_resolution: Option<(u32, u32)>,
     buffer_filter: [Option<BufferFilter>; 4],
     #[cfg(any(
@@ -2444,6 +2447,7 @@ pub fn eval(code: &str) -> Result<EvalResult, String> {
         code,
         #[cfg(feature = "fft")]
         AudioSettings::default(),
+        None,
     )
 }
 
@@ -2454,13 +2458,34 @@ pub fn eval_with_audio_settings(
     code: &str,
     settings: &AudioSettings,
 ) -> Result<EvalResult, String> {
-    eval_impl(code, settings.clone())
+    eval_impl(code, settings.clone(), None)
+}
+
+pub(crate) fn eval_cancellable(
+    code: &str,
+    #[cfg(feature = "fft")] settings: AudioSettings,
+    cancellation: crate::background_eval::Cancellation,
+) -> Result<EvalResult, String> {
+    eval_impl(
+        code,
+        #[cfg(feature = "fft")]
+        settings,
+        Some(cancellation),
+    )
 }
 
 fn eval_impl(
     code: &str,
     #[cfg(feature = "fft")] audio_settings: AudioSettings,
+    cancellation: Option<crate::background_eval::Cancellation>,
 ) -> Result<EvalResult, String> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
+    if cancellation
+        .as_ref()
+        .is_some_and(|token| token.is_cancelled())
+    {
+        return Err("Evaluation cancelled".into());
+    }
     // Must run before `preprocess` (and before anything else touches the
     // source): pulls `setFunction({...})` calls out whole, so the raw
     // GLSL body text inside them never gets rewritten by a later pass
@@ -2477,6 +2502,7 @@ fn eval_impl(
         screencap: false,
         regions: Vec::new(),
         region_outputs: Vec::new(),
+        region_sampling: Default::default(),
         render_resolution: None,
         buffer_filter: [None; 4],
         #[cfg(any(
@@ -2509,6 +2535,25 @@ fn eval_impl(
     let mut engine = Engine::new();
     engine.set_max_operations(1_000_000);
     engine.build_type::<Node>();
+    {
+        let state = state.clone();
+        let set = move |rate: f64, asynchronous: bool| -> Result<(), Box<rhai::EvalAltResult>> {
+            if !rate.is_finite() || (rate != 0.0 && !(1.0..=240.0).contains(&rate)) {
+                return Err("Region sampling rate must be zero or between 1 and 240 Hz".into());
+            }
+            let sampling = crate::extended::RegionSampling {
+                rate: rate as f32,
+                asynchronous,
+            };
+            sampling.validate()?;
+            state.lock().unwrap().region_sampling = sampling;
+            Ok(())
+        };
+        engine.register_fn("setRegionSampling", set.clone());
+        engine.register_fn("setRegionSampling", move |rate: i64, asynchronous: bool| {
+            set(rate as f64, asynchronous)
+        });
+    }
     {
         let state = state.clone();
         engine.register_fn(
@@ -3572,14 +3617,26 @@ fn eval_impl(
     #[cfg(feature = "osc")]
     scope.push("_osc", Osc);
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
     engine.on_progress(move |_| {
+        if cancellation
+            .as_ref()
+            .is_some_and(|token| token.check_progress())
+        {
+            return Some(Dynamic::from("Evaluation cancelled"));
+        }
         (std::time::Instant::now() >= deadline)
             .then(|| Dynamic::from("Rhai execution exceeded the 200 ms time limit"))
     });
     let result = engine
         .eval_with_scope::<Dynamic>(&mut scope, code)
-        .map_err(|e| e.to_string())?;
+        .map_err(|error| {
+            if let rhai::EvalAltResult::ErrorTerminated(reason, _) = error.as_ref()
+                && let Some(message) = reason.clone().try_cast::<String>()
+            {
+                return message;
+            }
+            error.to_string()
+        })?;
 
     let mut patch = state.lock().unwrap();
 
@@ -3620,6 +3677,7 @@ fn eval_impl(
         render_plan,
         regions: std::mem::take(&mut patch.regions),
         region_outputs: std::mem::take(&mut patch.region_outputs),
+        region_sampling: patch.region_sampling,
         #[cfg(any(
             feature = "webcam",
             feature = "image_url",

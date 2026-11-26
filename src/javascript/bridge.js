@@ -27,6 +27,7 @@
   let midiValues = Array(64).fill(0), midiEnvelopes = Array(16).fill(0), oscValues = Array(32).fill(0);
   let audioSettings = features.fft ? __audioSettings : null;
   let regions=[],regionOutputs=[],regionValues=Array(16).fill(0),historyLimit=8;
+  let regionSampling={rate:0,asynchronous:false};
   const regionSlots=new WeakMap();
   delete globalThis.__audioSettings;
   const unsupported = name => () => { throw new Error(`${name} is unsupported in embedded JavaScript`); };
@@ -249,7 +250,7 @@
       finite(d);
       return {name:i.name,type:i.type,default:d};
     });
-    if (def.name.startsWith("native_") || ["src","ext_src","text_src","tileable","text","strokeText","fillStrokeText","strokeFillText","out","constructor","ops","transforms","history","setHistoryLimit","region","sendRegion","stopRegionOutput","mul","nativeBlur","nativeSharpen","nativeSobel","nativeEmboss","nativeDilate","nativeErode"].includes(def.name)) throw new Error("cannot replace graph infrastructure");
+    if (def.name.startsWith("native_") || ["src","ext_src","text_src","tileable","text","strokeText","fillStrokeText","strokeFillText","out","constructor","ops","transforms","history","setHistoryLimit","setRegionSampling","region","sendRegion","stopRegionOutput","mul","nativeBlur","nativeSharpen","nativeSobel","nativeEmboss","nativeDilate","nativeErode"].includes(def.name)) throw new Error("cannot replace graph infrastructure");
     if (!definitions.has(def.name) && definitions.size >= functionLimits.count) throw new Error("custom function limit");
     const bytes = definitionBytes - (definitions.get(def.name)?.glsl.length ?? 0) + def.glsl.length;
     if (bytes > functionLimits.bytes) throw new Error("Custom shader registry byte limit exceeded");
@@ -264,6 +265,11 @@
   }
   Object.assign(globalThis, {Node,src,setFunction,window:globalThis,
     setHistoryLimit(limit) {editing();integer(limit,1,8,"history limit");historyLimit=limit;},
+    setRegionSampling(rate,asynchronous=false) {
+      editing();finite(rate);
+      if((rate!==0&&(rate<1||rate>240))||typeof asynchronous!=="boolean")throw new Error("Invalid region sampling rate or mode");
+      regionSampling={rate,asynchronous};
+    },
     history(output,delay=1) {
       editing(); integer(delay,1,8,"history delay");
       return new Node([{name:"native_history",args:[value(outputIndex(output)),value(delay)],other:null}]);
@@ -484,6 +490,7 @@
         commands:commands.slice(),midiBindings:new Map(midiBindings),envelopes:new Map(envelopes),oscBindings:new Map(oscBindings),
         audioSettings:audioSettings ? JSON.parse(JSON.stringify(audioSettings)) : null};
       saved.regions=regions.slice();saved.regionOutputs=regionOutputs.slice();saved.historyLimit=historyLimit;
+      saved.regionSampling={...regionSampling};
       callbacks=callbacks.map((fn,i)=>activeSlots.has(i) ? fn : null);
       capture=false; filters=[null,null,null,null];
       clear=[false,false,false,false];
@@ -491,7 +498,7 @@
     },
     rollback() {
       const oldDefinitions = definitions;
-      ({callbacks,buffers,definitions,definitionBytes,renderBuffer,all,resolution,filters,capture,audioRead,committedCallbacks,committedUpdate,activeSlots,textRequest,clear,commands,midiBindings,envelopes,oscBindings,audioSettings,regions,regionOutputs,historyLimit}=saved);
+      ({callbacks,buffers,definitions,definitionBytes,renderBuffer,all,resolution,filters,capture,audioRead,committedCallbacks,committedUpdate,activeSlots,textRequest,clear,commands,midiBindings,envelopes,oscBindings,audioSettings,regions,regionOutputs,historyLimit,regionSampling}=saved);
       globalThis.update=saved.savedUpdate;
       for (const [name,def] of oldDefinitions) {
         if (!definitions.has(name)) {
@@ -516,7 +523,7 @@
       const encodedBuffers=buffers.map(serialize);
       return JSON.stringify({buffers:encodedBuffers,definitions:[...definitions.values()],
         render:renderBuffer,all,resolution,filters,screencap:capture,slots:callbacks.length,audio:audioRead,text:textRequest,clear,
-        commands:[...commands,...midiBindings.values(),...envelopes.values(),...oscBindings.values()],regions,region_outputs:regionOutputs,history_limit:historyLimit});
+        commands:[...commands,...midiBindings.values(),...envelopes.values(),...oscBindings.values()],regions,region_outputs:regionOutputs,region_sampling:regionSampling,history_limit:historyLimit});
     },
     audio() { return audioRead; },
     setAudioSettings(settings) { editing(); requireFeature("fft"); audioSettings=settings; },

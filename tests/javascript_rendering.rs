@@ -22,6 +22,8 @@ struct GlCalls {
     programs: Vec<u32>,
     textures: usize,
     readbacks: usize,
+    force_pending: bool,
+    fence_waits: Vec<(u32, u64)>,
 }
 
 thread_local! {
@@ -62,6 +64,23 @@ unsafe extern "C" fn counted_read_pixels(
     unsafe { read(x, y, width, height, format, kind, pixels) };
 }
 
+unsafe extern "C" fn counted_client_wait_sync(fence: *mut c_void, flags: u32, timeout: u64) -> u32 {
+    let pending = GL_CALLS.with_borrow_mut(|calls| {
+        calls.fence_waits.push((flags, timeout));
+        calls.force_pending
+    });
+    if pending {
+        return glow::TIMEOUT_EXPIRED;
+    }
+    let wait: unsafe extern "C" fn(*mut c_void, u32, u64) -> u32 = unsafe {
+        std::mem::transmute(dlsym(
+            (-2_isize) as *mut c_void,
+            c"glClientWaitSync".as_ptr(),
+        ))
+    };
+    unsafe { wait(fence, flags, timeout) }
+}
+
 impl NativeContext {
     fn gl(&self) -> Arc<glow::Context> {
         self.gl_with_loader(|symbol| {
@@ -69,6 +88,7 @@ impl NativeContext {
                 "glCreateProgram" => counted_create_program as *const () as *const c_void,
                 "glGenTextures" => counted_gen_textures as *const () as *const c_void,
                 "glReadPixels" => counted_read_pixels as *const () as *const c_void,
+                "glClientWaitSync" => counted_client_wait_sync as *const () as *const c_void,
                 _ => return None,
             })
         })
@@ -255,6 +275,27 @@ fn extended_gpu_passes_history_and_region_readback() {
                 );
             }
         }
+        for (compact, reference) in [
+            (
+                "noise(5).blur(1.25).blur(0.75).blur(2).blur(1).out()",
+                "noise(5).blur(1.25).color(1,1,1,1).blur(0.75).color(1,1,1,1).blur(2).color(1,1,1,1).blur(1).out()",
+            ),
+            (
+                "noise(5).blur(1.25).sharpen(0.75).emboss(2).erode(1).out()",
+                "noise(5).blur(1.25).color(1,1,1,1).sharpen(0.75).color(1,1,1,1).emboss(2).color(1,1,1,1).erode(1).out()",
+            ),
+        ] {
+            js.reset(JavascriptSettings::default()).unwrap();
+            let graph = js.eval(compact).unwrap();
+            assert_eq!(graph.render_plan.passes.len(), 5);
+            assert!(renderer.compile_result_atomic(&graph).is_empty());
+            let expected = draw(&renderer, [0.0; 128], 8.0);
+            js.reset(JavascriptSettings::default()).unwrap();
+            let graph = js.eval(reference).unwrap();
+            assert_eq!(graph.render_plan.passes.len(), 8);
+            assert!(renderer.compile_result_atomic(&graph).is_empty());
+            assert_eq!(draw(&renderer, [0.0; 128], 8.0), expected);
+        }
         js.reset(JavascriptSettings::default()).unwrap();
         let spatial=js.eval("setFunction({name:'rampImage',type:'src',inputs:[],glsl:'return vec4(st.x,0.0,0.0,1.0);'});solid(rampImage(),0,0,1).out()").unwrap();
         assert!(renderer.compile_result_atomic(&spatial).is_empty());
@@ -308,10 +349,10 @@ fn extended_gpu_passes_history_and_region_readback() {
 
         js.reset(JavascriptSettings::default()).unwrap();
         let regions = js
-            .eval("solid(0.25,0.5,0.75,1).out();region(o0,0,0,1,1,0);region(o0,0,0,1,1,4)")
+            .eval("solid(()=>time,0.5,0.75,1).out();region(o0,0,0,1,1,0);region(o0,0,0,1,1,4)")
             .unwrap();
         assert!(renderer.compile_result_atomic(&regions).is_empty());
-        draw(&renderer, [0.0; 128], 16.0);
+        draw(&renderer, [0.25; 128], 16.0);
         let read = gl.get_parameter_i32(glow::READ_FRAMEBUFFER_BINDING);
         let write = gl.get_parameter_i32(glow::DRAW_FRAMEBUFFER_BINDING);
         gl.enable(glow::SCISSOR_TEST);
@@ -331,6 +372,102 @@ fn extended_gpu_passes_history_and_region_readback() {
         assert_eq!(gl.get_parameter_i32(glow::DRAW_FRAMEBUFFER_BINDING), write);
         assert_eq!(gl.get_parameter_i32(glow::PACK_ALIGNMENT), 8);
         assert!(gl.is_enabled(glow::SCISSOR_TEST));
+        let pack = gl.create_buffer().unwrap();
+        gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(pack));
+        gl.buffer_data_size(glow::PIXEL_PACK_BUFFER, 1024, glow::STREAM_READ);
+        gl.pixel_store_i32(glow::PACK_ROW_LENGTH, 20);
+        gl.pixel_store_i32(glow::PACK_SKIP_ROWS, 1);
+        gl.pixel_store_i32(glow::PACK_SKIP_PIXELS, 2);
+        GL_CALLS.with_borrow_mut(|calls| calls.force_pending = true);
+        let before = GL_CALLS.with_borrow(|calls| calls.readbacks);
+        for index in 0..4 {
+            if index < 3 {
+                gl.disable(glow::SCISSOR_TEST);
+                let mut frame = uniforms([0.25 + index as f32 * 0.25; 128]);
+                frame.resolution = [16.0; 2];
+                render_multipass(&gl, &renderer.snapshot(), renderer.ping(), frame);
+                gl.enable(glow::SCISSOR_TEST);
+            }
+            assert!(
+                hydra_rust::renderer::read_regions_async(
+                    &gl,
+                    &renderer.snapshot(),
+                    renderer.ping(),
+                    [16, 16],
+                    &regions.regions,
+                    true
+                )
+                .unwrap()
+                .is_none()
+            );
+            assert_eq!(
+                gl.get_parameter_i32(glow::PIXEL_PACK_BUFFER_BINDING),
+                pack.0.get() as i32
+            );
+            assert_eq!(gl.get_parameter_i32(glow::PACK_ROW_LENGTH), 20);
+            assert_eq!(gl.get_parameter_i32(glow::PACK_SKIP_ROWS), 1);
+            assert_eq!(gl.get_parameter_i32(glow::PACK_SKIP_PIXELS), 2);
+        }
+        assert_eq!(GL_CALLS.with_borrow(|calls| calls.readbacks), before + 3);
+        let mut invalid = hydra_rust::eval("solid(0,0,0,1).out()").unwrap();
+        invalid.shaders[0] = Some("void mainImage(out vec4 c,in vec2 st){c=invalid;}".into());
+        assert!(!renderer.compile_result_atomic(&invalid).is_empty());
+        gl.finish();
+        GL_CALLS.with_borrow_mut(|calls| calls.force_pending = false);
+        let completed = hydra_rust::renderer::read_regions_async(
+            &gl,
+            &renderer.snapshot(),
+            renderer.ping(),
+            [16, 16],
+            &regions.regions,
+            false,
+        )
+        .unwrap()
+        .unwrap();
+        assert!((completed[0] - 0.75).abs() < 0.005);
+        assert!((completed[1] - (0.75 * 0.2126 + 0.5 * 0.7152 + 0.75 * 0.0722)).abs() < 0.005);
+        assert!(GL_CALLS.with_borrow(|calls| {
+            calls
+                .fence_waits
+                .iter()
+                .all(|(flags, timeout)| *flags == 0 && *timeout == 0)
+        }));
+        assert_eq!(GL_CALLS.with_borrow(|calls| calls.readbacks), before + 3);
+        assert!(
+            hydra_rust::renderer::read_regions_async(
+                &gl,
+                &renderer.snapshot(),
+                renderer.ping(),
+                [16, 16],
+                &regions.regions,
+                true
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert!(renderer.compile_result_atomic(&regions).is_empty());
+        gl.finish();
+        assert!(
+            hydra_rust::renderer::read_regions_async(
+                &gl,
+                &renderer.snapshot(),
+                renderer.ping(),
+                [16, 16],
+                &regions.regions,
+                false
+            )
+            .unwrap()
+            .is_none()
+        );
+        gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
+        gl.delete_buffer(pack);
+        for field in [
+            glow::PACK_ROW_LENGTH,
+            glow::PACK_SKIP_ROWS,
+            glow::PACK_SKIP_PIXELS,
+        ] {
+            gl.pixel_store_i32(field, 0);
+        }
         gl.disable(glow::SCISSOR_TEST);
         js.reset(JavascriptSettings::default()).unwrap();
         let mut script = "setFunction({name:'atlasRamp',type:'src',inputs:[],glsl:'return vec4(st.x,0.5,0.75,1.0);'});atlasRamp().out();".to_string();

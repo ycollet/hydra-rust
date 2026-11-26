@@ -4,6 +4,7 @@ mod arrowfn;
 mod asi;
 pub mod audio;
 mod autolet;
+pub mod background_eval;
 pub mod broadcast;
 mod closurefn;
 mod commaexpr;

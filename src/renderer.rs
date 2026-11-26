@@ -11,6 +11,9 @@ use crate::shader;
 use crate::source::{NUM_SOURCES, SourceFrame};
 use crate::text::TextData;
 
+mod region_readback;
+pub use region_readback::{read_regions, read_regions_async};
+
 #[derive(Clone, Copy)]
 pub struct RenderUniforms {
     pub region_values: [f32; crate::extended::MAX_REGIONS],
@@ -101,10 +104,12 @@ struct ExtendedTargets {
     history: [Vec<SingleTarget>; NUM_BUFFERS],
     cursor: [AtomicUsize; NUM_BUFFERS],
     region: Option<SingleTarget>,
+    readback_queue: std::sync::Mutex<region_readback::ReadbackQueue>,
 }
 
 impl ExtendedTargets {
     fn destroy(&self, gl: &glow::Context) {
+        self.readback_queue.lock().unwrap().destroy(gl);
         unsafe {
             for (program, target) in &self.passes {
                 gl.delete_program(program.program);
@@ -282,6 +287,12 @@ impl ShaderRenderer {
         if !buffers.iter().any(|clear| *clear) {
             return;
         }
+        self.snapshot
+            .extended
+            .readback_queue
+            .lock()
+            .unwrap()
+            .destroy(&self.gl);
         unsafe {
             let framebuffer = self.gl.get_parameter_i32(glow::DRAW_FRAMEBUFFER_BINDING);
             let scissor = self.gl.is_enabled(glow::SCISSOR_TEST);
@@ -319,6 +330,12 @@ impl ShaderRenderer {
             return;
         }
         self.resolution = [width, height];
+        self.snapshot
+            .extended
+            .readback_queue
+            .lock()
+            .unwrap()
+            .destroy(&self.gl);
         unsafe {
             for target in &self.snapshot.targets {
                 for i in 0..2 {
@@ -638,6 +655,9 @@ impl ShaderRenderer {
     }
 
     pub fn compile_result_atomic(&mut self, result: &crate::eval::EvalResult) -> Vec<String> {
+        if let Err(error) = result.region_sampling.validate() {
+            return vec![error];
+        }
         if result.regions.len() > crate::extended::MAX_REGIONS {
             return vec!["Image region limit exceeded".into()];
         }
@@ -776,6 +796,7 @@ impl ShaderRenderer {
             return errors;
         }
         let previous = &self.snapshot.extended;
+        previous.readback_queue.lock().unwrap().destroy(&self.gl);
         for (output, count) in plan.history.iter().enumerate() {
             if previous.history[output].len() == *count {
                 extended.history[output] = previous.history[output].clone();
@@ -1174,113 +1195,6 @@ pub fn render_multipass(
             gl.enable(glow::BLEND);
         }
     }
-}
-
-pub fn read_regions(
-    gl: &glow::Context,
-    snapshot: &RenderSnapshot,
-    ping: &AtomicBool,
-    resolution: [u32; 2],
-    regions: &[crate::extended::Region],
-) -> Result<[f32; crate::extended::MAX_REGIONS], String> {
-    let mut values = [0.0; crate::extended::MAX_REGIONS];
-    if regions.is_empty() {
-        return Ok(values);
-    }
-    if regions.len() > values.len() {
-        return Err("Image region limit exceeded".into());
-    }
-    for region in regions {
-        region.validate()?;
-    }
-    if resolution.contains(&0) {
-        return Err("Region readback requires nonzero render dimensions".into());
-    }
-    let target = snapshot
-        .extended
-        .region
-        .ok_or("Region readback target is not configured")?;
-    let latest = 1 - ping.load(Ordering::Relaxed) as usize;
-    unsafe {
-        let read = gl.get_parameter_i32(glow::READ_FRAMEBUFFER_BINDING);
-        let draw = gl.get_parameter_i32(glow::DRAW_FRAMEBUFFER_BINDING);
-        let alignment = gl.get_parameter_i32(glow::PACK_ALIGNMENT);
-        let scissor = gl.is_enabled(glow::SCISSOR_TEST);
-        gl.disable(glow::SCISSOR_TEST);
-        gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
-        for (slot, region) in regions.iter().enumerate() {
-            let [x, y, width, height] = region.rect;
-            let x0 = (x * resolution[0] as f32).floor() as i32;
-            let y0 = (y * resolution[1] as f32).floor() as i32;
-            let x1 = ((x + width) * resolution[0] as f32).ceil() as i32;
-            let y1 = ((y + height) * resolution[1] as f32).ceil() as i32;
-            gl.bind_framebuffer(
-                glow::READ_FRAMEBUFFER,
-                Some(snapshot.targets[region.output].fbo[latest]),
-            );
-            gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(target.fbo));
-            gl.blit_framebuffer(
-                x0,
-                y0,
-                x1,
-                y1,
-                slot as i32 * 8,
-                0,
-                (slot as i32 + 1) * 8,
-                8,
-                glow::COLOR_BUFFER_BIT,
-                glow::LINEAR,
-            );
-        }
-        gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(target.fbo));
-        let width = 8 * regions.len();
-        let mut pixels = [0u8; 8 * 8 * 4 * crate::extended::MAX_REGIONS];
-        gl.read_pixels(
-            0,
-            0,
-            width as i32,
-            8,
-            glow::RGBA,
-            glow::UNSIGNED_BYTE,
-            glow::PixelPackData::Slice(Some(&mut pixels[..width * 8 * 4])),
-        );
-        for (slot, region) in regions.iter().enumerate() {
-            let total: f32 = (0..8)
-                .flat_map(|row| {
-                    let start = (row * width + slot * 8) * 4;
-                    pixels[start..start + 8 * 4].as_chunks::<4>().0.iter()
-                })
-                .map(|pixel| {
-                    if region.channel == 4 {
-                        (pixel[0] as f32 * 0.2126
-                            + pixel[1] as f32 * 0.7152
-                            + pixel[2] as f32 * 0.0722)
-                            / 255.0
-                    } else {
-                        pixel[region.channel] as f32 / 255.0
-                    }
-                })
-                .sum();
-            values[slot] = total / 64.0;
-        }
-        gl.bind_framebuffer(
-            glow::READ_FRAMEBUFFER,
-            std::num::NonZeroU32::new(read as u32).map(glow::NativeFramebuffer),
-        );
-        gl.bind_framebuffer(
-            glow::DRAW_FRAMEBUFFER,
-            std::num::NonZeroU32::new(draw as u32).map(glow::NativeFramebuffer),
-        );
-        gl.pixel_store_i32(glow::PACK_ALIGNMENT, alignment);
-        if scissor {
-            gl.enable(glow::SCISSOR_TEST);
-        }
-        let error = gl.get_error();
-        if error != glow::NO_ERROR {
-            return Err(format!("Region readback failed: OpenGL error {error:#x}"));
-        }
-    }
-    Ok(values)
 }
 
 pub fn read_capture(

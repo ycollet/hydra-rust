@@ -85,6 +85,7 @@ pub struct JavascriptRuntime {
     context: Context,
     runtime: Runtime,
     deadline: Arc<Mutex<Instant>>,
+    cancellation: Arc<Mutex<Option<crate::background_eval::Cancellation>>>,
     uses_audio: bool,
     previous_audio: bool,
     can_rollback: bool,
@@ -111,6 +112,7 @@ struct Snapshot {
     clear: [bool; 4],
     commands: Vec<native::Command>,
     regions: Vec<crate::extended::Region>,
+    region_sampling: crate::extended::RegionSampling,
     region_outputs: Vec<crate::extended::RegionOutput>,
     history_limit: usize,
 }
@@ -310,8 +312,16 @@ impl JavascriptRuntime {
             Instant::now() + Duration::from_millis(settings.execution_ms),
         ));
         let interrupt = deadline.clone();
+        let cancellation: Arc<Mutex<Option<crate::background_eval::Cancellation>>> =
+            Arc::new(Mutex::new(None));
+        let interrupted = cancellation.clone();
         runtime.set_interrupt_handler(Some(Box::new(move || {
             Instant::now() > *interrupt.lock().unwrap()
+                || interrupted
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .is_some_and(|token| token.is_cancelled())
         })));
         let context = Context::full(&runtime).map_err(|e| e.to_string())?;
         context.with(|ctx| {
@@ -413,6 +423,7 @@ impl JavascriptRuntime {
             uses_audio: false,
             previous_audio: false,
             can_rollback: false,
+            cancellation,
             rejections,
             jobs_blocked: false,
             library_root: root,
@@ -582,6 +593,7 @@ impl JavascriptRuntime {
             Ok(result)
         })();
         if result.is_err() {
+            self.set_cancellation(None);
             self.cancel_jobs();
             if let Some(promise) = module_promise {
                 self.jobs_blocked |= self.context.with(|ctx| {
@@ -683,8 +695,19 @@ impl JavascriptRuntime {
         Ok(())
     }
 
+    pub(crate) fn set_cancellation(
+        &mut self,
+        cancellation: Option<crate::background_eval::Cancellation>,
+    ) {
+        *self.cancellation.lock().unwrap() = cancellation;
+    }
+
     pub fn library_root(&self) -> &Path {
         &self.library_root
+    }
+
+    pub(crate) fn settings(&self) -> &JavascriptSettings {
+        &self.settings
     }
 
     /// Call only when shader validation fails before installing any new shader.
@@ -838,6 +861,7 @@ fn compile_snapshot(snapshot: &Snapshot) -> Result<EvalResult, String> {
         render_plan,
         regions: snapshot.regions.clone(),
         region_outputs: snapshot.region_outputs.clone(),
+        region_sampling: snapshot.region_sampling,
         #[cfg(any(
             feature = "webcam",
             feature = "image_url",
@@ -854,6 +878,7 @@ fn compile_snapshot(snapshot: &Snapshot) -> Result<EvalResult, String> {
         #[cfg(feature = "stream")]
         broadcast_request: None,
     };
+    result.region_sampling.validate()?;
     if result.regions.len() > crate::extended::MAX_REGIONS
         || result.region_outputs.len() > crate::extended::MAX_REGIONS
     {

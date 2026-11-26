@@ -4,6 +4,69 @@ pub const MAX_PASSES: usize = 32;
 pub const MAX_HISTORY: usize = 8;
 pub const MAX_TEXTURE_BYTES: usize = 256 * 1024 * 1024;
 pub const MAX_REGIONS: usize = 16;
+pub const MAX_SHADER_SOURCE_EVALUATIONS: usize = 256;
+
+#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegionSampling {
+    pub rate: f32,
+    pub asynchronous: bool,
+}
+
+impl RegionSampling {
+    pub fn validate(self) -> Result<(), String> {
+        if self.rate.is_finite() && (self.rate == 0.0 || (1.0..=240.0).contains(&self.rate)) {
+            Ok(())
+        } else {
+            Err("Region sampling rate must be zero or between 1 and 240 Hz".into())
+        }
+    }
+
+    pub fn due(self, last: Option<std::time::Instant>, now: std::time::Instant) -> bool {
+        self.rate == 0.0
+            || last.is_none_or(|last| {
+                now.saturating_duration_since(last).as_secs_f32() >= 1.0 / self.rate
+            })
+    }
+}
+
+pub(crate) fn validate_shader_work(node: &Node) -> Result<(), String> {
+    fn work(node: &Node, depth: usize) -> Result<usize, String> {
+        if depth >= 16 {
+            return Err("nesting too deep (max 16)".into());
+        }
+        let mut total = 0usize;
+        for op in &node.ops {
+            let (own, args): (usize, &[Arg]) = match op {
+                Op::Source { args, .. } => (1, args),
+                Op::Geo { args, .. } | Op::Color { args, .. } => (0, args),
+                Op::Blend { other, args, .. } | Op::Modulate { other, args, .. } => {
+                    (work(other, depth + 1)?, args)
+                }
+                Op::Tileable { other, width } => (
+                    work(other, depth + 1)?.saturating_mul(4),
+                    std::slice::from_ref(width),
+                ),
+                Op::Effect { .. } => {
+                    return Err("Neighborhood effects require an extended render plan".into());
+                }
+            };
+            total = total.saturating_add(own);
+            for arg in args {
+                if let Arg::Texture { node, .. } = arg {
+                    total = total.saturating_add(work(node, depth + 1)?);
+                }
+            }
+            if total > MAX_SHADER_SOURCE_EVALUATIONS {
+                return Err(format!(
+                    "Shader work budget exceeded (maximum {MAX_SHADER_SOURCE_EVALUATIONS} estimated source evaluations per pass)"
+                ));
+            }
+        }
+        Ok(total)
+    }
+    work(node, 0).map(|_| ())
+}
 
 #[derive(Clone, Copy, Debug)]
 pub enum Effect {
@@ -75,12 +138,19 @@ fn lower(node: &Node, plan: &mut RenderPlan, depth: usize) -> Result<Node, Strin
                 if !ops.is_empty() {
                     return Err("Effect must wrap a complete graph".into());
                 }
-                let source = compile_node(&lower(other, plan, depth + 1)?)?;
+                let lowered = lower(other, plan, depth + 1)?;
                 let radius = lower_arg(radius, plan, depth)?;
                 if matches!(radius, Arg::Texture { .. }) {
                     return Err("Effect radius requires a number or frame signal".into());
                 }
-                let input = push_pass(plan, source)?;
+                // A pass texture already contains the same rounded pixels as an extra copy.
+                let input = match lowered.ops.as_slice() {
+                    [Op::Source { func, args }] if func == "pass_src" => match args.as_slice() {
+                        [Arg::Lit(index)] => *index as usize,
+                        _ => return Err("Invalid intermediate pass".into()),
+                    },
+                    _ => push_pass(plan, compile_node(&lowered)?)?,
+                };
                 let output = push_pass(plan, effect_shader(*effect, input, &radius))?;
                 Op::Source {
                     func: "pass_src".into(),
@@ -320,6 +390,35 @@ impl Region {
                 "Region requires an output, normalized rectangle, and channel in 0..4".into(),
             );
         }
+
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn region_sampling_rejects_invalid_rates_and_keeps_default_frame_sampling() {
+        for rate in [-1.0, 0.5, 241.0, f32::NAN, f32::INFINITY] {
+            assert!(
+                RegionSampling {
+                    rate,
+                    ..Default::default()
+                }
+                .validate()
+                .is_err()
+            );
+        }
+        let now = std::time::Instant::now();
+        assert!(RegionSampling::default().due(Some(now), now));
+        let sampling = RegionSampling {
+            rate: 10.0,
+            asynchronous: true,
+        };
+        assert!(sampling.due(None, now));
+        assert!(!sampling.due(Some(now), now + std::time::Duration::from_millis(99)));
+        assert!(sampling.due(Some(now), now + std::time::Duration::from_millis(101)));
     }
 }

@@ -1104,3 +1104,30 @@ fn set_mode_with_an_unrecognized_string_is_ignored_not_a_hard_error() {
     let result = eval("o0.setMode(\"blah\")\nosc(60).out()").unwrap();
     assert!(result.buffer_filter[0].is_none());
 }
+#[test]
+fn repeated_shader_work_is_bounded_before_shader_compilation() {
+    let accepted = format!("noise(2){}.out()", ".tileable(0.15)".repeat(4));
+    assert!(hydra_rust::eval(&accepted).is_ok());
+    let rejected = format!("noise(2){}.out()", ".tileable(0.15)".repeat(5));
+    let error = hydra_rust::eval(&rejected).err().unwrap();
+    assert!(error.contains("Shader work budget"), "{error}");
+    let texture = format!("osc(noise(2){}).out()", ".tileable(0.15)".repeat(4));
+    assert!(
+        hydra_rust::eval(&texture)
+            .err()
+            .unwrap()
+            .contains("Shader work budget")
+    );
+}
+
+#[test]
+fn adjacent_effects_share_targets_but_intervening_operations_keep_their_passes() {
+    let compact = hydra_rust::eval("noise(2).blur(1).sharpen(1).sobel(1).emboss(1).out()").unwrap();
+    assert_eq!(compact.render_plan.passes.len(), 5);
+    let separated = hydra_rust::eval("noise(2).blur(1).invert().sharpen(1).out()").unwrap();
+    assert_eq!(separated.render_plan.passes.len(), 4);
+    let sampling = hydra_rust::eval("setRegionSampling(10,true);noise(2).out()").unwrap();
+    assert_eq!(sampling.region_sampling.rate, 10.0);
+    assert!(sampling.region_sampling.asynchronous);
+    assert!(hydra_rust::eval("setRegionSampling(-1.0,true);noise(2).out()").is_err());
+}

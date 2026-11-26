@@ -535,6 +535,7 @@ fn load_script(path: &Option<PathBuf>) -> (String, Option<SystemTime>) {
 
 /// The plugin's OpenGL-backed editor window.
 struct HydraGlWindow {
+    evaluator: hydra_rust::background_eval::BackgroundEvaluator,
     gl: Arc<glow::Context>,
     renderer: ShaderRenderer,
     start: Instant,
@@ -618,16 +619,19 @@ impl HydraGlWindow {
             .as_ref()
             .and_then(|path| std::fs::metadata(path).and_then(|m| m.modified()).ok());
 
-        let mut audio_analyzer = AudioAnalyzer::new();
+        let audio_analyzer = AudioAnalyzer::new();
+        let evaluator = hydra_rust::background_eval::BackgroundEvaluator::new();
+        let mut request = hydra_rust::background_eval::EvalRequest::rhai(code);
+        request.audio_settings = audio_analyzer.settings().clone();
+        evaluator.submit(request);
         let (gl, renderer, render_mode, last_error, egui_painter) = unsafe {
             gl_context.make_current();
             #[allow(clippy::arc_with_non_send_sync)]
             let gl = Arc::new(glow::Context::from_loader_function(|s| {
                 gl_context.get_proc_address(s)
             }));
-            let mut renderer = ShaderRenderer::new(gl.clone());
-            let (render_mode, last_error) =
-                Self::compile(&mut renderer, code, &midi_bridge, &mut audio_analyzer);
+            let renderer = ShaderRenderer::new(gl.clone());
+            let (render_mode, last_error) = (RenderMode::default(), None);
             // `egui_glow::Painter` needs its own `glow::Context` handle
             // (a different `glow` crate version than `hydra_rust`'s
             // renderer uses) - both just wrap the same underlying GL
@@ -645,6 +649,7 @@ impl HydraGlWindow {
         let midi_poller = MidiPoller::new(midi_bridge.clone());
 
         Self {
+            evaluator,
             gl,
             renderer,
             start: Instant::now(),
@@ -678,43 +683,29 @@ impl HydraGlWindow {
         }
     }
 
-    /// Compiles `code` into `renderer`'s buffers, logging (not panicking)
-    /// on a script error and leaving whatever previously compiled, so a
-    /// typo while live-coding doesn't blank the editor window. Also
-    /// applies any `midi.*` requests the script generated (CC smoothing,
-    /// ADSR envelope slots) directly to `midi_bridge` - see the module
-    /// doc comment for which requests are honored here. Returns the
-    /// compiled `RenderMode` plus any eval/shader-compile error text (for
-    /// display in the script-loader overlay).
+    /// Validates graphics before applying audio and MIDI requests.
+    /// A missing render mode means the previous graph remains active.
     fn compile(
         renderer: &mut ShaderRenderer,
-        code: &str,
+        evaluated: Result<Box<hydra_rust::EvalResult>, String>,
         midi_bridge: &MidiBridge,
         audio_analyzer: &mut AudioAnalyzer,
-    ) -> (RenderMode, Option<String>) {
-        match hydra_rust::eval_with_audio_settings(code, audio_analyzer.settings()) {
+    ) -> (Option<RenderMode>, Option<String>) {
+        match evaluated {
             Ok(result) => {
                 if !result.regions.is_empty() || !result.region_outputs.is_empty() {
                     let error =
                         "Image region controls and OSC output are standalone-only".to_string();
                     log::warn!("hydra-plugin: {error}");
-                    return (Default::default(), Some(error));
+                    return (None, Some(error));
                 }
                 if result.screencap {
                     log::warn!("hydra-plugin: screencap() is only supported by the desktop app");
                 }
-                let extended = !result.render_plan.passes.is_empty()
-                    || result.render_plan.history.iter().any(|count| *count > 0);
-                let mut errs = if extended {
-                    renderer.compile_result_atomic(&result)
-                } else {
-                    renderer.compile_buffers(&result.shaders, result.render_mode)
-                };
+                let mut errs = renderer.compile_result_atomic(&result);
                 if !errs.is_empty() {
                     log::warn!("hydra-plugin: shader compile error(s): {errs:?}");
-                    if extended {
-                        return (Default::default(), Some(errs.join("\n")));
-                    }
+                    return (None, Some(errs.join("\n")));
                 }
                 if let Some(ref td) = result.text_data {
                     renderer.upload_text(td);
@@ -788,11 +779,11 @@ impl HydraGlWindow {
                 } else {
                     Some(errs.join("\n"))
                 };
-                (result.render_mode, error)
+                (Some(result.render_mode), error)
             }
             Err(err) => {
                 log::warn!("hydra-plugin: script eval error: {err}");
-                (Default::default(), Some(err))
+                (None, Some(err))
             }
         }
     }
@@ -811,16 +802,10 @@ impl HydraGlWindow {
                 .script_path
                 .as_ref()
                 .and_then(|path| std::fs::metadata(path).and_then(|m| m.modified()).ok());
-            let (mode, error) = Self::compile(
-                &mut self.renderer,
-                &state.source,
-                &self.midi_bridge,
-                &mut self.audio_analyzer,
-            );
-            self.render_mode = mode;
-            self.last_error = error;
+            self.submit_evaluation(&state.source);
             self.applied_script = state;
         }
+        self.poll_evaluation();
         let Some(path) = &self.script_path else {
             return;
         };
@@ -846,14 +831,35 @@ impl HydraGlWindow {
             };
             *self.script_state.write().expect("Poisoned script state") =
                 self.applied_script.clone();
-            let (render_mode, error) = Self::compile(
-                &mut self.renderer,
-                &code,
-                &self.midi_bridge,
-                &mut self.audio_analyzer,
-            );
-            self.render_mode = render_mode;
-            self.last_error = error;
+            self.submit_evaluation(&code);
+        }
+    }
+
+    fn submit_evaluation(&self, code: &str) {
+        let mut request = hydra_rust::background_eval::EvalRequest::rhai(code);
+        request.audio_settings = self.audio_analyzer.settings().clone();
+        self.evaluator.submit(request);
+    }
+
+    fn poll_evaluation(&mut self) {
+        use hydra_rust::background_eval::Completion;
+        match self.evaluator.poll() {
+            Some(Completion::Evaluated { id, result, .. }) => {
+                let (mode, error) = Self::compile(
+                    &mut self.renderer,
+                    result,
+                    &self.midi_bridge,
+                    &mut self.audio_analyzer,
+                );
+                let accepted = mode.is_some();
+                self.evaluator.resolve(id, accepted);
+                if let Some(mode) = mode {
+                    self.render_mode = mode;
+                }
+                self.last_error = error;
+            }
+            Some(Completion::Failed(error)) => self.last_error = Some(error),
+            _ => {}
         }
     }
 
