@@ -82,6 +82,7 @@ bytes = { version = "1", optional = true }
 async-trait = { version = "0.1", optional = true }
 
 [features]
+all = ["gui", "nsm", "javascript", "webcam", "fft", "audio", "jack", "image_url", "midi", "osc", "video", "stream"]
 javascript = ["dep:rquickjs"]
 # Enabled by default so plain `cargo build`/`cargo run` keeps building the
 # `hydra` desktop app unchanged. Library-only consumers should depend with

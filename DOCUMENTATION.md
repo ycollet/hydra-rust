@@ -130,6 +130,14 @@ cargo test           # tests
 cargo clippy         # lint
 ```
 
+The `all` feature enables every optional feature, including Linux JACK support.
+Platform requirements still apply.
+For example:
+
+```bash
+cargo build --release --features all
+```
+
 To embed `hydra-rust` as a library in another project (e.g. a host app driving its own `glow::Context`/window), depend on it with the default `gui` feature turned off — this skips `eframe`/`rfd` and the whole windowing stack (egui, egui_glow, winit, arboard, ...) they pull in, which the library's own `eval`/`renderer`/manager modules never need:
 
 ```toml
