@@ -1,0 +1,2 @@
+let gate = modulation.clock(1,0.25);
+osc(12).color(gate,gate,gate).out()

@@ -120,6 +120,132 @@ fn uniforms(values: [f32; 128]) -> RenderUniforms {
 }
 
 #[test]
+fn modulation_renders_waveforms_envelopes_clocks_and_repeatable_random_signals() {
+    let context = NativeContext::new().unwrap();
+    let gl = context.gl();
+    let mut renderer = ShaderRenderer::new(gl.clone());
+    renderer.ensure_resolution_checked(8, 8).unwrap();
+    let mut js = JavascriptRuntime::new(PathBuf::from(env!("CARGO_MANIFEST_DIR"))).unwrap();
+    unsafe {
+        let texture = gl.create_texture().unwrap();
+        gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+        gl.tex_image_2d(
+            glow::TEXTURE_2D,
+            0,
+            glow::RGBA8 as i32,
+            8,
+            8,
+            0,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelUnpackData::Slice(None),
+        );
+        let target = gl.create_framebuffer().unwrap();
+        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(target));
+        gl.framebuffer_texture_2d(
+            glow::FRAMEBUFFER,
+            glow::COLOR_ATTACHMENT0,
+            glow::TEXTURE_2D,
+            Some(texture),
+            0,
+        );
+        assert_eq!(
+            gl.check_framebuffer_status(glow::FRAMEBUFFER),
+            glow::FRAMEBUFFER_COMPLETE
+        );
+        gl.viewport(0, 0, 8, 8);
+        let draw = |renderer: &ShaderRenderer, time: f32, tempo: f32| {
+            let mut frame = uniforms([0.0; 128]);
+            frame.time = time;
+            frame.tempo = tempo;
+            render_multipass(&gl, &renderer.snapshot(), renderer.ping(), frame);
+            let mut pixel = [0; 4];
+            gl.read_pixels(
+                4,
+                4,
+                1,
+                1,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelPackData::Slice(Some(&mut pixel)),
+            );
+            assert_eq!(gl.get_error(), glow::NO_ERROR);
+            pixel
+        };
+        for (signal, samples) in [
+            ("modulation.lfo('sine')", vec![(0.25, 1.0), (0.75, 0.0)]),
+            ("modulation.lfo('triangle')", vec![(0.25, 0.5), (0.5, 1.0)]),
+            (
+                "modulation.lfo('saw')",
+                vec![(0.25, 0.25), (1.25, 0.25), (-0.25, 0.75)],
+            ),
+            ("modulation.lfo('square')", vec![(0.49, 1.0), (0.5, 0.0)]),
+            ("modulation.clock(1,0.25)", vec![(0.24, 1.0), (0.25, 0.0)]),
+            ("modulation.clock(1,0)", vec![(0.0, 0.0), (0.5, 0.0)]),
+            ("modulation.clock(1,1)", vec![(0.0, 1.0), (0.5, 1.0)]),
+            (
+                "modulation.envelope(0.25,0.25,1)",
+                vec![
+                    (0.0, 0.0),
+                    (0.125, 0.5),
+                    (0.25, 1.0),
+                    (0.375, 0.5),
+                    (0.5, 0.0),
+                    (1.125, 0.5),
+                ],
+            ),
+            (
+                "modulation.envelope(0,0.25,1)",
+                vec![(0.0, 1.0), (0.125, 0.5), (0.25, 0.0)],
+            ),
+            (
+                "modulation.envelope(0.25,0,1)",
+                vec![(0.0, 0.0), (0.125, 0.5), (0.25, 0.0)],
+            ),
+        ] {
+            let graph = js.eval(&format!("solid({signal},0,0,1).out()")).unwrap();
+            assert!(
+                renderer.compile_result_atomic(&graph).is_empty(),
+                "{signal}"
+            );
+            for (time, expected) in samples {
+                let pixel = draw(&renderer, time, 120.0);
+                assert!(
+                    (pixel[0] as f32 - expected * 255.0).abs() <= 1.0,
+                    "{signal}, {time}: {pixel:?}"
+                );
+            }
+        }
+        let graph = js
+            .eval("solid(modulation.lfo('saw',1,0,'beats'),0,0,1).out()")
+            .unwrap();
+        assert!(renderer.compile_result_atomic(&graph).is_empty());
+        for (tempo, expected) in [(60.0, 0.25), (120.0, 0.5), (240.0, 0.0)] {
+            assert!((draw(&renderer, 0.25, tempo)[0] as f32 - expected * 255.0).abs() <= 1.0);
+        }
+        let graph = js.eval("solid(modulation.sampleHold(1,7),modulation.drift(1,7),modulation.drift(1,13),1).out()").unwrap();
+        assert!(renderer.compile_result_atomic(&graph).is_empty());
+        let start = draw(&renderer, 0.0, 120.0);
+        let middle = draw(&renderer, 0.5, 120.0);
+        let end = draw(&renderer, 1.0, 120.0);
+        assert_eq!(start[0], start[1]);
+        assert_eq!(start[0], middle[0]);
+        assert_eq!(end[0], end[1]);
+        assert_ne!(start[0], end[0]);
+        assert_ne!(start[1], start[2]);
+        assert!((middle[1] as f32 - (start[1] as f32 + end[1] as f32) * 0.5).abs() <= 1.0);
+        let before = draw(&renderer, 0.99999, 120.0);
+        let after = draw(&renderer, 1.00001, 120.0);
+        assert!((before[1] as i32 - after[1] as i32).abs() <= 1);
+        assert_eq!(draw(&renderer, 0.0, 120.0), start);
+        assert_eq!(draw(&renderer, 65536.0, 120.0), start);
+        drop(renderer);
+        gl.delete_framebuffer(target);
+        gl.delete_texture(texture);
+    }
+}
+
+#[test]
 fn graph_replacement_reuses_programs_and_targets_and_discards_only_failed_staging() {
     let context = NativeContext::new().unwrap();
     let gl = context.gl();

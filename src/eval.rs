@@ -282,7 +282,7 @@ pub(crate) enum Arg {
 }
 
 #[derive(Debug, Clone)]
-struct GlslExpr(String);
+pub(crate) struct GlslExpr(pub(crate) String);
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 enum Easing {
@@ -1450,12 +1450,6 @@ fn register_midi(engine: &mut Engine, state: Arc<Mutex<PatchState>>) {
     engine.register_fn("scale", |signal: MidiSignal, factor: Dynamic| {
         midi_scale(signal.expr, factor)
     });
-    engine.register_fn("range", |expr: GlslExpr, lo: Dynamic, hi: Dynamic| {
-        midi_range(expr.0, lo, hi)
-    });
-    engine.register_fn("scale", |expr: GlslExpr, factor: Dynamic| {
-        midi_scale(expr.0, factor)
-    });
     engine.register_fn(
         "value",
         |context: rhai::NativeCallContext, signal: MidiSignal, callback: rhai::FnPtr| {
@@ -1603,7 +1597,6 @@ fn validate_midi_value_callbacks(code: &str) -> Result<(), String> {
 /// assumed to be in `[0, 1]` (every reactive value this module produces is)
 /// into `[min, max]`. Also used by `_osc.get(...)`'s own `.range()` (OSC
 /// values aren't guaranteed `[0, 1]`, but the remap itself is generic).
-#[cfg(any(feature = "midi", feature = "osc"))]
 fn midi_range(expr: String, lo: Dynamic, hi: Dynamic) -> GlslExpr {
     let lo = fmt_f(dyn_to_f64(lo));
     let hi = fmt_f(dyn_to_f64(hi));
@@ -1612,7 +1605,6 @@ fn midi_range(expr: String, lo: Dynamic, hi: Dynamic) -> GlslExpr {
 
 /// Real hydra-midi's `scale(factor)`: multiplies the upstream value. Also
 /// used by `_osc.get(...)`'s own `.scale()` (see `midi_range` above).
-#[cfg(any(feature = "midi", feature = "osc"))]
 fn midi_scale(expr: String, factor: Dynamic) -> GlslExpr {
     GlslExpr(format!("(({expr}) * {})", fmt_f(dyn_to_f64(factor))))
 }
@@ -2721,6 +2713,22 @@ fn eval_impl(
     }
     register_functions(&mut engine);
     register_glsl_ops(&mut engine);
+    crate::modulation::register(&mut engine);
+    engine.register_fn(
+        "range",
+        |expr: GlslExpr, lo: Dynamic, hi: Dynamic| -> Result<GlslExpr, Box<rhai::EvalAltResult>> {
+            let lo = crate::modulation::static_number(lo)?;
+            let hi = crate::modulation::static_number(hi)?;
+            Ok(midi_range(expr.0, lo.into(), hi.into()))
+        },
+    );
+    engine.register_fn(
+        "scale",
+        |expr: GlslExpr, factor: Dynamic| -> Result<GlslExpr, Box<rhai::EvalAltResult>> {
+            let factor = crate::modulation::static_number(factor)?;
+            Ok(midi_scale(expr.0, factor.into()))
+        },
+    );
     register_patterns(&mut engine);
     engine.register_fn("tileable", |node: Node| Node {
         ops: vec![Op::Tileable {
@@ -3068,19 +3076,6 @@ fn eval_impl(
     // rather than `osc`).
     #[cfg(feature = "osc")]
     {
-        // `.range(lo,hi)`/`.scale(factor)` on the `GlslExpr` `_osc.get(...)`
-        // returns - registered here too (not just under the `midi`
-        // feature's identical registration above) so they still work with
-        // `osc` enabled and `midi` disabled. Harmless if both features are
-        // on: same signature, same implementation, last registration wins.
-        engine.register_fn(
-            "range",
-            |e: GlslExpr, lo: Dynamic, hi: Dynamic| -> GlslExpr { midi_range(e.0, lo, hi) },
-        );
-        engine.register_fn("scale", |e: GlslExpr, factor: Dynamic| -> GlslExpr {
-            midi_scale(e.0, factor)
-        });
-
         {
             let s = state.clone();
             engine.register_fn(
@@ -3596,6 +3591,7 @@ fn eval_impl(
     engine.register_fn("list", |_pb: Pb| {});
 
     let mut scope = Scope::new();
+    scope.push_constant("modulation", crate::modulation::Toolkit);
     scope.push_constant("o0", 0_i64);
     scope.push_constant("o1", 1_i64);
     scope.push_constant("o2", 2_i64);

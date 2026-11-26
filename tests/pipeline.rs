@@ -20,6 +20,56 @@ fn ok_shader0(src: &str) -> String {
 }
 
 #[test]
+fn modulation_signals_support_defaults_arithmetic_and_static_validation() {
+    for signal in [
+        "modulation.lfo('sine')",
+        "modulation.lfo('triangle',2)",
+        "modulation.lfo('saw',2,-0.25)",
+        "modulation.lfo('square',2,0,'beats')",
+        "modulation.envelope(0.1,0.2,1)",
+        "modulation.envelope(0.1,0.2,0.3)",
+        "modulation.envelope(0,0.2,1,'beats')",
+        "modulation.envelope(0.1,0,1)",
+        "modulation.sampleHold()",
+        "modulation.sampleHold(2)",
+        "modulation.sampleHold(2,7)",
+        "modulation.sampleHold(2,7,'beats')",
+        "modulation.drift()",
+        "modulation.drift(2)",
+        "modulation.drift(2,7)",
+        "modulation.drift(2,7,'beats')",
+        "modulation.clock()",
+        "modulation.clock(2)",
+        "modulation.clock(2,0.1)",
+        "modulation.clock(2,0.1,'beats')",
+        "(modulation.lfo('sine').range(2,10) + modulation.drift().scale(3)) / 2",
+    ] {
+        let shader = ok_shader0(&format!("osc({signal}).out()"));
+        assert!(shader.contains("iTime"), "{signal}");
+    }
+    for signal in [
+        "modulation.lfo('unknown')",
+        "modulation.lfo('sine',0)",
+        "modulation.lfo('sine',1001)",
+        "modulation.lfo('sine',time)",
+        "modulation.lfo('sine','fast')",
+        "modulation.lfo('sine',1,0,'ticks')",
+        "modulation.lfo('sine').range('low',1)",
+        "modulation.lfo('sine').scale(true)",
+        "modulation.envelope(0,0,1)",
+        "modulation.envelope(-1,1,1)",
+        "modulation.envelope(0.6,0.6,1)",
+        "modulation.envelope(0.00001,0.2,1)",
+        "modulation.sampleHold(1,-1)",
+        "modulation.drift(1,1.5)",
+        "modulation.clock(1,1.1)",
+    ] {
+        let error = eval(&format!("osc({signal}).out()")).err().expect(signal);
+        assert!(error.contains("Modulation"), "{signal}: {error}");
+    }
+}
+
+#[test]
 fn runaway_rhai_execution_returns_an_error_and_does_not_poison_later_evaluations() {
     let start = std::time::Instant::now();
     let error = eval("while true {}")

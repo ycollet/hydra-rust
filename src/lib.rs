@@ -28,6 +28,7 @@ mod jskeywords;
 mod kwargs;
 mod mathjs;
 pub mod midi;
+mod modulation;
 #[cfg(feature = "nsm")]
 pub mod nsm;
 mod numlit;

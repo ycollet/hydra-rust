@@ -1,0 +1,2 @@
+let frequency = modulation.sampleHold(1,7).range(5,30);
+osc(frequency).out()

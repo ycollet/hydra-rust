@@ -1,0 +1,2 @@
+let frequency = modulation.lfo("square",0.5).range(5,30);
+osc(frequency).out()

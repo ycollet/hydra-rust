@@ -199,6 +199,8 @@ enum Value {
     Texture(TextureRef),
     #[serde(rename = "parameter")]
     Parameter(Box<Graph>),
+    #[serde(rename = "modulation")]
+    Modulation(crate::modulation::Signal),
 }
 
 fn js_error(ctx: &Ctx<'_>, error: rquickjs::Error) -> String {
@@ -978,6 +980,7 @@ fn graph_node(
             let width = match &operation.args[0] {
                 Value::Number(n) if n.is_finite() && (*n as f32).is_finite() => Arg::Lit(*n),
                 Value::Callback(i) if *i < slots => Arg::Expr(format!("iJsValues[{i}]")),
+                Value::Modulation(signal) => Arg::Expr(signal.glsl()?),
                 _ => return Err("Invalid tileable width".into()),
             };
             let other = graph_node(
@@ -1011,6 +1014,7 @@ fn graph_node(
                 (Value::Callback(i), InputKind::Float) if *i < slots => {
                     Ok(Arg::Expr(format!("iJsValues[{i}]")))
                 }
+                (Value::Modulation(signal), InputKind::Float) => Ok(Arg::Expr(signal.glsl()?)),
                 (Value::Texture(texture), InputKind::Sampler) if texture.index < 4 => {
                     Ok(Arg::Expr(format!(
                         "{}{}",

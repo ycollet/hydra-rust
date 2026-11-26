@@ -11,6 +11,120 @@ fn runtime() -> JavascriptRuntime {
 }
 
 #[test]
+fn modulation_uses_shared_native_shaders_without_callback_slots() {
+    for (javascript, rhai) in [
+        ("modulation.lfo('sine')", "modulation.lfo('sine')"),
+        (
+            "modulation.lfo('triangle',2)",
+            "modulation.lfo('triangle',2)",
+        ),
+        (
+            "modulation.lfo('saw',2,-0.25)",
+            "modulation.lfo('saw',2,-0.25)",
+        ),
+        (
+            "modulation.lfo('square',2,0,'beats')",
+            "modulation.lfo('square',2,0,'beats')",
+        ),
+        (
+            "modulation.envelope(0.1,0.2,1)",
+            "modulation.envelope(0.1,0.2,1)",
+        ),
+        (
+            "modulation.envelope(0.1,0.2,0.3)",
+            "modulation.envelope(0.1,0.2,0.3)",
+        ),
+        (
+            "modulation.envelope(0,0.2,1,'beats')",
+            "modulation.envelope(0,0.2,1,'beats')",
+        ),
+        ("modulation.sampleHold()", "modulation.sampleHold()"),
+        (
+            "modulation.sampleHold(2,7,'beats')",
+            "modulation.sampleHold(2,7,'beats')",
+        ),
+        ("modulation.drift()", "modulation.drift()"),
+        (
+            "modulation.drift(2,7,'beats')",
+            "modulation.drift(2,7,'beats')",
+        ),
+        ("modulation.clock()", "modulation.clock()"),
+        (
+            "modulation.clock(2,0.1,'beats')",
+            "modulation.clock(2,0.1,'beats')",
+        ),
+        (
+            "modulation.lfo('sine').range(2,10)",
+            "modulation.lfo('sine').range(2,10)",
+        ),
+        (
+            "modulation.lfo('saw').add(modulation.drift()).sub(1).mul(0.5).div(2)",
+            "((modulation.lfo('saw') + modulation.drift()) - 1) * 0.5 / 2",
+        ),
+    ] {
+        let mut js = runtime();
+        let graph = js.eval(&format!("osc({javascript}).out()")).unwrap();
+        let native = hydra_rust::eval(&format!("osc({rhai}).out()")).unwrap();
+        assert_eq!(graph.shaders, native.shaders, "{javascript}");
+        assert_eq!(js.frame(Default::default()).unwrap(), [0.0; 128]);
+    }
+    let mut js = runtime();
+    let graph = js
+        .eval(
+            "var pulse=modulation.clock(); var patch=noise().tileable(pulse.mul(0.1)); patch.out()",
+        )
+        .unwrap();
+    assert_eq!(js.eval("patch.out()").unwrap().shaders, graph.shaders);
+    let example = runtime()
+        .eval(include_str!(
+            "../examples/javascript/extensions/modulation.js"
+        ))
+        .unwrap();
+    let native = hydra_rust::eval(include_str!("../examples/extensions/modulation.hydra")).unwrap();
+    assert_eq!(example.shaders, native.shaders);
+}
+
+#[test]
+fn modulation_rejects_invalid_controls_and_bounded_composition_preserves_the_graph() {
+    let mut js = runtime();
+    let original = js.eval("solid(0.25).out()").unwrap();
+    for signal in [
+        "modulation.lfo('unknown')",
+        "modulation.lfo('sine',0)",
+        "modulation.lfo('sine',1001)",
+        "modulation.lfo('sine','fast')",
+        "modulation.lfo('sine',1,Infinity)",
+        "modulation.lfo('sine',1,0,'ticks')",
+        "modulation.envelope(0,0,1)",
+        "modulation.envelope(-1,1,1)",
+        "modulation.envelope(0.6,0.6,1)",
+        "modulation.envelope(0.00001,0.2,1)",
+        "modulation.sampleHold(1,-1)",
+        "modulation.drift(1,1.5)",
+        "modulation.clock(1,1.1)",
+        "modulation.clock().div(0)",
+        "modulation.clock().div(1e-100)",
+        "modulation.clock().range(NaN,1)",
+        "modulation.clock().add(()=>1)",
+    ] {
+        assert!(
+            js.eval(&format!("osc({signal}).out()")).is_err(),
+            "{signal}"
+        );
+        assert_eq!(js.eval("").unwrap().shaders, original.shaders);
+    }
+    for code in [
+        "var oversized=modulation.clock();for(var i=0;i<6;i++)oversized=oversized.add(oversized);osc(oversized).out()",
+        "var deep=modulation.clock();for(var i=0;i<17;i++)deep=deep.mul(1);osc(deep).out()",
+    ] {
+        let error = js.eval(code).err().expect("composition must stay bounded");
+        assert!(error.contains("Modulation expression"), "{error}");
+        assert_eq!(js.eval("").unwrap().shaders, original.shaders);
+    }
+    js.eval("var bounded=modulation.clock();for(var i=0;i<5;i++)bounded=bounded.add(bounded);osc(bounded).out()").unwrap();
+}
+
+#[test]
 fn persistent_context_and_native_emitter() {
     let mut js = runtime();
     let first = js

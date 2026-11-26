@@ -86,10 +86,11 @@ See [performance measurements](DOCUMENTATION.md#performance-measurements) for co
 
 ## Additional ideas
 
-- [ ] **Modulation toolkit:** reusable LFO waveforms, attack/decay envelopes,
-  sample-and-hold, smooth random drift, clocks and composable signal arithmetic.
-  Standard Hydra can approximate much of this with JavaScript callbacks; HydraPy
-  supplies dedicated building blocks.
+- [x] **Modulation toolkit:** native low-frequency oscillator waveforms, repeating attack/decay envelopes,
+  seeded random sample-and-hold, smooth random drift, clocks and composable signal arithmetic.
+  Rhai and JavaScript share shader implementations with seconds-or-beats timing.
+  Example: `osc(modulation.lfo("sine",0.5).range(5,30)).out()` varies oscillator frequency.
+  See [modulation toolkit](DOCUMENTATION.md#modulation-toolkit) for bounds and paired examples.
 - [ ] **Feedback simulations:** Gray-Scott reaction-diffusion, Life-like cellular
   automata, Physarum/slime-mould agents and neural cellular automata that grow and
   repair learned textures.

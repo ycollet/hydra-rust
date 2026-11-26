@@ -21,6 +21,7 @@ chains implicitly write to `o0`; an explicit `.out()` is also valid.
 - [Build](#build)
 - [NSM sessions](#nsm-sessions)
 - [Audio onset and beat reactivity](#audio-onset-and-beat-reactivity)
+- [Modulation toolkit](#modulation-toolkit)
 - [Keyboard shortcuts](#keyboard-shortcuts)
 - [Scene banks](#scene-banks)
 - [Feature-gated functions](#feature-gated-functions)
@@ -226,6 +227,130 @@ regular onsets establish a tempo; this is a basic 60-200 BPM estimate, not
 downbeat detection. These signals do not change the patch's global tempo.
 The plugin analyzes its host audio through the same pipeline.
 See [detection details and embedding API](SPEC.md#audio-onset-and-beat-detection).
+
+## Modulation toolkit
+
+The `modulation` object supplies native signals in Rhai and JavaScript.
+The Rhai plugin supports the same toolkit without extra features.
+Shaders evaluate signals from rendering time, without processor-side updates or JavaScript callback slots.
+These helpers extend native Hydra; upstream browser Hydra does not provide them.
+
+### Waveforms and timing
+
+Low-frequency oscillators produce values from zero to one.
+The sine starts at 0.5, triangle and saw start at zero, and square starts at one.
+Rates specify cycles per second by default.
+Phase offsets specify fractions of a cycle, including negative offsets.
+
+| Method | Example | Behavior |
+|---|---|---|
+| `lfo(wave,rate=1,phase=0,base="seconds")` | `modulation.lfo("sine",0.5)` | One sine cycle every two seconds. |
+| `lfo("triangle",...)` | `modulation.lfo("triangle",1)` | Rise and fall linearly each second. |
+| `lfo("saw",...)` | `modulation.lfo("saw",1,0.25)` | Start one-quarter through a rising ramp. |
+| `lfo("square",...)` | `modulation.lfo("square",2)` | Alternate zero and one twice per second. |
+| `clock(rate=1,duty=0.5,base="seconds")` | `modulation.clock(2,0.1)` | Stay high for ten percent of each cycle. |
+
+Use `"beats"` as the final argument for tempo-based timing.
+Beat timing equals elapsed rendering seconds multiplied by global tempo, divided by sixty.
+It does not follow audio onset detection, incoming musical clocks, or host transport.
+Changing tempo changes phase immediately.
+The current plugin supplies a fixed global tempo of 120 beats per minute.
+
+```javascript
+osc(modulation.lfo("triangle",0.25,0,"beats").range(5,30)).out()
+```
+
+At 120 beats per minute, this signal completes one cycle every two seconds.
+
+### Repeating envelopes
+
+`envelope(attack,decay,period,base="seconds")` rises linearly, falls linearly, then stays at zero until the next period.
+Durations use seconds or beats, according to `base`.
+A zero attack starts at one; a zero decay ends the rise immediately.
+Envelopes repeat from rendering time, not evaluation time.
+They do not accept gates or external triggers.
+
+```javascript
+osc(12).brightness(modulation.envelope(0.1,0.4,1)).out()
+```
+
+This envelope rises for 0.1 seconds, falls for 0.4 seconds, and rests for 0.5 seconds.
+
+### Held randomness and drift
+
+`sampleHold(rate=1,seed=0,base="seconds")` selects one random value per cycle and holds it.
+It generates its own random input rather than sampling another signal.
+`drift(rate=1,seed=0,base="seconds")` smoothly interpolates the same random sequence.
+Both return values from zero to one.
+Reusing a seed reproduces the sequence on the same graphics backend.
+Graphics precision can change random sequences across devices.
+Sequences repeat after 65,536 cycles.
+Reevaluating a patch preserves timing rather than restarting random generators.
+
+```javascript
+osc(modulation.sampleHold(2,7).range(5,30))
+  .rotate(modulation.drift(0.25,13).range(-0.5,0.5))
+  .out()
+```
+
+### Signal arithmetic
+
+Rhai signals use ordinary arithmetic and existing reactive-value helpers.
+Use `range(low,high)` to map zero-to-one values and `scale(factor)` to multiply them.
+Their bounds and factors must be static finite numbers.
+These helpers do not clamp values.
+Keep divisors nonzero.
+
+```javascript
+let frequency = modulation.lfo("sine",0.5).range(5,30);
+let movement = modulation.drift(0.25,7).scale(0.5);
+osc(frequency + movement * 2).out()
+```
+
+JavaScript signals use `add`, `sub`, `mul`, `div`, `range`, and `scale` methods instead of arithmetic operators.
+Addition, subtraction, and multiplication accept numbers or other toolkit signals.
+Division accepts a nonzero static number.
+Use ordinary callbacks separately for existing audio, device, or user-defined JavaScript controls.
+
+```javascript
+var frequency = modulation.lfo("sine",0.5).range(5,30);
+var movement = modulation.drift(0.25,7).scale(0.5);
+osc(frequency.add(movement.mul(2))).out()
+```
+
+Signals work in ordinary float parameters and `tileable` widths.
+Native multipass effects still require their existing static radius arguments.
+For example, use `noise().tileable(modulation.clock().mul(0.1))` in JavaScript.
+
+### Bounds and examples
+
+Constructor parameters must be static finite numbers.
+Rates range from 0.0001 to 1,000 cycles per selected time unit.
+Seeds must be integers from zero through 65,535.
+Clock duty ranges from zero through one.
+Envelope durations cannot exceed 1,000,000 time units.
+Nonzero durations must be at least 0.0001.
+Attack and decay cannot both be zero; their sum cannot exceed the period.
+JavaScript signal expressions allow 64 nodes and 16 nested arithmetic levels.
+The existing Rhai execution and shader limits still apply.
+Invalid rendered signals reject evaluation and preserve the previous graph.
+
+For example, `modulation.envelope(0.6,0.6,1)` exceeds its period and fails.
+Load [the Rhai example](examples/extensions/modulation.hydra) or [the JavaScript example](examples/javascript/extensions/modulation.js).
+
+For simpler Rhai examples, load one script at a time from [the modulation examples folder](examples/extensions/modulation).
+
+| Script | Visible effect |
+|---|---|
+| `lfo_sine.hydra` | Stripe frequency rises and falls smoothly every two seconds. |
+| `lfo_triangle.hydra` | Stripe frequency rises and falls at a steady rate every two seconds. |
+| `lfo_saw.hydra` | Stripe frequency rises, then jumps back every two seconds. |
+| `lfo_square.hydra` | Stripe frequency switches between two values each second. |
+| `envelope.hydra` | Stripes fade in, fade out, then stay dark before repeating. |
+| `sample_hold.hydra` | Stripe frequency jumps to a seeded random value each second. |
+| `drift.hydra` | Stripes turn smoothly toward changing random angles. |
+| `clock.hydra` | Stripes flash for one-quarter of each second. |
+| `arithmetic.hydra` | A slow random signal adds variation to a sine-driven stripe frequency. |
 
 ## Keyboard shortcuts
 

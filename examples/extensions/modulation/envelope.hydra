@@ -1,0 +1,2 @@
+let pulse = modulation.envelope(0.2,0.6,1.5);
+osc(12).color(pulse,pulse,pulse).out()

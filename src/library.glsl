@@ -1,3 +1,21 @@
+float _hydra_mod_random(float index, float seed) {
+  return fract(sin(mod(index, 65536.0) + seed * 17.0 + 1.0) * 43758.5453);
+}
+
+float _hydra_mod_drift(float position, float seed) {
+  float index = floor(position);
+  float weight = fract(position);
+  weight = weight * weight * (3.0 - 2.0 * weight);
+  return mix(_hydra_mod_random(index, seed), _hydra_mod_random(index + 1.0, seed), weight);
+}
+
+float _hydra_mod_envelope(float time, float attack, float decay, float period) {
+  float position = mod(time, period);
+  if (attack > 0.0 && position < attack) return position / attack;
+  if (decay > 0.0 && position < attack + decay) return 1.0 - (position - attack) / decay;
+  return 0.0;
+}
+
 float _luminance(vec3 rgb) {
   const vec3 W = vec3(0.2125, 0.7154, 0.0721);
   return dot(rgb, W);

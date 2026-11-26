@@ -1,0 +1,2 @@
+let angle = modulation.drift(0.5,7).range(-0.5,0.5);
+osc(12).rotate(angle).out()

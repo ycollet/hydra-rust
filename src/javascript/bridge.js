@@ -21,6 +21,59 @@
   let saved, committedUpdate = null, audioRead = false, running = false;
   let activeSlots = new Set(), pendingActiveSlots = new Set();
   const callbackFunctions = new WeakMap();
+  const modulationSignals = new WeakMap();
+  const modulationSizes = new WeakMap();
+  class ModulationSignal {
+    constructor(descriptor) {
+      const children = [descriptor.left,descriptor.right,descriptor.signal].filter(Boolean);
+      const size = {
+        nodes:1+children.reduce((sum,child)=>sum+modulationSizes.get(child).nodes,0),
+        depth:children.length ? 1+Math.max(...children.map(child=>modulationSizes.get(child).depth)) : 0
+      };
+      if (size.nodes>64 || size.depth>16) throw new Error("Modulation expression exceeds 64 nodes or 16 nesting levels");
+      modulationSizes.set(descriptor,size);
+      modulationSignals.set(this, descriptor);
+      Object.freeze(this);
+    }
+    add(other) { return modulationBinary("add",this,other); }
+    sub(other) { return modulationBinary("sub",this,other); }
+    mul(other) { return modulationBinary("mul",this,other); }
+    scale(other) { return this.mul(other); }
+    div(divisor) {
+      finite(divisor);
+      if (divisor === 0) throw new Error("Modulation divisor must be nonzero");
+      return new ModulationSignal({kind:"div",signal:modulationSignals.get(this),divisor});
+    }
+    range(low,high) {
+      return new ModulationSignal({kind:"range",signal:modulationSignals.get(this),low:finite(low),high:finite(high)});
+    }
+  }
+  const modulationDescriptor = value => {
+    if (modulationSignals.has(value)) return modulationSignals.get(value);
+    const descriptor = {kind:"number",value:finite(value)};
+    modulationSizes.set(descriptor,{nodes:1,depth:0});
+    return descriptor;
+  };
+  const modulationBinary = (kind,left,right) => new ModulationSignal({
+    kind,left:modulationDescriptor(left),right:modulationDescriptor(right)
+  });
+  globalThis.modulation = Object.freeze({
+    lfo(wave,rate=1,phase=0,base="seconds") {
+      return new ModulationSignal({kind:"lfo",wave,rate:finite(rate),phase:finite(phase),base});
+    },
+    envelope(attack,decay,period,base="seconds") {
+      return new ModulationSignal({kind:"envelope",attack:finite(attack),decay:finite(decay),period:finite(period),base});
+    },
+    sampleHold(rate=1,seed=0,base="seconds") {
+      return new ModulationSignal({kind:"sampleHold",rate:finite(rate),seed:finite(seed),base});
+    },
+    drift(rate=1,seed=0,base="seconds") {
+      return new ModulationSignal({kind:"drift",rate:finite(rate),seed:finite(seed),base});
+    },
+    clock(rate=1,duty=0.5,base="seconds") {
+      return new ModulationSignal({kind:"clock",rate:finite(rate),duty:finite(duty),base});
+    }
+  });
   const arrayCallbacks = new WeakMap(), callbackArrays = new WeakMap();
   let renderBuffer = null, all = false, resolution = null, filters = [null,null,null,null], capture = false;
   let textRequest = null, clear = [false,false,false,false];
@@ -69,6 +122,7 @@
     return arg;
   };
   const value = v => {
+    if (modulationSignals.has(v)) return {type:"modulation",value:modulationSignals.get(v)};
     if (v instanceof Node) return {type:"parameter",value:v};
     if (typeof v === "function") return slot(v);
     if (Array.isArray(v)) {
@@ -97,6 +151,7 @@
     }
   }
   const decode = arg => {
+    if (arg.type === "modulation") return new ModulationSignal(arg.value);
     if (arg.type === "parameter") return arg.value;
     if (arg.type === "number") return arg.value;
     if (arg.type === "callback" && callbackFunctions.has(arg)) {
