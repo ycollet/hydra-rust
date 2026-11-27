@@ -31,6 +31,7 @@ use hydra_rust::javascript_settings::JavascriptSettings;
 use hydra_rust::midi::MidiManager;
 #[cfg(feature = "osc")]
 use hydra_rust::osc::OscManager;
+use hydra_rust::parameters::{Parameter, ParameterValues};
 use hydra_rust::renderer::{self, RenderUniforms, ShaderRenderer};
 #[cfg(all(
     any(feature = "image_url", feature = "video", feature = "stream"),
@@ -49,6 +50,8 @@ use crate::highlight::HydraHighlighter;
 
 #[derive(Serialize, Deserialize)]
 struct Session {
+    #[serde(default)]
+    parameters: ParameterValues,
     code: String,
     #[serde(default)]
     javascript: bool,
@@ -74,6 +77,7 @@ struct Session {
 impl Default for Session {
     fn default() -> Self {
         Self {
+            parameters: ParameterValues::default(),
             code: String::new(),
             javascript: false,
             javascript_module: false,
@@ -110,11 +114,12 @@ impl ScriptLanguage {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 struct Scene {
     code: String,
     language: Option<ScriptLanguage>,
     module: bool,
+    parameters: ParameterValues,
 }
 
 impl<'de> Deserialize<'de> for Scene {
@@ -129,6 +134,8 @@ impl<'de> Deserialize<'de> for Scene {
                 language: Option<ScriptLanguage>,
                 #[serde(default)]
                 module: bool,
+                #[serde(default)]
+                parameters: ParameterValues,
             },
         }
         Ok(match StoredScene::deserialize(deserializer)? {
@@ -136,15 +143,18 @@ impl<'de> Deserialize<'de> for Scene {
                 code,
                 language: None,
                 module: false,
+                parameters: ParameterValues::default(),
             },
             StoredScene::Tagged {
                 code,
                 language,
                 module,
+                parameters,
             } => Self {
                 code,
                 language,
                 module,
+                parameters,
             },
         })
     }
@@ -185,7 +195,7 @@ struct BankFile {
 
 impl BankFile {
     fn into_bank(self, legacy_language: ScriptLanguage) -> Result<Bank, String> {
-        if !matches!(self.version, 1 | 2) {
+        if !matches!(self.version, 1..=3) {
             return Err(format!("Unsupported bank version: {}", self.version));
         }
         if self.slots.len() != SLOTS_PER_BANK {
@@ -206,17 +216,20 @@ struct SlotFile {
     language: Option<ScriptLanguage>,
     #[serde(default)]
     module: bool,
+    #[serde(default)]
+    parameters: ParameterValues,
 }
 
 impl SlotFile {
     fn into_scene(self, legacy_language: ScriptLanguage) -> Result<Scene, String> {
-        if !matches!(self.version, 1 | 2) {
+        if !matches!(self.version, 1..=3) {
             return Err(format!("Unsupported slot version: {}", self.version));
         }
         Ok(Scene {
             code: self.code,
             language: Some(self.language.unwrap_or(legacy_language)),
             module: self.module,
+            parameters: self.parameters,
         })
     }
 }
@@ -230,10 +243,20 @@ fn session_path() -> PathBuf {
 
 impl Session {
     fn load() -> Self {
-        std::fs::read_to_string(session_path())
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
+        match std::fs::read_to_string(session_path()) {
+            Ok(contents) => match serde_json::from_str(&contents) {
+                Ok(session) => session,
+                Err(error) => {
+                    log::warn!("Cannot restore Hydra session: {error}");
+                    Self::default()
+                }
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Self::default(),
+            Err(error) => {
+                log::warn!("Cannot read Hydra session: {error}");
+                Self::default()
+            }
+        }
     }
 
     fn save(&self) {
@@ -248,6 +271,18 @@ impl Session {
 /// `Enter`'s "evaluate selection") without threading an `Id` through the
 /// struct.
 const CODE_EDITOR_ID: &str = "hydra_code_editor";
+
+fn parameter_snapshot<'a>(
+    values: &'a ParameterValues,
+    preset: Option<&'a (u64, ParameterValues)>,
+    request: u64,
+) -> &'a ParameterValues {
+    // Keep saved code and its requested preset together while evaluation is pending.
+    preset
+        .filter(|(id, _)| *id == request)
+        .map(|(_, values)| values)
+        .unwrap_or(values)
+}
 
 #[cfg(feature = "nsm")]
 pub struct ManagedSession {
@@ -288,6 +323,10 @@ pub fn open_nsm() -> std::io::Result<Option<ManagedSession>> {
 }
 
 pub struct HydraApp {
+    parameters: Vec<Parameter>,
+    parameter_values: ParameterValues,
+    evaluation_id: u64,
+    parameter_preset: Option<(u64, ParameterValues)>,
     #[cfg(feature = "nsm")]
     nsm: Option<hydra_rust::nsm::NsmClient>,
     code: String,
@@ -439,6 +478,10 @@ impl HydraApp {
         let startup_javascript = cli_javascript || session.javascript;
         let startup_module = file_is_module || session.javascript_module;
         let mut app = Self {
+            parameters: Vec::new(),
+            parameter_values: session.parameters,
+            evaluation_id: 0,
+            parameter_preset: None,
             #[cfg(feature = "nsm")]
             nsm,
             code: session.code,
@@ -542,6 +585,7 @@ impl HydraApp {
                     .and_then(|file| file.into_scene(ScriptLanguage::selected(cli_javascript)))
             }) {
                 Ok(Ok(scene)) => {
+                    app.parameter_values = scene.parameters;
                     app.code = scene.code;
                     app.javascript = scene.language == Some(ScriptLanguage::Javascript);
                     app.javascript_module = scene.module;
@@ -591,10 +635,11 @@ impl HydraApp {
         // to `Alt+X`, so this just happens immediately instead.
         if let Some(path) = slot_save {
             let file = SlotFile {
-                version: 2,
+                version: 3,
                 code: app.code.clone(),
                 language: Some(ScriptLanguage::selected(app.javascript)),
                 module: app.module_mode(),
+                parameters: app.parameter_values.clone(),
             };
             if let Ok(json) = serde_json::to_string_pretty(&file) {
                 let _ = std::fs::write(&path, json);
@@ -606,6 +651,12 @@ impl HydraApp {
 
     fn session(&self) -> Session {
         Session {
+            parameters: parameter_snapshot(
+                &self.parameter_values,
+                self.parameter_preset.as_ref(),
+                self.evaluation_id,
+            )
+            .clone(),
             code: self.code.clone(),
             javascript: self.javascript,
             javascript_module: self.javascript_module,
@@ -631,6 +682,7 @@ impl HydraApp {
             self.current_file = None;
             self.active_slot = Some(index);
             self.evaluate();
+            self.parameter_preset = Some((self.evaluation_id, scene.parameters));
         }
     }
 
@@ -648,6 +700,12 @@ impl HydraApp {
             code: self.code.clone(),
             language: Some(ScriptLanguage::selected(self.javascript)),
             module: self.module_mode(),
+            parameters: parameter_snapshot(
+                &self.parameter_values,
+                self.parameter_preset.as_ref(),
+                self.evaluation_id,
+            )
+            .clone(),
         });
         self.active_slot = Some(index);
     }
@@ -669,7 +727,7 @@ impl HydraApp {
         });
         if let Some(p) = path {
             let file = BankFile {
-                version: 2,
+                version: 3,
                 slots: self.banks[self.current_bank].slots.clone(),
             };
             if let Ok(json) = serde_json::to_string_pretty(&file) {
@@ -832,7 +890,8 @@ impl HydraApp {
             request.module = self.javascript_module;
         }
         self.evaluation_empty = code.is_empty() && !self.javascript;
-        self.evaluator.submit(request);
+        self.evaluation_id = self.evaluator.submit(request);
+        self.parameter_preset = None;
     }
 
     fn poll_evaluation(&mut self) {
@@ -892,6 +951,21 @@ impl HydraApp {
         };
         match result {
             Ok(mut result) => {
+                let previous = self
+                    .parameter_preset
+                    .as_ref()
+                    .filter(|(request, _)| *request == id)
+                    .map(|(_, values)| values)
+                    .unwrap_or(&self.parameter_values);
+                let values = match ParameterValues::reconcile(&result.parameters, previous) {
+                    Ok(values) => values,
+                    Err(error) => {
+                        self.evaluator.resolve(id, false);
+                        log::error!("{error}");
+                        self.error = Some((error, Instant::now()));
+                        return;
+                    }
+                };
                 if self.evaluation_empty {
                     result.shaders[0] = Some(hydra_rust::shader::DEFAULT_SHADER.to_owned());
                 }
@@ -908,7 +982,7 @@ impl HydraApp {
                 #[cfg(not(feature = "osc"))]
                 let output_errors = Vec::new();
                 let errors = if output_errors.is_empty() {
-                    renderer.compile_result_atomic(&result)
+                    renderer.compile_result_with_parameters_atomic(&result, &values)
                 } else {
                     output_errors
                 };
@@ -920,6 +994,9 @@ impl HydraApp {
                     return;
                 }
                 self.evaluator.resolve(id, true);
+                self.parameters = result.parameters.clone();
+                self.parameter_values = values;
+                self.parameter_preset = None;
                 if let Some(ref td) = result.text_data {
                     renderer.upload_text(td);
                 }
@@ -1454,6 +1531,99 @@ impl HydraApp {
         self.javascript_reset_confirmation = false;
     }
 
+    fn show_performance_workspace(&mut self, ui: &mut egui::Ui) {
+        ui.separator();
+        ui.heading("Performance");
+        if self.parameters.is_empty() {
+            ui.small("Use parameter(\"name\",value,min,max) in your script.");
+        }
+        let mut changed = false;
+        for parameter in &self.parameters {
+            let mut value = self
+                .parameter_values
+                .get(&parameter.name)
+                .unwrap_or(parameter.default);
+            ui.label(&parameter.name);
+            if ui
+                .add(egui::Slider::new(&mut value, parameter.min..=parameter.max))
+                .changed()
+            {
+                match self.parameter_values.set(parameter, value) {
+                    Ok(()) => changed = true,
+                    Err(error) => {
+                        log::error!("{error}");
+                        self.error = Some((error, Instant::now()));
+                    }
+                }
+            }
+        }
+        if !self.parameters.is_empty() && ui.button("Reset parameters").clicked() {
+            match ParameterValues::reconcile(&self.parameters, &ParameterValues::default()) {
+                Ok(values) => {
+                    self.parameter_values = values;
+                    changed = true;
+                }
+                Err(error) => {
+                    log::error!("{error}");
+                    self.error = Some((error, Instant::now()));
+                }
+            }
+        }
+        if changed {
+            if let Some(renderer) = &mut self.renderer
+                && let Err(error) = renderer.set_parameter_values(&self.parameter_values)
+            {
+                log::error!("{error}");
+                self.error = Some((error, Instant::now()));
+            }
+            if self.parameter_preset.is_none()
+                && let Some(index) = self.active_slot
+            {
+                self.save_slot(index);
+            }
+        }
+        ui.small("Shift-click a bank slot to save a parameter preset.");
+        ui.collapsing("Output previews", |ui| {
+            let Some(renderer) = &self.renderer else {
+                return;
+            };
+            let snapshot = Arc::new(renderer.snapshot());
+            let ping = renderer.ping().clone();
+            let [width, height] = renderer.resolution().map(|value| value as f32);
+            for output in 0..4 {
+                ui.label(format!("o{output}"));
+                let scale = (ui.available_width() / width).min(140.0 / height);
+                let size = egui::vec2(width * scale, height * scale);
+                let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+                if !ui.is_rect_visible(rect) {
+                    continue;
+                }
+                let snapshot = snapshot.clone();
+                let ping = ping.clone();
+                ui.painter().add(egui::PaintCallback {
+                    rect,
+                    callback: Arc::new(eframe::egui_glow::CallbackFn::new(move |info, painter| {
+                        let viewport = info.viewport_in_pixels();
+                        if let Err(error) = renderer::render_output_preview(
+                            painter.gl(),
+                            &snapshot,
+                            &ping,
+                            output,
+                            [
+                                viewport.left_px,
+                                viewport.from_bottom_px,
+                                viewport.width_px,
+                                viewport.height_px,
+                            ],
+                        ) {
+                            log::error!("{error}");
+                        }
+                    })),
+                });
+            }
+        });
+    }
+
     fn show_sidebar(&mut self, ctx: &egui::Context) {
         egui::SidePanel::right("options")
             .exact_width(200.0)
@@ -1562,6 +1732,7 @@ impl HydraApp {
 
                     ui.add_space(4.0);
                     ui.checkbox(&mut self.editor_visible, "Editor visible");
+                    self.show_performance_workspace(ui);
 
                     ui.add_space(12.0);
                     ui.separator();
@@ -2504,14 +2675,26 @@ mod tests {
     }
 
     #[test]
+    fn saving_during_preset_evaluation_keeps_requested_values_with_the_scene() {
+        let live: ParameterValues = serde_json::from_str(r#"{"Frequency":8}"#).unwrap();
+        let requested: ParameterValues = serde_json::from_str(r#"{"Frequency":30}"#).unwrap();
+        let pending = (7, requested.clone());
+        assert_eq!(parameter_snapshot(&live, Some(&pending), 7), &requested);
+        assert_eq!(parameter_snapshot(&live, Some(&pending), 8), &live);
+        assert_eq!(parameter_snapshot(&live, None, 7), &live);
+        assert_eq!(live.get("Frequency"), Some(8.0));
+    }
+
+    #[test]
     fn bank_file_round_trips_through_json() {
         let file = BankFile {
-            version: 2,
+            version: 3,
             slots: vec![
                 Some(Scene {
                     code: "osc(60).out()".into(),
                     language: Some(ScriptLanguage::Javascript),
                     module: true,
+                    parameters: serde_json::from_str(r#"{"frequency":23.5}"#).unwrap(),
                 }),
                 None,
                 None,
@@ -2519,24 +2702,28 @@ mod tests {
         };
         let json = serde_json::to_string(&file).unwrap();
         let parsed: BankFile = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.version, 2);
+        assert_eq!(parsed.version, 3);
         assert_eq!(parsed.slots, file.slots);
     }
 
     #[test]
     fn slot_file_round_trips_through_json() {
         let file = SlotFile {
-            version: 2,
+            version: 3,
             code: "osc(60).out()".to_string(),
             language: Some(ScriptLanguage::Javascript),
             module: true,
+            parameters: serde_json::from_str(r#"{"frequency":23.5}"#).unwrap(),
         };
         let json = serde_json::to_string(&file).unwrap();
         let parsed: SlotFile = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.version, 2);
+        assert_eq!(parsed.version, 3);
         assert_eq!(parsed.code, file.code);
         assert_eq!(parsed.language, file.language);
         assert_eq!(parsed.module, file.module);
+        assert_eq!(parsed.parameters, file.parameters);
+        let scene = parsed.into_scene(ScriptLanguage::Rhai).unwrap();
+        assert_eq!(scene.parameters, file.parameters);
     }
 
     #[test]
@@ -2575,6 +2762,7 @@ mod tests {
             code: "osc(1).out()".into(),
             language: None,
             module: false,
+            parameters: ParameterValues::default(),
         };
         assert_eq!(
             legacy
@@ -2588,6 +2776,7 @@ mod tests {
             code: "osc(2).out()".into(),
             language: Some(ScriptLanguage::Rhai),
             module: false,
+            parameters: ParameterValues::default(),
         };
         assert_eq!(
             tagged
@@ -2606,10 +2795,11 @@ mod tests {
         );
         assert!(
             SlotFile {
-                version: 3,
+                version: 4,
                 code: "".into(),
                 language: None,
                 module: false,
+                parameters: ParameterValues::default(),
             }
             .into_scene(ScriptLanguage::Rhai)
             .is_err()
@@ -2654,6 +2844,7 @@ mod tests {
     #[test]
     fn managed_session_snapshot_restores_code_settings_and_scene_banks() {
         let mut session = Session {
+            parameters: serde_json::from_str(r#"{"Frequency":23.5}"#).unwrap(),
             code: "osc(10).out()".into(),
             javascript: true,
             javascript_module: true,
@@ -2669,10 +2860,12 @@ mod tests {
             code: "noise(2).out()".into(),
             language: Some(ScriptLanguage::Javascript),
             module: true,
+            parameters: ParameterValues::default(),
         });
         let restored: Session =
             serde_json::from_slice(&serde_json::to_vec(&session).unwrap()).unwrap();
         assert_eq!(restored.code, session.code);
+        assert_eq!(restored.parameters, session.parameters);
         assert!(restored.javascript);
         assert!(restored.javascript_module);
         assert_eq!(restored.library_root, session.library_root);

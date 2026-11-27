@@ -23,6 +23,7 @@ uniform float iPhase;
 uniform float iFft[8]; // must match audio::NUM_FFT_BINS
 uniform float iJsValues[128];
 uniform float iRegionValues[16];
+uniform float iParameterValues[64];
 uniform vec3 iAudioRhythm;
 uniform float iMidiNote[128]; // must match midi::NUM_MIDI_NOTES
 uniform float iMidiVelocity[128]; // must match midi::NUM_MIDI_NOTES

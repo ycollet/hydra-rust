@@ -166,6 +166,7 @@ pub enum BroadcastRequest {
 }
 
 pub struct EvalResult {
+    pub parameters: Vec<crate::parameters::Parameter>,
     pub shaders: [Option<String>; 4],
     pub render_mode: RenderMode,
     pub text_data: Option<TextData>,
@@ -2036,6 +2037,7 @@ fn rasterize_text(
 }
 
 struct PatchState {
+    parameters: Vec<crate::parameters::Parameter>,
     history_limit: usize,
     buffers: [Option<Node>; 4],
     render_mode: RenderMode,
@@ -2513,6 +2515,7 @@ fn eval_impl(
     validate_midi_value_callbacks(&code)?;
     let code = &preprocess(&code);
     let state = Arc::new(Mutex::new(PatchState {
+        parameters: Vec::new(),
         history_limit: crate::extended::MAX_HISTORY,
         buffers: [None, None, None, None],
         render_mode: RenderMode::default(),
@@ -2713,6 +2716,27 @@ fn eval_impl(
     }
     register_functions(&mut engine);
     register_glsl_ops(&mut engine);
+    {
+        let state = state.clone();
+        engine.register_fn(
+            "parameter",
+            move |name: ImmutableString,
+                  default: Dynamic,
+                  min: Dynamic,
+                  max: Dynamic|
+                  -> Result<GlslExpr, Box<rhai::EvalAltResult>> {
+                let parameter = crate::parameters::Parameter::new(
+                    name.to_string(),
+                    crate::modulation::static_number(default)?,
+                    crate::modulation::static_number(min)?,
+                    crate::modulation::static_number(max)?,
+                )?;
+                let slot =
+                    crate::parameters::register(&mut state.lock().unwrap().parameters, parameter)?;
+                Ok(GlslExpr(format!("iParameterValues[{slot}]")))
+            },
+        );
+    }
     crate::modulation::register(&mut engine);
     engine.register_fn(
         "range",
@@ -3689,6 +3713,7 @@ fn eval_impl(
     }
 
     Ok(EvalResult {
+        parameters: std::mem::take(&mut patch.parameters),
         shaders,
         render_mode: patch.render_mode,
         text_data: patch.text_data.take(),

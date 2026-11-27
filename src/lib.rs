@@ -34,6 +34,7 @@ pub mod nsm;
 mod numlit;
 mod objlit;
 pub mod osc;
+pub mod parameters;
 mod patcall;
 mod quotes;
 pub mod renderer;

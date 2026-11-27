@@ -18,6 +18,8 @@
   ));
   let callbacks = [], committedCallbacks = [], definitions = new Map(), buffers = [null,null,null,null];
   let definitionBytes = 0;
+  let parameters = new Map();
+  let declaredParameters = new Set();
   let saved, committedUpdate = null, audioRead = false, running = false;
   let activeSlots = new Set(), pendingActiveSlots = new Set();
   const callbackFunctions = new WeakMap();
@@ -98,6 +100,21 @@
   const finite = value => {
     if (typeof value !== "number" || !Number.isFinite(value) || Math.abs(value) > 3.402823466e38) throw new Error("Native controls require finite numbers");
     return value;
+  };
+  globalThis.parameter = (name,defaultValue,min,max) => {
+    editing();
+    if (typeof name !== "string" || !name.trim()) throw new Error("Parameter names must be nonempty strings");
+    const spec = {name,default:finite(defaultValue),min:finite(min),max:finite(max)};
+    if (min>=max || defaultValue<min || defaultValue>max) throw new Error("Parameter default must lie inside finite bounds with min < max");
+    const previous = parameters.get(name);
+    if (previous && declaredParameters.has(name) && JSON.stringify(previous.spec)!==JSON.stringify(spec)) throw new Error(`Conflicting declarations for parameter ${name}`);
+    if (!previous) {
+      if (parameters.size>=64) throw new Error("Named parameter limit exceeded (64)");
+      parameters.set(name,{slot:parameters.size,spec});
+    }
+    else parameters.set(name,{slot:previous.slot,spec});
+    declaredParameters.add(name);
+    return new ModulationSignal({kind:"parameter",name,slot:parameters.get(name).slot});
   };
   const queue = command => {
     editing();
@@ -540,7 +557,8 @@
   };
   globalThis.__bridge = Object.freeze({
     begin() {
-      saved={callbacks:callbacks.slice(),buffers:buffers.slice(),definitions:new Map(definitions),definitionBytes,
+      declaredParameters=new Set();
+      saved={parameters:new Map(parameters),callbacks:callbacks.slice(),buffers:buffers.slice(),definitions:new Map(definitions),definitionBytes,
         renderBuffer,all,resolution,filters:filters.slice(),capture,audioRead,
         committedCallbacks:committedCallbacks.slice(),committedUpdate,activeSlots,savedUpdate:update,textRequest,clear:clear.slice(),
         commands:commands.slice(),midiBindings:new Map(midiBindings),envelopes:new Map(envelopes),oscBindings:new Map(oscBindings),
@@ -554,7 +572,7 @@
     },
     rollback() {
       const oldDefinitions = definitions;
-      ({callbacks,buffers,definitions,definitionBytes,renderBuffer,all,resolution,filters,capture,audioRead,committedCallbacks,committedUpdate,activeSlots,textRequest,clear,commands,midiBindings,envelopes,oscBindings,audioSettings,regions,regionOutputs,historyLimit,regionSampling}=saved);
+      ({parameters,callbacks,buffers,definitions,definitionBytes,renderBuffer,all,resolution,filters,capture,audioRead,committedCallbacks,committedUpdate,activeSlots,textRequest,clear,commands,midiBindings,envelopes,oscBindings,audioSettings,regions,regionOutputs,historyLimit,regionSampling}=saved);
       globalThis.update=saved.savedUpdate;
       for (const [name,def] of oldDefinitions) {
         if (!definitions.has(name)) {
@@ -577,7 +595,7 @@
     snapshot() {
       pendingActiveSlots=new Set();
       const encodedBuffers=buffers.map(serialize);
-      return JSON.stringify({buffers:encodedBuffers,definitions:[...definitions.values()],
+      return JSON.stringify({parameters:[...parameters.values()].map(entry=>entry.spec),buffers:encodedBuffers,definitions:[...definitions.values()],
         render:renderBuffer,all,resolution,filters,screencap:capture,slots:callbacks.length,audio:audioRead,text:textRequest,clear,
         commands:[...commands,...midiBindings.values(),...envelopes.values(),...oscBindings.values()],regions,region_outputs:regionOutputs,region_sampling:regionSampling,history_limit:historyLimit});
     },

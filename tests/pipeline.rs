@@ -20,6 +20,34 @@ fn ok_shader0(src: &str) -> String {
 }
 
 #[test]
+fn named_parameters_have_stable_slots_and_validate_declarations() {
+    let graph = eval("let f=parameter('frequency',10,1,40);osc(f).rotate(parameter('angle',0,-1,1)).out(); parameter('frequency',10,1,40);").unwrap();
+    assert_eq!(graph.parameters.len(), 2);
+    assert_eq!(graph.parameters[0].name, "frequency");
+    assert_eq!(graph.parameters[0].default, 10.0);
+    let shader = graph.shaders[0].as_ref().unwrap();
+    assert!(shader.contains("iParameterValues[0]"));
+    assert!(shader.contains("iParameterValues[1]"));
+    for code in [
+        "parameter('',1,0,2)",
+        "parameter('frequency',3,0,2)",
+        "parameter('frequency',1,2,0)",
+        "parameter('frequency',1,1,1)",
+        "parameter('frequency',true,0,2)",
+        "parameter('frequency',1e100,0,2)",
+        "parameter('frequency',1.00000001,0,1)",
+        "parameter('frequency',1,1,1.00000001)",
+        "parameter('frequency',1,0,2);parameter('frequency',1,0,3)",
+    ] {
+        assert!(eval(code).is_err(), "{code}");
+    }
+    let oversized = (0..65)
+        .map(|index| format!("parameter('p{index}',0.5,0,1);"))
+        .collect::<String>();
+    assert!(eval(&oversized).err().unwrap().contains("limit"));
+}
+
+#[test]
 fn modulation_signals_support_defaults_arithmetic_and_static_validation() {
     for signal in [
         "modulation.lfo('sine')",

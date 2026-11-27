@@ -125,6 +125,10 @@ See [performance measurements](DOCUMENTATION.md#performance-measurements) for co
 - [ ] **Performance workspace:** named parameter sliders, modulation controls,
   presets, output previews, export jobs and hot reload that preserves feedback
   history.
+  Named sliders, scene parameter presets, and four output previews are implemented in the standalone app.
+  Modulation controls, feedback-preserving file hot reload, and export jobs remain pending.
+  Example: `osc(parameter("Frequency",12,1,40)).out()` creates a live frequency slider.
+  See [performance workspace](DOCUMENTATION.md#performance-workspace) for controls and examples.
 - [ ] **Timeline automation:** keyed parameter tracks in seconds or beats.
 
 ## Caveats

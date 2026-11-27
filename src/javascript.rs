@@ -100,6 +100,7 @@ pub struct JavascriptRuntime {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Snapshot {
+    parameters: Vec<crate::parameters::Parameter>,
     buffers: [Option<Graph>; 4],
     definitions: Vec<Definition>,
     render: Option<usize>,
@@ -769,6 +770,7 @@ fn compile_snapshot(snapshot: &Snapshot) -> Result<EvalResult, String> {
     if snapshot.slots > NUM_JS_VALUES || snapshot.definitions.len() > functions::MAX_FUNCTIONS {
         return Err("JavaScript graph resource limit".into());
     }
+    crate::parameters::validate(&snapshot.parameters)?;
     let mut definitions: HashMap<String, (String, Vec<InputKind>, String)> = FUNCTIONS
         .iter()
         .map(|m| {
@@ -818,6 +820,7 @@ fn compile_snapshot(snapshot: &Snapshot) -> Result<EvalResult, String> {
                 graph,
                 &definitions,
                 snapshot.slots,
+                &snapshot.parameters,
                 0,
                 &mut budget,
                 &mut used,
@@ -857,6 +860,7 @@ fn compile_snapshot(snapshot: &Snapshot) -> Result<EvalResult, String> {
         }
     };
     let mut result = EvalResult {
+        parameters: snapshot.parameters.clone(),
         shaders,
         render_mode,
         text_data: snapshot
@@ -926,6 +930,7 @@ fn graph_node(
     graph: &Graph,
     definitions: &HashMap<String, (String, Vec<InputKind>, String)>,
     slots: usize,
+    parameters: &[crate::parameters::Parameter],
     depth: usize,
     budget: &mut usize,
     used: &mut std::collections::HashSet<String>,
@@ -961,6 +966,7 @@ fn graph_node(
                     operation.other.as_ref().ok_or("Missing effect input")?,
                     definitions,
                     slots,
+                    parameters,
                     depth + 1,
                     budget,
                     used,
@@ -980,13 +986,14 @@ fn graph_node(
             let width = match &operation.args[0] {
                 Value::Number(n) if n.is_finite() && (*n as f32).is_finite() => Arg::Lit(*n),
                 Value::Callback(i) if *i < slots => Arg::Expr(format!("iJsValues[{i}]")),
-                Value::Modulation(signal) => Arg::Expr(signal.glsl()?),
+                Value::Modulation(signal) => Arg::Expr(signal.glsl_for_parameters(parameters)?),
                 _ => return Err("Invalid tileable width".into()),
             };
             let other = graph_node(
                 operation.other.as_ref().ok_or("Missing tileable graph")?,
                 definitions,
                 slots,
+                parameters,
                 depth + 1,
                 budget,
                 used,
@@ -1014,7 +1021,9 @@ fn graph_node(
                 (Value::Callback(i), InputKind::Float) if *i < slots => {
                     Ok(Arg::Expr(format!("iJsValues[{i}]")))
                 }
-                (Value::Modulation(signal), InputKind::Float) => Ok(Arg::Expr(signal.glsl()?)),
+                (Value::Modulation(signal), InputKind::Float) => {
+                    Ok(Arg::Expr(signal.glsl_for_parameters(parameters)?))
+                }
                 (Value::Texture(texture), InputKind::Sampler) if texture.index < 4 => {
                     Ok(Arg::Expr(format!(
                         "{}{}",
@@ -1030,6 +1039,7 @@ fn graph_node(
                         graph,
                         definitions,
                         slots,
+                        parameters,
                         depth + 1,
                         budget,
                         used,
@@ -1043,7 +1053,7 @@ fn graph_node(
         let other = operation
             .other
             .as_ref()
-            .map(|g| graph_node(g, definitions, slots, depth + 1, budget, used))
+            .map(|g| graph_node(g, definitions, slots, parameters, depth + 1, budget, used))
             .transpose()?;
         let op = match (kind.as_str(), other) {
             ("src", None) => Op::Source { func, args },

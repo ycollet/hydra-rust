@@ -66,6 +66,7 @@ struct ProgramState {
     loc_passes: [Option<glow::UniformLocation>; crate::extended::MAX_PASSES],
     loc_history: [[Option<glow::UniformLocation>; crate::extended::MAX_HISTORY]; NUM_BUFFERS],
     loc_regions: Option<glow::UniformLocation>,
+    loc_parameters: Option<glow::UniformLocation>,
 }
 
 #[derive(Clone, Copy)]
@@ -76,6 +77,7 @@ struct BufferTarget {
 
 #[derive(Clone)]
 pub struct RenderSnapshot {
+    parameter_values: [f32; crate::parameters::MAX_PARAMETERS],
     targets: [BufferTarget; NUM_BUFFERS],
     programs: [Option<ProgramState>; NUM_BUFFERS],
     display: ProgramState,
@@ -137,6 +139,7 @@ pub struct ShaderRenderer {
     vertex_shader: glow::Shader,
     shader_sources: [Option<String>; NUM_BUFFERS],
     pass_sources: Vec<String>,
+    parameters: Vec<crate::parameters::Parameter>,
 }
 
 struct StagedResources {
@@ -232,6 +235,7 @@ impl ShaderRenderer {
 
         Self {
             snapshot: RenderSnapshot {
+                parameter_values: [0.0; crate::parameters::MAX_PARAMETERS],
                 targets,
                 programs: [slot0, None, None, None],
                 display,
@@ -250,6 +254,7 @@ impl ShaderRenderer {
             vertex_shader,
             shader_sources: [Some(shader::DEFAULT_SHADER.into()), None, None, None],
             pass_sources: Vec::new(),
+            parameters: Vec::new(),
         }
     }
 
@@ -259,6 +264,10 @@ impl ShaderRenderer {
 
     pub fn snapshot(&self) -> RenderSnapshot {
         self.snapshot.clone()
+    }
+
+    pub fn resolution(&self) -> [u32; 2] {
+        self.resolution
     }
 
     pub fn prepare_capture(&mut self, resolution: [u32; 2]) -> Result<(), String> {
@@ -655,6 +664,9 @@ impl ShaderRenderer {
     }
 
     pub fn compile_result_atomic(&mut self, result: &crate::eval::EvalResult) -> Vec<String> {
+        if let Err(error) = crate::parameters::validate(&result.parameters) {
+            return vec![error];
+        }
         if let Err(error) = result.region_sampling.validate() {
             return vec![error];
         }
@@ -666,12 +678,44 @@ impl ShaderRenderer {
                 return vec![error];
             }
         }
-        self.compile_plan_atomic(
+        let errors = self.compile_plan_atomic(
             &result.shaders,
             result.render_mode,
             &result.render_plan,
             !result.regions.is_empty(),
-        )
+        );
+        if errors.is_empty() {
+            self.snapshot.parameter_values = [0.0; crate::parameters::MAX_PARAMETERS];
+            for (index, parameter) in result.parameters.iter().enumerate() {
+                self.snapshot.parameter_values[index] = parameter.default;
+            }
+            self.parameters = result.parameters.clone();
+        }
+        errors
+    }
+
+    pub fn set_parameter_values(
+        &mut self,
+        values: &crate::parameters::ParameterValues,
+    ) -> Result<(), String> {
+        self.snapshot.parameter_values = values.uniforms(&self.parameters)?;
+        Ok(())
+    }
+
+    pub fn compile_result_with_parameters_atomic(
+        &mut self,
+        result: &crate::eval::EvalResult,
+        values: &crate::parameters::ParameterValues,
+    ) -> Vec<String> {
+        let uniforms = match values.uniforms(&result.parameters) {
+            Ok(uniforms) => uniforms,
+            Err(error) => return vec![error],
+        };
+        let errors = self.compile_result_atomic(result);
+        if errors.is_empty() {
+            self.snapshot.parameter_values = uniforms;
+        }
+        errors
     }
 
     fn compile_plan_atomic(
@@ -918,6 +962,7 @@ fn resolve_program_state(gl: &glow::Context, program: glow::Program) -> ProgramS
                 })
             }),
             loc_regions: gl.get_uniform_location(program, "iRegionValues"),
+            loc_parameters: gl.get_uniform_location(program, "iParameterValues"),
         }
     }
 }
@@ -1005,6 +1050,9 @@ pub fn render_multipass(
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(target));
             gl.viewport(0, 0, res_w, res_h);
             gl.use_program(Some(p.program));
+            if let Some(ref loc) = p.loc_parameters {
+                gl.uniform_1_f32_slice(Some(loc), &snap.parameter_values);
+            }
 
             if let Some(ref loc) = p.loc_time {
                 gl.uniform_1_f32(Some(loc), u.time);
@@ -1195,6 +1243,57 @@ pub fn render_multipass(
             gl.enable(glow::BLEND);
         }
     }
+}
+
+pub fn render_output_preview(
+    gl: &glow::Context,
+    snapshot: &RenderSnapshot,
+    ping: &AtomicBool,
+    output: usize,
+    viewport: [i32; 4],
+) -> Result<(), String> {
+    if output >= NUM_BUFFERS || viewport[2] <= 0 || viewport[3] <= 0 {
+        return Err("Invalid output preview index or viewport".into());
+    }
+    unsafe {
+        let mut previous_viewport = [0; 4];
+        gl.get_parameter_i32_slice(glow::VIEWPORT, &mut previous_viewport);
+        let program = gl.get_parameter_i32(glow::CURRENT_PROGRAM);
+        let vao = gl.get_parameter_i32(glow::VERTEX_ARRAY_BINDING);
+        let active = gl.get_parameter_i32(glow::ACTIVE_TEXTURE);
+        gl.active_texture(glow::TEXTURE0);
+        let texture = gl.get_parameter_i32(glow::TEXTURE_BINDING_2D);
+        let sampler = gl.get_parameter_i32(glow::SAMPLER_BINDING);
+        let blend = gl.is_enabled(glow::BLEND);
+        gl.disable(glow::BLEND);
+        gl.bind_sampler(0, None);
+        gl.viewport(viewport[0], viewport[1], viewport[2], viewport[3]);
+        gl.bind_vertex_array(Some(snapshot.vao));
+        gl.use_program(Some(snapshot.display.program));
+        let latest = 1 - ping.load(Ordering::Relaxed) as usize;
+        draw_display_buffer(gl, snapshot, &snapshot.display, latest, output);
+        gl.bind_texture(
+            glow::TEXTURE_2D,
+            std::num::NonZeroU32::new(texture as u32).map(glow::NativeTexture),
+        );
+        gl.bind_sampler(
+            0,
+            std::num::NonZeroU32::new(sampler as u32).map(glow::NativeSampler),
+        );
+        gl.active_texture(active as u32);
+        gl.bind_vertex_array(std::num::NonZeroU32::new(vao as u32).map(glow::NativeVertexArray));
+        gl.use_program(std::num::NonZeroU32::new(program as u32).map(glow::NativeProgram));
+        gl.viewport(
+            previous_viewport[0],
+            previous_viewport[1],
+            previous_viewport[2],
+            previous_viewport[3],
+        );
+        if blend {
+            gl.enable(glow::BLEND);
+        }
+    }
+    Ok(())
 }
 
 pub fn read_capture(

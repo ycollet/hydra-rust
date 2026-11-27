@@ -178,6 +178,10 @@ impl Waveform {
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) enum Signal {
+    Parameter {
+        slot: usize,
+        name: String,
+    },
     Number {
         value: f64,
     },
@@ -261,15 +265,36 @@ fn seed(value: f64) -> Result<String, String> {
 
 impl Signal {
     pub(crate) fn glsl(&self) -> Result<String, String> {
-        self.compile(0, &mut 64)
+        self.glsl_for_parameters(&[])
     }
 
-    fn compile(&self, depth: usize, remaining: &mut usize) -> Result<String, String> {
+    pub(crate) fn glsl_for_parameters(
+        &self,
+        parameters: &[crate::parameters::Parameter],
+    ) -> Result<String, String> {
+        self.compile(0, &mut 64, parameters)
+    }
+
+    fn compile(
+        &self,
+        depth: usize,
+        remaining: &mut usize,
+        parameters: &[crate::parameters::Parameter],
+    ) -> Result<String, String> {
         if depth > 16 || *remaining == 0 {
             return Err("Modulation expression exceeds 64 nodes or 16 nesting levels".into());
         }
         *remaining -= 1;
         match self {
+            Self::Parameter { slot, name } => {
+                if parameters
+                    .get(*slot)
+                    .is_none_or(|parameter| parameter.name != *name)
+                {
+                    return Err("Invalid named parameter reference".into());
+                }
+                Ok(format!("iParameterValues[{slot}]"))
+            }
             Self::Number { value } => number(*value),
             Self::Lfo {
                 wave,
@@ -362,8 +387,8 @@ impl Signal {
                 };
                 Ok(format!(
                     "({} {op} {})",
-                    left.compile(depth + 1, remaining)?,
-                    right.compile(depth + 1, remaining)?
+                    left.compile(depth + 1, remaining, parameters)?,
+                    right.compile(depth + 1, remaining, parameters)?
                 ))
             }
             Self::Div { signal, divisor } => {
@@ -373,12 +398,12 @@ impl Signal {
                 }
                 Ok(format!(
                     "({} / {divisor_text})",
-                    signal.compile(depth + 1, remaining)?
+                    signal.compile(depth + 1, remaining, parameters)?
                 ))
             }
             Self::Range { signal, low, high } => Ok(format!(
                 "(({}) * ({} - {}) + {})",
-                signal.compile(depth + 1, remaining)?,
+                signal.compile(depth + 1, remaining, parameters)?,
                 number(*high)?,
                 number(*low)?,
                 number(*low)?

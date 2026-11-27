@@ -22,6 +22,7 @@ chains implicitly write to `o0`; an explicit `.out()` is also valid.
 - [NSM sessions](#nsm-sessions)
 - [Audio onset and beat reactivity](#audio-onset-and-beat-reactivity)
 - [Modulation toolkit](#modulation-toolkit)
+- [Performance workspace](#performance-workspace)
 - [Keyboard shortcuts](#keyboard-shortcuts)
 - [Scene banks](#scene-banks)
 - [Feature-gated functions](#feature-gated-functions)
@@ -351,6 +352,97 @@ For simpler Rhai examples, load one script at a time from [the modulation exampl
 | `drift.hydra` | Stripes turn smoothly toward changing random angles. |
 | `clock.hydra` | Stripes flash for one-quarter of each second. |
 | `arithmetic.hydra` | A slow random signal adds variation to a sine-driven stripe frequency. |
+
+## Performance workspace
+
+The standalone app provides named sliders, parameter presets, and previews of all four outputs.
+Press `Tab` to open the sidebar, then use the **Performance** section.
+Sliders update shader values without reevaluating scripts or compiling shaders.
+The plugin accepts parameter declarations and uses their defaults, but does not provide this workspace interface.
+
+### Named sliders
+
+Declare a slider with `parameter(name,default,min,max)`.
+Names identify values across reevaluations and presets.
+Names require 1–64 bytes without control characters.
+Bounds and defaults must be static finite numbers.
+The minimum must be smaller than the maximum.
+Defaults must lie within their bounds.
+Each interpreter supports at most 64 parameter slots.
+Identical declarations share a slot.
+Conflicting declarations within one evaluation fail.
+
+Rhai example:
+
+```javascript
+let frequency = parameter("Frequency",12,1,40);
+let angle = parameter("Angle",0,-1,1);
+osc(frequency).rotate(angle).out()
+```
+
+JavaScript example:
+
+```javascript
+var frequency = parameter("Frequency",12,1,40);
+var angle = parameter("Angle",0,-1,1);
+osc(frequency).rotate(angle).out()
+```
+
+Both examples create two live sliders.
+Reevaluation keeps matching values by name, independent of declaration order.
+Changed bounds clamp retained values.
+New names use their declared defaults.
+Use **Reset parameters** to restore defaults.
+For example, reducing the frequency maximum to 20 clamps a retained value of 30 to 20.
+
+JavaScript retains its parameter registry until interpreter reset because persistent graphs can still reference earlier declarations.
+Later evaluations can update a name's bounds and default.
+Reset the interpreter to release unused slots.
+For example, reset before switching between many scripts with different parameter names.
+
+### Parameter presets
+
+Scene slots now store parameter values alongside code and language.
+Current parameter values also persist in the session file.
+
+- Adjust the sliders.
+- Hold `Shift` and click a bank slot to save code and values.
+- Click the slot normally to recall its preset.
+- Export or import the bank with the existing bank controls.
+
+For example, save frequency 8 in slot `0` and frequency 30 in slot `1`.
+Recalling either slot applies its values only after successful script evaluation and graphics compilation.
+Failed evaluation preserves the current graphics and slider values.
+Older scenes without parameter values use their declared defaults.
+New bank and slot exports use format version 3; versions 1 and 2 remain readable.
+Plain `.hydra` files store code, not live slider values.
+
+### Output previews
+
+Expand **Output previews** in the sidebar to see `o0`, `o1`, `o2`, and `o3`.
+Previews retain each output's aspect ratio and match the main display's orientation.
+They sample existing textures without reading pixels back to the processor.
+They do not rerun sketch shaders, advance feedback, or allocate separate render targets.
+
+```javascript
+osc(parameter("Frequency",12,1,40)).out(o0)
+noise(3).out(o1)
+shape(4).out(o2)
+gradient().out(o3)
+```
+
+### Embedding and remaining stages
+
+Embedding hosts receive declarations through `EvalResult.parameters`.
+Use `ParameterValues::reconcile` to retain values by name.
+Use `ShaderRenderer::compile_result_with_parameters_atomic` to accept a graph and its values together.
+Use `ShaderRenderer::set_parameter_values` for later live changes.
+The ordinary `compile_result_atomic` method initializes declared defaults.
+For example, set `Frequency` through `ParameterValues::set` before updating the renderer.
+
+Dedicated modulation controls, feedback-preserving file hot reload, and export jobs remain future stages.
+For example, automatic reload after editing a file externally is not part of this workspace yet.
+Load [the Rhai workspace example](examples/extensions/workspace.hydra) or [the JavaScript workspace example](examples/javascript/extensions/workspace.js).
 
 ## Keyboard shortcuts
 

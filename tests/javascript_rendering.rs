@@ -120,6 +120,199 @@ fn uniforms(values: [f32; 128]) -> RenderUniforms {
 }
 
 #[test]
+fn live_parameters_and_previews_preserve_programs_feedback_and_graphics_state() {
+    use hydra_rust::parameters::ParameterValues;
+    use std::sync::atomic::Ordering;
+
+    let context = NativeContext::new().unwrap();
+    let gl = context.gl();
+    let mut renderer = ShaderRenderer::new(gl.clone());
+    renderer.ensure_resolution_checked(8, 8).unwrap();
+    let graph = hydra_rust::eval(
+        "src(o0).add(solid(parameter('level',0.1,0,1),0,0,0)).out(o0);\
+         solid(0,1,0,1).out(o1);solid(0,0,1,1).out(o2);solid(1,1,1,1).out(o3)",
+    )
+    .unwrap();
+    assert!(renderer.compile_result_atomic(&graph).is_empty());
+    unsafe {
+        let texture = gl.create_texture().unwrap();
+        gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+        gl.tex_image_2d(
+            glow::TEXTURE_2D,
+            0,
+            glow::RGBA8 as i32,
+            8,
+            8,
+            0,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelUnpackData::Slice(None),
+        );
+        let target = gl.create_framebuffer().unwrap();
+        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(target));
+        gl.framebuffer_texture_2d(
+            glow::FRAMEBUFFER,
+            glow::COLOR_ATTACHMENT0,
+            glow::TEXTURE_2D,
+            Some(texture),
+            0,
+        );
+        assert_eq!(
+            gl.check_framebuffer_status(glow::FRAMEBUFFER),
+            glow::FRAMEBUFFER_COMPLETE
+        );
+        gl.viewport(0, 0, 8, 8);
+        let pixel = || {
+            let mut pixel = [0; 4];
+            gl.read_pixels(
+                4,
+                4,
+                1,
+                1,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelPackData::Slice(Some(&mut pixel)),
+            );
+            pixel
+        };
+        render_multipass(
+            &gl,
+            &renderer.snapshot(),
+            renderer.ping(),
+            uniforms([0.0; 128]),
+        );
+        assert!((pixel()[0] as i32 - 26).abs() <= 1);
+        let before = GL_CALLS.with_borrow(Clone::clone);
+        let values: ParameterValues = serde_json::from_str(r#"{"level":0.2}"#).unwrap();
+        renderer.set_parameter_values(&values).unwrap();
+        let after = GL_CALLS.with_borrow(Clone::clone);
+        assert_eq!(before.programs, after.programs);
+        assert_eq!(before.textures, after.textures);
+
+        let sampler = gl.create_sampler().unwrap();
+        let vao = gl.create_vertex_array().unwrap();
+        gl.bind_sampler(0, Some(sampler));
+        gl.bind_vertex_array(Some(vao));
+        gl.active_texture(glow::TEXTURE1);
+        gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+        gl.viewport(1, 2, 6, 5);
+        gl.enable(glow::BLEND);
+        gl.enable(glow::SCISSOR_TEST);
+        gl.scissor(0, 0, 8, 8);
+        let ping = renderer.ping().load(Ordering::Relaxed);
+        for (output, expected) in [
+            (0, [26, 0, 0]),
+            (1, [0, 255, 0]),
+            (2, [0, 0, 255]),
+            (3, [255, 255, 255]),
+        ] {
+            let reads = GL_CALLS.with_borrow(|calls| calls.readbacks);
+            hydra_rust::renderer::render_output_preview(
+                &gl,
+                &renderer.snapshot(),
+                renderer.ping(),
+                output,
+                [0, 0, 8, 8],
+            )
+            .unwrap();
+            assert_eq!(GL_CALLS.with_borrow(|calls| calls.readbacks), reads);
+            let actual = pixel();
+            for channel in 0..3 {
+                assert!(
+                    (actual[channel] as i32 - expected[channel]).abs() <= 1,
+                    "o{output}: {actual:?}"
+                );
+            }
+            assert_eq!(renderer.ping().load(Ordering::Relaxed), ping);
+            let mut viewport = [0; 4];
+            gl.get_parameter_i32_slice(glow::VIEWPORT, &mut viewport);
+            assert_eq!(viewport, [1, 2, 6, 5]);
+            assert!(gl.is_enabled(glow::BLEND));
+            assert!(gl.is_enabled(glow::SCISSOR_TEST));
+            assert_eq!(
+                gl.get_parameter_i32(glow::ACTIVE_TEXTURE),
+                glow::TEXTURE1 as i32
+            );
+            assert_eq!(
+                gl.get_parameter_i32(glow::VERTEX_ARRAY_BINDING),
+                vao.0.get() as i32
+            );
+            assert_eq!(
+                gl.get_parameter_i32(glow::TEXTURE_BINDING_2D),
+                texture.0.get() as i32
+            );
+            gl.active_texture(glow::TEXTURE0);
+            assert_eq!(
+                gl.get_parameter_i32(glow::SAMPLER_BINDING),
+                sampler.0.get() as i32
+            );
+            gl.active_texture(glow::TEXTURE1);
+        }
+        assert!(
+            hydra_rust::renderer::render_output_preview(
+                &gl,
+                &renderer.snapshot(),
+                renderer.ping(),
+                4,
+                [0, 0, 8, 8]
+            )
+            .is_err()
+        );
+        gl.bind_sampler(0, None);
+        gl.bind_vertex_array(None);
+        gl.active_texture(glow::TEXTURE0);
+        gl.disable(glow::BLEND);
+        gl.disable(glow::SCISSOR_TEST);
+        gl.viewport(0, 0, 8, 8);
+        render_multipass(
+            &gl,
+            &renderer.snapshot(),
+            renderer.ping(),
+            uniforms([0.0; 128]),
+        );
+        assert!((pixel()[0] as i32 - 77).abs() <= 1);
+        let mut invalid = hydra_rust::eval("solid(parameter('other',0.8,0,1)).out()").unwrap();
+        invalid.shaders[0] = Some("void mainImage(out vec4 c,in vec2 st){c=invalid;}".into());
+        assert!(!renderer.compile_result_atomic(&invalid).is_empty());
+        renderer.set_parameter_values(&values).unwrap();
+        let bad: ParameterValues = serde_json::from_str(r#"{"level":2}"#).unwrap();
+        assert!(renderer.set_parameter_values(&bad).is_err());
+        render_multipass(
+            &gl,
+            &renderer.snapshot(),
+            renderer.ping(),
+            uniforms([0.0; 128]),
+        );
+        assert!((pixel()[0] as i32 - 128).abs() <= 1);
+        let effect =
+            hydra_rust::eval("solid(parameter('level',0.25,0,1),0,0,1).blur(1).out()").unwrap();
+        assert!(
+            !renderer
+                .compile_result_with_parameters_atomic(&effect, &bad)
+                .is_empty()
+        );
+        assert!(
+            renderer
+                .compile_result_with_parameters_atomic(&effect, &values)
+                .is_empty()
+        );
+        render_multipass(
+            &gl,
+            &renderer.snapshot(),
+            renderer.ping(),
+            uniforms([0.0; 128]),
+        );
+        assert!((pixel()[0] as i32 - 51).abs() <= 1);
+        assert_eq!(gl.get_error(), glow::NO_ERROR);
+        drop(renderer);
+        gl.delete_sampler(sampler);
+        gl.delete_vertex_array(vao);
+        gl.delete_framebuffer(target);
+        gl.delete_texture(texture);
+    }
+}
+
+#[test]
 fn modulation_renders_waveforms_envelopes_clocks_and_repeatable_random_signals() {
     let context = NativeContext::new().unwrap();
     let gl = context.gl();

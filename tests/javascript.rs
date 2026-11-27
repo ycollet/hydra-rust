@@ -11,6 +11,54 @@ fn runtime() -> JavascriptRuntime {
 }
 
 #[test]
+fn named_parameters_share_native_slots_and_rollback_failed_declarations() {
+    let mut js = runtime();
+    let code = "var frequency=parameter('frequency',10,1,40); osc(frequency).rotate(parameter('angle',0,-1,1)).out();parameter('frequency',10,1,40)";
+    let original = js.eval(code).unwrap();
+    let native = hydra_rust::eval(code).unwrap();
+    assert_eq!(original.parameters, native.parameters);
+    assert_eq!(original.shaders, native.shaders);
+    assert_eq!(js.frame(Default::default()).unwrap(), [0.0; 128]);
+    let example = runtime()
+        .eval(include_str!(
+            "../examples/javascript/extensions/workspace.js"
+        ))
+        .unwrap();
+    let native_example =
+        hydra_rust::eval(include_str!("../examples/extensions/workspace.hydra")).unwrap();
+    assert_eq!(example.shaders, native_example.shaders);
+    assert_eq!(example.parameters, native_example.parameters);
+    for code in [
+        "parameter('',1,0,2)",
+        "parameter('invalid',3,0,2)",
+        "parameter('invalid',1,2,0)",
+        "parameter('invalid',1,1,1)",
+        "parameter('invalid',true,0,2)",
+        "parameter('invalid',Infinity,0,2)",
+        "parameter('invalid',1.00000001,0,1)",
+        "parameter('invalid',1,1,1.00000001)",
+        "parameter('frequency',10,1,40);parameter('frequency',10,1,50)",
+        "var abandoned=parameter('abandoned',0.5,0,1);throw new Error('cancel')",
+    ] {
+        assert!(js.eval(code).is_err(), "{code}");
+        let restored = js.eval("").unwrap();
+        assert_eq!(restored.shaders, original.shaders);
+        assert_eq!(restored.parameters, original.parameters);
+    }
+    assert!(
+        js.eval("parameter('replacement',0.5,0,1);solid(abandoned).out()")
+            .is_err()
+    );
+    let changed = js
+        .eval("parameter('frequency',5,1,20);osc(frequency).out()")
+        .unwrap();
+    assert_eq!(changed.parameters[0].max, 20.0);
+    assert_eq!(changed.parameters[0].default, 5.0);
+    let oversized = "for(var i=0;i<65;i++)parameter('p'+i,0.5,0,1)";
+    assert!(runtime().eval(oversized).err().unwrap().contains("limit"));
+}
+
+#[test]
 fn modulation_uses_shared_native_shaders_without_callback_slots() {
     for (javascript, rhai) in [
         ("modulation.lfo('sine')", "modulation.lfo('sine')"),
