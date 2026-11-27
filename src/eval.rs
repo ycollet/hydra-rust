@@ -1437,10 +1437,7 @@ fn register_midi(engine: &mut Engine, state: Arc<Mutex<PatchState>>) {
     engine.register_fn(
         "smooth",
         move |signal: MidiSignal, factor: Dynamic| -> MidiResult<GlslExpr> {
-            let factor = factor
-                .as_float()
-                .ok()
-                .or_else(|| factor.as_int().ok().map(|n| n as f64))
+            let factor = crate::numeric::as_number(&factor)
                 .ok_or("MIDI smoothing factor must be a static number in 0..1")?;
             smooth(signal, factor as f32)
         },
@@ -1691,8 +1688,7 @@ fn as_node(d: Dynamic) -> Result<Node, Box<rhai::EvalAltResult>> {
 }
 
 fn dyn_to_f64(d: Dynamic) -> f64 {
-    d.as_float()
-        .unwrap_or_else(|_| d.as_int().map(|i| i as f64).unwrap_or(0.0))
+    crate::numeric::as_number(&d).unwrap_or(0.0)
 }
 
 /// Like `dyn_to_f64`, but returns `None` for anything that isn't a plain
@@ -2692,10 +2688,7 @@ fn eval_impl(
         engine.register_fn(
             name,
             move |node: Node, value: Dynamic| -> Result<Node, Box<rhai::EvalAltResult>> {
-                let number = value
-                    .as_float()
-                    .ok()
-                    .or_else(|| value.as_int().ok().map(|value| value as f64))
+                let number = crate::numeric::as_number(&value)
                     .filter(|value| value.is_finite())
                     .ok_or("Texture arithmetic requires a finite scalar")?;
                 Ok(node.push_blend(
@@ -2995,10 +2988,7 @@ fn eval_impl(
             engine.register_set(
                 name,
                 move |bin: &mut AudioBin, value: Dynamic| -> Result<(), Box<rhai::EvalAltResult>> {
-                    let value = value
-                        .as_float()
-                        .ok()
-                        .or_else(|| value.as_int().ok().map(|n| n as f64))
+                    let value = crate::numeric::as_number(&value)
                         .ok_or("Audio bin settings require a static numeric value")?
                         as f32;
                     let mut st = s.lock().unwrap();

@@ -9,11 +9,8 @@ pub(crate) struct Toolkit;
 type RhaiResult = Result<GlslExpr, Box<rhai::EvalAltResult>>;
 
 pub(crate) fn static_number(value: Dynamic) -> Result<f64, Box<rhai::EvalAltResult>> {
-    let value = value
-        .as_float()
-        .ok()
-        .or_else(|| value.as_int().ok().map(|v| v as f64))
-        .ok_or("Modulation parameters require static numbers")?;
+    let value =
+        crate::numeric::as_number(&value).ok_or("Modulation parameters require static numbers")?;
     number(value)?;
     Ok(value)
 }

@@ -69,6 +69,80 @@ struct ProgramState {
     loc_parameters: Option<glow::UniformLocation>,
 }
 
+impl ProgramState {
+    #[inline]
+    fn upload_uniforms(
+        &self,
+        gl: &glow::Context,
+        u: &RenderUniforms,
+        parameter_values: &[f32; crate::parameters::MAX_PARAMETERS],
+    ) {
+        unsafe {
+            if let Some(ref loc) = self.loc_parameters {
+                gl.uniform_1_f32_slice(Some(loc), parameter_values);
+            }
+
+            if let Some(ref loc) = self.loc_time {
+                gl.uniform_1_f32(Some(loc), u.time);
+            }
+            if let Some(ref loc) = self.loc_beat {
+                gl.uniform_1_f32(Some(loc), u.beat);
+            }
+            if let Some(ref loc) = self.loc_tempo {
+                gl.uniform_1_f32(Some(loc), u.tempo);
+            }
+            if let Some(ref loc) = self.loc_phase {
+                gl.uniform_1_f32(Some(loc), u.phase);
+            }
+            if let Some(ref loc) = self.loc_fft {
+                gl.uniform_1_f32_slice(Some(loc), &u.fft);
+            }
+            if let Some(ref loc) = self.loc_javascript_values {
+                gl.uniform_1_f32_slice(Some(loc), &u.javascript_values);
+            }
+            if let Some(ref loc) = self.loc_audio_rhythm {
+                gl.uniform_3_f32(Some(loc), u.audio.onset, u.audio.beat, u.audio.bpm);
+            }
+            if let Some(ref loc) = self.loc_midi_note {
+                gl.uniform_1_f32_slice(Some(loc), &u.midi_note);
+            }
+            if let Some(ref loc) = self.loc_midi_velocity {
+                gl.uniform_1_f32_slice(Some(loc), &u.midi_velocity);
+            }
+            if let Some(ref loc) = self.loc_midi_cc {
+                gl.uniform_1_f32_slice(Some(loc), &u.midi_cc);
+            }
+            if let Some(ref loc) = self.loc_midi_cc_smoothed {
+                gl.uniform_1_f32_slice(Some(loc), &u.midi_cc_smoothed);
+            }
+            if let Some(ref loc) = self.loc_midi_envelope {
+                gl.uniform_1_f32_slice(Some(loc), &u.midi_envelope);
+            }
+            if let Some(ref loc) = self.loc_midi_aftertouch {
+                gl.uniform_1_f32_slice(Some(loc), &u.midi_aftertouch);
+            }
+            if let Some(ref loc) = self.loc_midi_channel_aftertouch {
+                gl.uniform_1_f32(Some(loc), u.midi_channel_aftertouch);
+            }
+            if let Some(ref loc) = self.loc_midi_values {
+                gl.uniform_1_f32_slice(Some(loc), &u.midi_values);
+            }
+            if let Some(ref loc) = self.loc_osc {
+                gl.uniform_1_f32_slice(Some(loc), &u.osc);
+            }
+            if let Some(loc) = &self.loc_regions {
+                gl.uniform_1_f32_slice(Some(loc), &u.region_values);
+            }
+            if let Some(ref loc) = self.loc_resolution {
+                gl.uniform_2_f32(Some(loc), u.resolution[0], u.resolution[1]);
+            }
+            if let Some(ref loc) = self.loc_mouse {
+                gl.uniform_2_f32(Some(loc), u.mouse[0], u.mouse[1]);
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct BufferTarget {
     fbo: [glow::Framebuffer; 2],
@@ -100,6 +174,15 @@ struct SingleTarget {
     texture: glow::Texture,
 }
 
+impl SingleTarget {
+    fn destroy(&self, gl: &glow::Context) {
+        unsafe {
+            gl.delete_framebuffer(self.fbo);
+            gl.delete_texture(self.texture);
+        }
+    }
+}
+
 #[derive(Default)]
 struct ExtendedTargets {
     passes: Vec<(ProgramState, SingleTarget)>,
@@ -115,16 +198,13 @@ impl ExtendedTargets {
         unsafe {
             for (program, target) in &self.passes {
                 gl.delete_program(program.program);
-                gl.delete_framebuffer(target.fbo);
-                gl.delete_texture(target.texture);
+                target.destroy(gl);
             }
             for target in self.history.iter().flatten() {
-                gl.delete_framebuffer(target.fbo);
-                gl.delete_texture(target.texture);
+                target.destroy(gl);
             }
             if let Some(target) = self.region {
-                gl.delete_framebuffer(target.fbo);
-                gl.delete_texture(target.texture);
+                target.destroy(gl);
             }
         }
     }
@@ -174,8 +254,7 @@ impl Drop for StagedResources {
                 self.gl.delete_program(*program);
             }
             for target in &self.targets {
-                self.gl.delete_framebuffer(target.fbo);
-                self.gl.delete_texture(target.texture);
+                target.destroy(&self.gl);
             }
         }
     }
@@ -199,8 +278,7 @@ impl Drop for ShaderRenderer {
             self.gl.delete_program(self.snapshot.display.program);
             self.gl.delete_shader(self.vertex_shader);
             if let Some((target, _)) = self.snapshot.capture {
-                self.gl.delete_framebuffer(target.fbo);
-                self.gl.delete_texture(target.texture);
+                target.destroy(&self.gl);
             }
             if let Some(tex) = self.snapshot.text_texture {
                 self.gl.delete_texture(tex);
@@ -284,10 +362,7 @@ impl ShaderRenderer {
         }
         let target = Self::create_single(&self.gl, resolution)?;
         if let Some((previous, _)) = self.snapshot.capture.replace((target, resolution)) {
-            unsafe {
-                self.gl.delete_framebuffer(previous.fbo);
-                self.gl.delete_texture(previous.texture);
-            }
+            previous.destroy(&self.gl);
         }
         Ok(())
     }
@@ -871,10 +946,7 @@ impl ShaderRenderer {
             }
         }
         if let Some(target) = previous.region.filter(|_| !regions) {
-            unsafe {
-                self.gl.delete_framebuffer(target.fbo);
-                self.gl.delete_texture(target.texture);
-            }
+            target.destroy(&self.gl);
         }
         for (index, state) in self.snapshot.programs.iter().enumerate() {
             if let Some(state) = state
@@ -1050,67 +1122,7 @@ pub fn render_multipass(
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(target));
             gl.viewport(0, 0, res_w, res_h);
             gl.use_program(Some(p.program));
-            if let Some(ref loc) = p.loc_parameters {
-                gl.uniform_1_f32_slice(Some(loc), &snap.parameter_values);
-            }
-
-            if let Some(ref loc) = p.loc_time {
-                gl.uniform_1_f32(Some(loc), u.time);
-            }
-            if let Some(ref loc) = p.loc_beat {
-                gl.uniform_1_f32(Some(loc), u.beat);
-            }
-            if let Some(ref loc) = p.loc_tempo {
-                gl.uniform_1_f32(Some(loc), u.tempo);
-            }
-            if let Some(ref loc) = p.loc_phase {
-                gl.uniform_1_f32(Some(loc), u.phase);
-            }
-            if let Some(ref loc) = p.loc_fft {
-                gl.uniform_1_f32_slice(Some(loc), &u.fft);
-            }
-            if let Some(ref loc) = p.loc_javascript_values {
-                gl.uniform_1_f32_slice(Some(loc), &u.javascript_values);
-            }
-            if let Some(ref loc) = p.loc_audio_rhythm {
-                gl.uniform_3_f32(Some(loc), u.audio.onset, u.audio.beat, u.audio.bpm);
-            }
-            if let Some(ref loc) = p.loc_midi_note {
-                gl.uniform_1_f32_slice(Some(loc), &u.midi_note);
-            }
-            if let Some(ref loc) = p.loc_midi_velocity {
-                gl.uniform_1_f32_slice(Some(loc), &u.midi_velocity);
-            }
-            if let Some(ref loc) = p.loc_midi_cc {
-                gl.uniform_1_f32_slice(Some(loc), &u.midi_cc);
-            }
-            if let Some(ref loc) = p.loc_midi_cc_smoothed {
-                gl.uniform_1_f32_slice(Some(loc), &u.midi_cc_smoothed);
-            }
-            if let Some(ref loc) = p.loc_midi_envelope {
-                gl.uniform_1_f32_slice(Some(loc), &u.midi_envelope);
-            }
-            if let Some(ref loc) = p.loc_midi_aftertouch {
-                gl.uniform_1_f32_slice(Some(loc), &u.midi_aftertouch);
-            }
-            if let Some(ref loc) = p.loc_midi_channel_aftertouch {
-                gl.uniform_1_f32(Some(loc), u.midi_channel_aftertouch);
-            }
-            if let Some(ref loc) = p.loc_midi_values {
-                gl.uniform_1_f32_slice(Some(loc), &u.midi_values);
-            }
-            if let Some(ref loc) = p.loc_osc {
-                gl.uniform_1_f32_slice(Some(loc), &u.osc);
-            }
-            if let Some(loc) = &p.loc_regions {
-                gl.uniform_1_f32_slice(Some(loc), &u.region_values);
-            }
-            if let Some(ref loc) = p.loc_resolution {
-                gl.uniform_2_f32(Some(loc), u.resolution[0], u.resolution[1]);
-            }
-            if let Some(ref loc) = p.loc_mouse {
-                gl.uniform_2_f32(Some(loc), u.mouse[0], u.mouse[1]);
-            }
+            p.upload_uniforms(gl, &u, &snap.parameter_values);
 
             for (j, loc) in p.loc_buffers.iter().enumerate() {
                 if let Some(loc) = loc {
